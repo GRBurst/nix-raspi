@@ -4,3 +4,4 @@
 .nixcache/
 .rpi-build.log
 result
+.rpi-build/
