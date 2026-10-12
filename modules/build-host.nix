@@ -29,8 +29,10 @@
   cfg = config.rpi.buildHost;
 
   # Optionally pre-set RPI_FLAKE so `rpi-install` works without --flake.
-  # The quoted heredoc terminator must land at column 0 after nix's
-  # indentation stripping (see the unindented EOF below).
+  # NOTE: the heredoc body must stay at column 0 — nix strips the MINIMAL
+  # indentation of a long string, and a line at column 0 disables stripping
+  # for the whole string. A shebang with leading spaces is not a shebang,
+  # so the body (and only the body) sits at column 0.
   scriptPackage =
     if cfg.flakePath != "" then
       pkgs.stdenv.mkDerivation {
@@ -40,8 +42,9 @@
         installPhase = ''
           mkdir -p $out/bin
           cat > $out/bin/rpi-install <<'EOF'
-          export RPI_FLAKE="${cfg.flakePath}"
-          exec ${cfg.installScript}/bin/rpi-install "$@"
+#!/usr/bin/env bash
+export RPI_FLAKE="${cfg.flakePath}"
+exec ${cfg.installScript}/bin/rpi-install "$@"
 EOF
           chmod 755 $out/bin/rpi-install
         '';
