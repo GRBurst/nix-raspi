@@ -40,11 +40,12 @@ configuration or graphics problem).
    from the **working tree**, not the commit (the `Git tree is dirty` warning
    refers to that), so the commit should record what you are installing.
 
-3. (Recommended) Build the system closure first, so the long part happens
-   before the install and can be resumed/retried independently:
+3. Build the system closure **in the host store**, in a long-lived terminal
+   (tmux/screen — this is a multi-hour build):
 
    ```sh
-   nix build /media/nixos/etc/nixos#nixosConfigurations.rpi.config.system.build.toplevel
+   cd /media/nixos/etc/nixos
+   nix build .#nixosConfigurations.rpi.config.system.build.toplevel --print-build-logs 2>&1 | tee .rpi-build.log
    ```
 
    Everything is fetched from `cache.nixos.org` **except the kernel**: nixpkgs
@@ -55,14 +56,30 @@ configuration or graphics problem).
    nixos-hardware defconfig is very large), once per kernel pin. A
    `nixos-hardware` update rotates the pin and triggers another one-time
    build; until then, repeated builds are fast (host `/nix/store` cache).
+   The command prints the result path, e.g.
+   `/nix/store/<hash>-nixos-system-neptun-...`.
 
-4. Install (reuses step 3's results; only final assembly remains):
+   > **Why this step:** `nixos-install --root X` does not build in the host
+   > store — it runs `nix build ... --store X`, i.e. it builds the whole
+   > closure (kernel included) directly into the target's `/nix/store` as
+   > root. Do the multi-hour cross build in the host store instead, and copy
+   > the result over (step 4), so the install has nothing to build.
+
+4. Copy the built closure into the target store (fast local copy, a few
+   minutes):
+
+   ```sh
+   sudo nix copy --from /nix --to /media/nixos /nix/store/<hash>-nixos-system-neptun-...
+   ```
+
+5. Install — with everything present in the target store, this performs no
+   cross builds at all and only assembles the final system + boot files:
 
    ```sh
    sudo nixos-install --root /media/nixos --flake /media/nixos/etc/nixos#rpi
    ```
 
-5. Boot the Pi and sanity-check:
+6. Boot the Pi and sanity-check:
 
    ```sh
    ssh -p 2222 pi@<pi-address>   # zsh + nix-terminal prompt
