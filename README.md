@@ -27,64 +27,84 @@ Without it, every aarch64 derivation fails with
 `builder failed with exit code 255` (that is an emulation problem, not a
 configuration or graphics problem).
 
-### Steps
+### Quick path: `./install.sh`
 
-1. Mount the SD card (standard NixOS layout: FAT/ESP boot partition + ext4
-   root partition containing this flake under `etc/nixos`):
+```sh
+sudo mkdir -p /media/nixos && sudo mount /dev/sdXn /media/nixos   # mount the SD root partition
+cd /media/nixos/etc/nixos
+tmux new -s rpi   # the first build takes hours — don't let a closed terminal kill it
+./install.sh            # add --mount DIR if the card is mounted elsewhere
+```
 
-   ```sh
-   sudo mkdir -p /media/nixos && sudo mount /dev/sdXn /media/nixos
-   ```
+`install.sh` (run as a regular user; it re-execs under sudo only where
+needed, so the build never runs as root) does, in order:
 
-2. Commit any configuration changes first — `nixos-install --flake` builds
-   from the **working tree**, not the commit (the `Git tree is dirty` warning
-   refers to that), so the commit should record what you are installing.
+1. **Preflight** — checks the flake location, active aarch64 binfmt/qemu
+   emulation, and the sandbox `extra-sandbox-paths`, with actionable errors
+   instead of obscure 255s.
+2. **Build** the system in the **host store** (`nix build
+   .#nixosConfigurations.rpi.config.system.build.toplevel`). On failure it
+   prints the relevant log tail plus hints for the known failure modes.
+3. **Copy** the built closure (system path + toplevel drv + flake sources)
+   onto the card: `nix copy --from /nix --to <mount>`.
+4. **Install**: `sudo nixos-install --root <mount> --flake <mount>/etc/nixos#rpi`
+   — with the target store pre-populated, no cross builds happen here.
+5. **Verify** the result (`etc/NIXOS`, store path count, `boot/kernel8.img`).
 
-3. Build the system closure **in the host store**, in a long-lived terminal
-   (tmux/screen — this is a multi-hour build):
+The script is idempotent — re-run it after config changes; the build step is
+a fast no-op when nothing changed.
+
+> **Why not just `nixos-install`?** It does not build in the host store: it
+> runs `nix build ... --store <mount>`, i.e. it compiles the whole closure
+> (kernel included) directly into the card's `/nix/store`, as root, with build
+> temp files on the SD. That is slow, wears the card, and repeats in full
+> after every re-flash. Building in the host store once and copying over
+> makes re-flashing a matter of minutes.
+
+### What the build does, in detail
+
+Everything is fetched from `cache.nixos.org` **except the kernel**: nixpkgs
+no longer builds Raspberry Pi kernels ("linux-rpi series has been removed,
+please change to use nixos-hardware"), so the `nixos-hardware` `linux-rpi`
+kernel is compiled locally, under qemu user-mode emulation — expect several
+hours (observed: ~8 h on a 16-core x86_64 host; the nixos-hardware defconfig
+is very large), once per kernel pin. A `nixos-hardware` update rotates the
+pin and triggers another one-time build; until then, repeated builds are fast
+(host `/nix/store` cache).
+
+### Manual equivalent (for troubleshooting)
+
+1. Build in the host store:
 
    ```sh
    cd /media/nixos/etc/nixos
    nix build .#nixosConfigurations.rpi.config.system.build.toplevel --print-build-logs 2>&1 | tee .rpi-build.log
    ```
 
-   Everything is fetched from `cache.nixos.org` **except the kernel**: nixpkgs
-   no longer builds Raspberry Pi kernels ("linux-rpi series has been removed,
-   please change to use nixos-hardware"), so the `nixos-hardware`
-   `linux-rpi` kernel is compiled locally, under qemu user-mode emulation —
-   expect several hours (observed: ~8 h on a 16-core x86_64 host; the
-   nixos-hardware defconfig is very large), once per kernel pin. A
-   `nixos-hardware` update rotates the pin and triggers another one-time
-   build; until then, repeated builds are fast (host `/nix/store` cache).
-   The command prints the result path, e.g.
-   `/nix/store/<hash>-nixos-system-neptun-...`.
-
-   > **Why this step:** `nixos-install --root X` does not build in the host
-   > store — it runs `nix build ... --store X`, i.e. it builds the whole
-   > closure (kernel included) directly into the target's `/nix/store` as
-   > root. Do the multi-hour cross build in the host store instead, and copy
-   > the result over (step 4), so the install has nothing to build.
-
-4. Copy the built closure into the target store (fast local copy, a few
-   minutes):
+2. Copy the closure **and the toplevel drv** (the drv pulls the flake
+   sources into the target store, so the install doesn't re-fetch them):
 
    ```sh
-   sudo nix copy --from /nix --to /media/nixos /nix/store/<hash>-nixos-system-neptun-...
+   sys=$(nix build .#nixosConfigurations.rpi.config.system.build.toplevel --print-out-paths)
+   drv=$(nix eval --raw .#nixosConfigurations.rpi.config.system.build.toplevel.drvPath)
+   sudo nix copy --from /nix --to /media/nixos "$sys" "$drv"
    ```
 
-5. Install — with everything present in the target store, this performs no
-   cross builds at all and only assembles the final system + boot files:
+3. Install (no cross builds happen):
 
    ```sh
    sudo nixos-install --root /media/nixos --flake /media/nixos/etc/nixos#rpi
    ```
 
-6. Boot the Pi and sanity-check:
+4. Boot the Pi and sanity-check:
 
    ```sh
    ssh -p 2222 pi@<pi-address>   # zsh + nix-terminal prompt
-   sudo nixos-rebuild switch     # only if the flake changed after the install
    ```
+
+   Commit the flake once that works, so the commit records what is installed
+   (`nixos-install --flake` builds from the **working tree**, not the commit —
+   the `Git tree is dirty` warning refers to that).
 
 ### Notes
 
