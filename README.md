@@ -194,12 +194,44 @@ with the store pre-populated, or `devenv`/`deploy-rs`). Not implemented here;
 the current `rpi-install install` flow is the card-based baseline that it
 replaces.
 
-## Development
+## Testing
+
+Three layers, all wired into `nix flake check`:
 
 ```sh
-nix flake check                                   # syntax check of install.sh, both systems
+nix flake check                                   # everything below
+nix build .#checks.x86_64-linux.rpi-install-unit  # 59 unit tests for install.sh
+nix build .#checks.x86_64-linux.rpi-host-vm       # boots a real VM (qemu), ~1-16 min
+nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module, eval-only proof
+```
+
+1. **`rpi-install-syntax`** (both systems) — `bash -n` of the script.
+2. **`rpi-install-unit`** (`tests/install-unit.sh`, x86_64) — 59 unit tests
+   with mocked `nix`/`nixos-install`: preflight fail/success, build record
+   round-trip (all fields), `show`, install verification incl. a failing
+   store copy, `--from` with/without record, attr mismatch, HEAD-moved and
+   dirty-tree warnings. binfmt locations are injectable via
+   `RPI_BINMFT_DIR`/`RPI_BINMFT_RUN`.
+3. **`rpi-host-vm`** (`checks.x86_64-linux.rpi-host-vm`) — boots an x86_64
+   NixOS VM with the build-host module enabled and asserts the observable
+   reality: `nix` accepts flakes (experimental features from the module),
+   the `aarch64-linux` binfmt handler is registered in
+   `/proc/sys/fs/binfmt_misc`, an **aarch64 binary actually executes**
+   under emulation, the installed `rpi-install` is the `RPI_FLAKE` wrapper
+   pointing at `rpi.buildHost.flakePath`, and the script's own dry-run
+   flows (including its emulation preflight) pass inside the VM.
+
+   Note: the VM test needs `rpi.buildHost.enable = true` set by itself —
+   the exported `nixosModules.rpiBuildHost` deliberately only wires the
+   module in (opt-in design).
+
+In addition, flake evaluation enforces **contract asserts** on the host
+module config (binfmt list, extra-platforms, experimental features,
+sandbox paths, wrapper package present) — any drift fails every flake
+operation fast.
+
+```sh
 nix build .#packages.x86_64-linux.rpi-install     # the script as a package
-nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module test
 ```
 
 ## Notes

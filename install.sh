@@ -32,6 +32,10 @@ MOUNT="/media/nixos"
 ATTR="rpi"
 FROM=""
 DRY_RUN=0
+# Locations of binfmt registration state. Overridable via RPI_BINMFT_* so the
+# preflight logic is unit-testable without real qemu/binfmt setup.
+BINMFT_DIR="${RPI_BINMFT_DIR:-/proc/sys/fs/binfmt_misc}"
+BINMFT_RUN="${RPI_BINMFT_RUN:-/run/binfmt}"
 
 usage() {
   cat <<'EOF'
@@ -97,8 +101,10 @@ require_nix() {
 }
 
 check_binfmt() {
-  # qemu-aarch64 binfmt registration (NixOS: boot.binfmt.emulatedSystems).
-  if [[ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]] || [[ -e /run/binfmt ]]; then
+  # aarch64 binfmt registration (NixOS: boot.binfmt.emulatedSystems).
+  # The handler is named "aarch64-linux" by current NixOS (older setups:
+  # "qemu-aarch64"), and /run/binfmt holds the emulators either way.
+  if [[ -e "$BINMFT_DIR/aarch64-linux" || -e "$BINMFT_DIR/qemu-aarch64" || -e "$BINMFT_RUN" ]]; then
     echo "aarch64 binfmt  : present"
   else
     echo "aarch64 binfmt  : NOT FOUND (cross build will fail with 255)"
@@ -108,8 +114,8 @@ check_binfmt() {
 # Full emulation preflight; exits non-zero if the build would fail.
 check_emulation() {
   local ok=1
-  if [[ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 && ! -e /run/binfmt ]]; then
-    warn "no aarch64 binfmt handler found (/proc/sys/fs/binfmt_misc/qemu-aarch64 or /run/binfmt)"
+  if [[ ! -e "$BINMFT_DIR/aarch64-linux" && ! -e "$BINMFT_DIR/qemu-aarch64" && ! -e "$BINMFT_RUN" ]]; then
+    warn "no aarch64 binfmt handler found ($BINMFT_DIR/{aarch64-linux,qemu-aarch64} or $BINMFT_RUN)"
     ok=0
   fi
   if ! nix show-config 2>/dev/null | grep -q 'extra-platforms.*aarch64-linux'; then
