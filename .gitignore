@@ -1,4 +1,6 @@
-secrets
+!/secrets
+/secrets/*
+!/secrets/wireless.env.example
 .nixcache/
 .rpi-build.log
 result
