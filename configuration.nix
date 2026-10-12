@@ -64,15 +64,30 @@
   #     size = 10240;
   #   }
   # ];
-  boot.cleanTmpDir = true;
 
-  nix.maxJobs = 3;
-  nix.buildCores = 3;
+  # Compressed in-RAM swap (512 MiB on the 1 GiB RPi 3). Gives autoUpgrade
+  # builds and the nix daemon headroom without any SD-card writes.
+  # Remove this block if you prefer no swap at all.
+  zramSwap = {
+    enable = true;
+    memoryPercent = 50;
+  };
 
-  nix.gc.automatic = true;
-  nix.gc.dates = "monthly";
-  nix.gc.options = "--delete-older-than 7d";
-  nix.daemonIONiceLevel = 7;
+  boot.tmp.cleanOnBoot = true;
+
+  nix = {
+    settings = {
+      max-jobs = 3;
+      cores = 3;
+    };
+    gc = {
+      automatic = true;
+      dates = "monthly";
+      options = "--delete-older-than 7d";
+    };
+    daemonIOSchedPriority = 7;
+  };
+
   system.autoUpgrade.enable = true;
   system.autoUpgrade.dates = "03:30";
 
@@ -91,8 +106,10 @@
     openssh = {
       enable = true;
       ports = [2222];
-      passwordAuthentication = false;
-      permitRootLogin = "no";
+      settings = {
+        PasswordAuthentication = false;
+        PermitRootLogin = "no";
+      };
       #  usePAM = false;
       # gatewayPorts = "clientspecified"; # bind ssh reverse tunnel to public interface https://superuser.com/a/591963
     };
@@ -128,7 +145,7 @@
 
   networking.wireless = {
     enable = true;
-    userControlled.enable = true;
+    userControlled = true;
 
     secretsFile = "/etc/nixos/secrets/wireless.env";
     networks = {
@@ -140,9 +157,11 @@
 
   i18n = {
     # consoleFont = "Lat2-Terminus16";
-    consoleKeyMap = "neo";
     defaultLocale = "en_US.UTF-8";
   };
+
+  # Renamed from i18n.consoleKeyMap (26.11)
+  console.keyMap = "neo";
 
   programs = {
     screen = {
@@ -179,6 +198,8 @@
     # zsh is provided by the nix-terminal kit (home-manager); make it the login shell
     shell = pkgs.zsh;
     openssh.authorizedKeys.keys = [
+      # TODO: add the host's deploy/ssh public key (needed for the
+      # remote-install follow-up: nixos-rebuild --flake <host-repo>#rpi via ssh)
     ];
   };
 
