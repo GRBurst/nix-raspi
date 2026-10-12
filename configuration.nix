@@ -99,18 +99,18 @@
     # sshd.usePAM = false;
 
     journald = {
-      # settings.Journal = {
-      #   Storage = "volatile";
-      #   Compress = "yes";
-      #   SystemMaxUse = "128M";
-      #   RuntimeMaxUse = "8M";
-      # };
-      extraConfig = ''
-        Storage=volatile
-        Compress=yes
-        SystemMaxUse=128M
-        RuntimeMaxUse=8M
-      '';
+      settings.Journal = {
+        Storage = "volatile";
+        Compress = "yes";
+        SystemMaxUse = "128M";
+        RuntimeMaxUse = "8M";
+      };
+      # extraConfig = ''
+      #   Storage=volatile
+      #   Compress=yes
+      #   SystemMaxUse=128M
+      #   RuntimeMaxUse=8M
+      # '';
     };
   };
 
@@ -176,10 +176,16 @@
   users.users.pi = {
     isNormalUser = true;
     extraGroups = ["wheel" "docker" "video"];
-    useDefaultShell = true;
+    # zsh is provided by the nix-terminal kit (home-manager); make it the login shell
+    shell = pkgs.zsh;
     openssh.authorizedKeys.keys = [
     ];
   };
+
+  # NixOS requires the login shell to be an enabled shell program (see the
+  # users.users.<name>.shell assertion); the actual zsh configuration comes
+  # from the nix-terminal kit in the home-manager scope.
+  programs.zsh.enable = true;
 
   system.stateVersion = "26.05";
 }

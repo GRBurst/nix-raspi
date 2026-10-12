@@ -14,6 +14,7 @@
     nix-terminal = {
       url = "github:grburst/nix-terminal";
       inputs.nixpkgs.follows = "nixpkgs";
+      inputs.home-manager.follows = "home-manager";
     };
 
     llm-agents.url = "github:numtide/llm-agents.nix";
@@ -37,13 +38,15 @@
 
         ./configuration.nix
 
-        nix-terminal.homeModules.default
         # Integrate Home Manager as a NixOS module
         home-manager.nixosModules.home-manager
         {
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
           home-manager.extraSpecialArgs = {inherit inputs;};
+          # nix-terminal options are Home Manager options, so the module
+          # belongs in the HM scope (sharedModules), not in the NixOS list.
+          home-manager.sharedModules = [ nix-terminal.homeModules.default ];
           home-manager.users.pi = import ./home.nix;
         }
       ];

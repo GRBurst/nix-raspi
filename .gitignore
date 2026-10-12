@@ -1,1 +1,4 @@
 secrets
+.nixcache/
+.rpi-build.log
+result
