@@ -110,8 +110,12 @@ rpi-install build                  # build from the checkout, record the result
 rpi-install show                   # last build record + emulation preflight
 # ... later, with the card mounted at /media/nixos:
 rpi-install install                # install the recorded build (minutes)
+rpi-install install /media/nixos   # same, with an explicit target system root
 rpi-install all                    # build + install in one go (old behaviour)
 ```
+
+Usage: `rpi-install [build|install|all|show] [TARGET] [OPTIONS]`. `TARGET` is the
+root of the target NixOS system (default `/media/nixos`; same as `--mount`).
 
 Options: `--flake PATH` (default `$RPI_FLAKE` or `$PWD`), `--mount DIR`
 (default `/media/nixos`), `--attr NAME` (default `rpi`), `--from STOREPATH`

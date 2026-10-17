@@ -345,6 +345,15 @@ expect_exit "default subcommand (all --dry-run): exit 0" 0
 expect_grep "all: ran build phase" "dry-run: nix build"
 expect_grepf "all: ran install phase" "dry-run: nixos-install --root $C20 --flake $F20#rpi"
 
+# 21. positional target path (same as --mount); a second one is rejected
+F21="$(new_flake t21)"; C21="$(new_card t21)"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F21" "$C21"
+expect_exit "positional target: exit 0" 0
+expect_grepf "positional target: nixos-install root" "dry-run: nixos-install --root $C21 --flake $F21#rpi"
+run_cmd bash "$SCRIPT" install --flake "$F21" "$C21" /other
+expect_exit "two targets: exit 2" 2
+expect_grep "two targets: message" "multiple target paths"
+
 # --- summary -----------------------------------------------------------------
 echo
 echo "rpi-install unit tests: $pass passed, $fail failed"
