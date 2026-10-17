@@ -66,6 +66,7 @@ EOF
 }
 
 # --- argument parsing -------------------------------------------------------
+ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     build|install|all|show)
@@ -87,6 +88,14 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 [[ -z "$SUBCOMMAND" ]] && SUBCOMMAND="all"
+
+# The long build must not run as root (root-owned results, .rpi-build state).
+# If started via sudo, re-exec as the invoking user; sudo is used only for the
+# card copy and nixos-install.
+if [[ "$EUID" -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  echo "==> re-executing as '$SUDO_USER' (build as regular user; sudo only for copy/install)" >&2
+  exec sudo -u "$SUDO_USER" env "PATH=$PATH" "$0" "${ORIG_ARGS[@]}"
+fi
 
 FLAKE="$(cd "$FLAKE" 2>/dev/null && pwd)" || { echo "error: flake path does not exist: ${FLAKE}" >&2; exit 1; }
 STATE="$FLAKE/.rpi-build"
@@ -197,7 +206,16 @@ do_build() {
     # --print-build-logs streams the build; a second call is a fast no-op that
     # just reports the output path.
     local sys
-    ( cd "$FLAKE" && nix build "$TOPOLEVEL" --print-build-logs ) 2>&1 | tee "$STATE/build.log"
+    if ! ( cd "$FLAKE" && nix build "$TOPOLEVEL" --print-build-logs ) 2>&1 | tee "$STATE/build.log"; then
+      echo "--- last 30 lines of the build log ($STATE/build.log) ---" >&2
+      tail -30 "$STATE/build.log" | sed 's/^/  | /' >&2
+      if grep -q "failed with exit code 255" "$STATE/build.log"; then
+        warn "hint: exit code 255 = the aarch64 builder could not be exec'd under qemu; re-check binfmt and extra-sandbox-paths"
+      elif grep -qiE '\bkilled\b|out of memory' "$STATE/build.log"; then
+        warn "hint: build process killed, likely out of memory (an emulated kernel build needs a lot of RAM)"
+      fi
+      die "build failed (full log: $STATE/build.log)"
+    fi
     sys="$(cd "$FLAKE" && nix build "$TOPOLEVEL" --print-out-paths)"
     [[ -n "$sys" && -d "$sys" ]] || die "build did not produce an output"
 
@@ -299,6 +317,8 @@ do_install() {
     drvname="$(basename "$drv")"
     [[ -d "$MOUNT/nix/store/$sysname" && -d "$MOUNT/nix/store/$drvname" ]] \
       || die "verification failed: system or drv not found in target store"
+    [[ -e "$MOUNT/etc/NIXOS" ]] || warn "missing $MOUNT/etc/NIXOS; the install may be incomplete"
+    [[ -e "$MOUNT/boot/kernel8.img" ]] || warn "no $MOUNT/boot/kernel8.img; check the boot partition before booting"
     log "installed $sysname onto $MOUNT"
   fi
 }
