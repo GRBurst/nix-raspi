@@ -156,6 +156,31 @@ is very large), once per kernel pin. A `nixos-hardware` update rotates the
 pin and triggers another one-time build; until then, repeated builds are fast
 (host `/nix/store` cache).
 
+### Manual equivalent (for troubleshooting)
+
+Run from the checkout; this is what `rpi-install all` does:
+
+```sh
+T=.#nixosConfigurations.rpi.config.system.build.toplevel
+
+# 1. build in the host store (as your user, never root)
+nix build $T --print-build-logs 2>&1 | tee .rpi-build.log
+
+# 2. copy the closure AND the toplevel drv (the drv pulls the flake sources
+#    into the target store, so the install does not re-fetch them)
+sys=$(nix build $T --print-out-paths)
+drv=$(nix eval --raw $T.drvPath)
+sudo nix copy --no-check-sigs --to /media/nixos "$sys" "$drv"
+
+# 3. install (nothing is built here)
+sudo nixos-install --root /media/nixos --flake .#rpi
+
+# 4. boot the pi, then: ssh -p 2222 pi@<pi-address>
+```
+
+`nixos-install --flake` builds from the **working tree**, not the commit;
+commit once the pi boots so the commit records what is installed.
+
 ## Pi (client) configuration
 
 Notes on the client side, evaluated and applied:
@@ -204,13 +229,13 @@ Three layers, all wired into `nix flake check`:
 
 ```sh
 nix flake check                                   # everything below
-nix build .#checks.x86_64-linux.rpi-install-unit  # 59 unit tests for install.sh
+nix build .#checks.x86_64-linux.rpi-install-unit  # 72 unit tests for install.sh
 nix build .#checks.x86_64-linux.rpi-host-vm       # boots a real VM (qemu), ~1-16 min
 nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module, eval-only proof
 ```
 
 1. **`rpi-install-syntax`** (both systems) — `bash -n` of the script.
-2. **`rpi-install-unit`** (`tests/install-unit.sh`, x86_64) — 59 unit tests
+2. **`rpi-install-unit`** (`tests/install-unit.sh`, x86_64) — 72 unit tests
    with mocked `nix`/`nixos-install`: preflight fail/success, build record
    round-trip (all fields), `show`, install verification incl. a failing
    store copy, `--from` with/without record, attr mismatch, HEAD-moved and

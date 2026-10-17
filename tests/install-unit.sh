@@ -64,6 +64,12 @@ case " $* " in
     mkdir -p "$MOCK_SYS"
     printf '%s\n' "$MOCK_SYS"
     ;;
+  *" --print-build-logs "*)
+    case "${MOCK_BUILD_FAIL:-}" in
+      255) echo "error: builder for '/nix/store/x.drv' failed with exit code 255" ; exit 1 ;;
+      oom) echo "Killed"; exit 1 ;;
+    esac
+    ;;
   *" copy "*" --to "*)
     if [[ "${MOCK_COPY:-1}" == 1 ]]; then
       state="pre"; target=""
@@ -359,6 +365,24 @@ expect_grepf "positional target: nixos-install root" "dry-run: sudo nixos-instal
 run_cmd bash "$SCRIPT" install --flake "$F21" "$C21" /other
 expect_exit "two targets: exit 2" 2
 expect_grep "two targets: message" "multiple target paths"
+
+# 22. build failure shows log tail + hint, writes no record
+F22="$(new_flake t22)"
+run_cmd env "${EMUL_OK[@]}" MOCK_BUILD_FAIL=255 bash "$SCRIPT" build --flake "$F22"
+expect_exit "build failure (255): exit 1" 1
+expect_grep "build failure (255): hint" "could not be exec'd under qemu"
+expect_grep "build failure: message" "build failed"
+expect_true "build failure: no record written" test ! -f "$F22/.rpi-build/last"
+run_cmd env "${EMUL_OK[@]}" MOCK_BUILD_FAIL=oom bash "$SCRIPT" build --flake "$F22"
+expect_exit "build failure (oom): exit 1" 1
+expect_grep "build failure (oom): hint" "out of memory"
+
+# 23. install warns when the card lacks etc/NIXOS and boot/kernel8.img
+C23="$(new_card t23)"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C23"
+expect_exit "install (incomplete card): exit 0" 0
+expect_grep "install: warns missing etc/NIXOS" "etc/NIXOS"
+expect_grep "install: warns missing kernel8.img" "kernel8.img"
 
 # --- summary -----------------------------------------------------------------
 echo
