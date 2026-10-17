@@ -64,14 +64,14 @@ case " $* " in
     mkdir -p "$MOCK_SYS"
     printf '%s\n' "$MOCK_SYS"
     ;;
-  *" copy --to "*)
+  *" copy "*" --to "*)
     if [[ "${MOCK_COPY:-1}" == 1 ]]; then
       state="pre"; target=""
       for a in "$@"; do
         case "$state" in
           pre)        [[ "$a" == "--to" ]] && state="wanttarget" ;;
           wanttarget) target="$a"; state="paths" ;;
-          paths)      mkdir -p "$target/store/$(basename "$a")" ;;
+          paths)      mkdir -p "$target/nix/store/$(basename "$a")" ;;
         esac
       done
     fi
@@ -80,14 +80,20 @@ esac
 exit 0
 MOCK
 
+# Mock `sudo`: runs the command unprivileged.
+cat > "$BIN/sudo" <<'MOCK'
+#!BASHPLACEHOLDER
+exec "$@"
+MOCK
+
 # Mock `nixos-install`: records its args, succeeds.
 cat > "$BIN/nixos-install" <<'MOCK'
 #!BASHPLACEHOLDER
 echo "nixos-install $*" >> "$MOCK_LOG"
 exit 0
 MOCK
-sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/nix" "$BIN/nixos-install"
-chmod 755 "$BIN/nix" "$BIN/nixos-install"
+sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/nix" "$BIN/nixos-install" "$BIN/sudo"
+chmod 755 "$BIN/nix" "$BIN/nixos-install" "$BIN/sudo"
 export PATH="$BIN:$PATH"
 
 # binfmt fixtures for the emulation preflight
@@ -275,8 +281,8 @@ expect_grepf "show: prints recorded system" "$MOCK_SYS"
 C11="$(new_card t11)"
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C11"
 expect_exit "install --dry-run: exit 0" 0
-expect_grep "install --dry-run: store copy" "dry-run: nix --extra-root-dir"
-expect_grepf "install --dry-run: nixos-install args" "dry-run: nixos-install --root $C11 --flake $F9#rpi"
+expect_grep "install --dry-run: store copy" "dry-run: sudo nix copy --no-check-sigs --to"
+expect_grepf "install --dry-run: nixos-install args" "dry-run: sudo nixos-install --root $C11 --flake $F9#rpi"
 
 # 12. real install with missing card
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$T/no-card"
@@ -331,7 +337,7 @@ expect_grep "install (dirty tree): warning" "uncommitted changes"
 F18="$(new_flake t18)"; C18="$(new_card t18)"
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --from "$MOCK_SYS" --dry-run --flake "$F18" --mount "$C18"
 expect_exit "install --from (dry-run, no record): exit 0" 0
-expect_grepf "install --from: nixos-install args" "dry-run: nixos-install --root $C18 --flake $F18#rpi"
+expect_grepf "install --from: nixos-install args" "dry-run: sudo nixos-install --root $C18 --flake $F18#rpi"
 
 # 19. install --from without any build record (real mode, drv via eval mock)
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" MOCK_COPY=1 bash "$SCRIPT" install --from "$MOCK_SYS" --flake "$F18" --mount "$C18"
@@ -343,13 +349,13 @@ F20="$(new_flake t20)"; C20="$(new_card t20)"
 run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" --dry-run --flake "$F20" --mount "$C20"
 expect_exit "default subcommand (all --dry-run): exit 0" 0
 expect_grep "all: ran build phase" "dry-run: nix build"
-expect_grepf "all: ran install phase" "dry-run: nixos-install --root $C20 --flake $F20#rpi"
+expect_grepf "all: ran install phase" "dry-run: sudo nixos-install --root $C20 --flake $F20#rpi"
 
 # 21. positional target path (same as --mount); a second one is rejected
 F21="$(new_flake t21)"; C21="$(new_card t21)"
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F21" "$C21"
 expect_exit "positional target: exit 0" 0
-expect_grepf "positional target: nixos-install root" "dry-run: nixos-install --root $C21 --flake $F21#rpi"
+expect_grepf "positional target: nixos-install root" "dry-run: sudo nixos-install --root $C21 --flake $F21#rpi"
 run_cmd bash "$SCRIPT" install --flake "$F21" "$C21" /other
 expect_exit "two targets: exit 2" 2
 expect_grep "two targets: message" "multiple target paths"
