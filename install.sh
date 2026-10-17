@@ -12,6 +12,9 @@
 #   all        build + install (default when no subcommand is given)
 #   show       show the last build record and host preflight status
 #
+# Usage: install.sh [build|install|all|show] [TARGET] [OPTIONS]
+#   TARGET         root of the target NixOS system (default: /media/nixos)
+#
 # Options:
 #   --flake PATH   path to the flake checkout (default: $RPI_FLAKE or $PWD)
 #   --mount DIR    SD card mount point (default: /media/nixos)
@@ -29,6 +32,7 @@ set -euo pipefail
 SUBCOMMAND=""
 FLAKE="${RPI_FLAKE:-$PWD}"
 MOUNT="/media/nixos"
+MOUNT_SET=0
 ATTR="rpi"
 FROM=""
 DRY_RUN=0
@@ -39,7 +43,10 @@ BINMFT_RUN="${RPI_BINMFT_RUN:-/run/binfmt}"
 
 usage() {
   cat <<'EOF'
-Usage: rpi-install [build|install|all|show] [OPTIONS]
+Usage: rpi-install [build|install|all|show] [TARGET] [OPTIONS]
+
+  TARGET     root of the target NixOS system, e.g. /media/nixos
+             (default: /media/nixos; same as --mount)
 
   build      build from the local checkout (no SD card needed)
   install    install the last recorded build (card must be mounted)
@@ -64,12 +71,16 @@ while [[ $# -gt 0 ]]; do
       SUBCOMMAND="$1"
       ;;
     --flake) FLAKE="$2"; shift ;;
-    --mount) MOUNT="$2"; shift ;;
+    --mount) MOUNT="$2"; MOUNT_SET=1; shift ;;
     --attr) ATTR="$2"; shift ;;
     --from) FROM="$2"; shift ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    -*) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    *)
+      [[ "$MOUNT_SET" -eq 1 ]] && { echo "error: multiple target paths ($MOUNT, $1)" >&2; exit 2; }
+      MOUNT="$1"; MOUNT_SET=1
+      ;;
   esac
   shift
 done
