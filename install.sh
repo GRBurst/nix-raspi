@@ -36,6 +36,8 @@ MOUNT_SET=0
 ATTR="rpi"
 FROM=""
 DRY_RUN=0
+# The card store and nixos-install need root; the build itself never does.
+SUDO="sudo"; [[ "$EUID" -eq 0 ]] && SUDO=""
 # Locations of binfmt registration state. Overridable via RPI_BINMFT_* so the
 # preflight logic is unit-testable without real qemu/binfmt setup.
 BINMFT_DIR="${RPI_BINMFT_DIR:-/proc/sys/fs/binfmt_misc}"
@@ -284,10 +286,12 @@ do_install() {
   fi
 
   log "copying system into $MOUNT/nix store"
-  run nix --extra-root-dir "$MOUNT/nix/var/nix" copy --to "$MOUNT/nix" "$sys" "$drv"
+  # Paths built as a regular user are unsigned, hence --no-check-sigs; the
+  # card store is root-owned, hence sudo (verified on real hardware).
+  run $SUDO nix copy --no-check-sigs --to "$MOUNT" "$sys" "$drv"
 
   log "running nixos-install (root: $MOUNT, flake: $FLAKE#$ATTR)"
-  run nixos-install --root "$MOUNT" --flake "$FLAKE#$ATTR"
+  run $SUDO nixos-install --root "$MOUNT" --flake "$FLAKE#$ATTR"
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
     local sysname drvname

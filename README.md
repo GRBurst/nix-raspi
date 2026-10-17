@@ -130,8 +130,8 @@ flake=...  attr=rpi  rev=<git HEAD>  dirty=clean|dirty  sys=<store path>  drv=<d
 `install` then:
 
 1. copies the recorded system + toplevel drv into the card's store
-   (`nix copy --to <mount>`),
-2. runs `nixos-install --root <mount> --flake <checkout>#rpi` — pointed at
+   (`sudo nix copy --no-check-sigs --to <mount>`),
+2. runs `sudo nixos-install --root <mount> --flake <checkout>#rpi` — pointed at
    the **host checkout**, so the evaluation matches the recorded build
    bit-for-bit and **nothing is rebuilt**,
 3. verifies the paths exist in the target store.
