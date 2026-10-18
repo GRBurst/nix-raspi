@@ -192,6 +192,23 @@ MOCK
 sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,flock,sfdisk,findmnt,lsblk}
 chmod 755 "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,flock,sfdisk,findmnt,lsblk}
 
+
+# chroot mock: never really chroots. Succeeds, unless
+#   MOCK_CHROOT_NEEDS=<path>  fails until that path exists as a symlink under the root
+#                             (models a binfmt interpreter that is only found if bridged)
+#   MOCK_CHROOT_FAIL=1        always fails (127, like the real error)
+cat > "$BIN/chroot" <<'MOCK'
+#!BASHPLACEHOLDER
+echo "chroot $*" >> "$MOCK_LOG"
+root="$1"
+if [[ -n "${MOCK_CHROOT_FAIL:-}" ]] || { [[ -n "${MOCK_CHROOT_NEEDS:-}" ]] && [[ ! -L "$root$MOCK_CHROOT_NEEDS" ]]; }; then
+  echo "chroot: failed to run command '$2': No such file or directory" >&2
+  exit 127
+fi
+exit 0
+MOCK
+sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/chroot"; chmod 755 "$BIN/chroot"
+
 # mountpoint helper that reports "not mounted" only for <dir>/boot/firmware
 cat > "$BIN/mp-nofw" <<'MOCK'
 #!BASHPLACEHOLDER
@@ -793,45 +810,76 @@ expect_grep "duplicate labels + DEVICE: hint to unplug" "unplug it"
 
 # 35. nixos-install runs `activate` inside a chroot of the card: an aarch64
 #     binfmt handler without the F flag is not found there (the real failure:
-#     "chroot: failed to run command .../activate: No such file or directory")
+#     "chroot: failed to run command .../activate: No such file or directory").
+#     The script tests the chroot with the system's own bash BEFORE nixos-install.
 C35="$(new_card t35)"; INTERP="$T/fake-run/binfmt/aarch64-linux"
-: > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" MOCK_INTERP="$INTERP" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (F flag): exit 0" 0
-expect_grep "chroot emu (F flag): reported ok" "has the F flag"
-expect_not_grep "chroot emu (F flag): no bridging" "bridging the interpreter" 
-expect_not_grep "chroot emu (F flag): interpreter not placed in the card" "interp-visible-in-chroot" "$MOCK_LOG"
+chroot_line() { grep -n '^chroot ' "$MOCK_LOG" | head -1 | cut -d: -f1; }
+
+# (a) the chroot works: nothing to do, whatever the flags say
 : > "$MOCK_LOG"
 run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" MOCK_INTERP="$INTERP" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (no F flag): exit 0" 0
-expect_grep "chroot emu (no F flag): explained" "has no F flag"
-expect_grep "chroot emu (no F flag): names the permanent fix" "preferStaticEmulators"
-expect_grepf "chroot emu (no F flag): interpreter closure copied into the card" "nix copy --no-check-sigs --to $C35 $(readlink -f "$BASH_BIN" | sed -E 's|^(/nix/store/[^/]+).*|\1|')" "$MOCK_LOG"
-expect_grepf "chroot emu (no F flag): interpreter visible in the chroot during nixos-install" "interp-visible-in-chroot" "$MOCK_LOG"
-expect_true "chroot emu (no F flag): bridge removed afterwards" test ! -e "$C35$INTERP" -a ! -L "$C35$INTERP"
-expect_true "chroot emu (no F flag): empty dir removed too" test ! -d "$C35$(dirname "$INTERP")"
-# the bridge goes in BEFORE nixos-install, the install runs, then it goes away
-expect_true "chroot emu: copy before nixos-install" test "$(grep -n 'nix copy.*bash' "$MOCK_LOG" | tail -1 | cut -d: -f1)" -lt "$(grep -n '^nixos-install' "$MOCK_LOG" | tail -1 | cut -d: -f1)"
-# the bridge is removed even if nixos-install fails
+expect_exit "chroot emu (works): exit 0" 0
+expect_grep "chroot emu (works): reported" "aarch64 binaries start (emulation works inside the chroot)"
+expect_not_grep "chroot emu (works): no bridging" "bridging the interpreter"
+expect_grepf "chroot emu (works): tested with the system's own bash" "chroot $C35 $T/mock-sys/sw/bin/bash -c true" "$MOCK_LOG"
+expect_true "chroot emu (works): tested before nixos-install" test "$(chroot_line)" -lt "$(grep -n '^nixos-install' "$MOCK_LOG" | tail -1 | cut -d: -f1)"
+
+# (b) no F flag, chroot fails until the interpreter is bridged -> bridged, retested, installed
 : > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" MOCK_INTERP="$INTERP" MOCK_NIXOS_INSTALL_RC=3 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" MOCK_INTERP="$INTERP" MOCK_CHROOT_NEEDS="$INTERP" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "chroot emu (bridge needed): exit 0" 0
+expect_grep "chroot emu (bridge needed): says it does not start" "do not start inside a chroot of the card"
+expect_grep "chroot emu (bridge needed): explained" "has no F flag"
+expect_grep "chroot emu (bridge needed): names the permanent fix" "preferStaticEmulators"
+expect_grep "chroot emu (bridge needed): works afterwards" "start now (through the bridged interpreter)"
+expect_grepf "chroot emu (bridge needed): interpreter closure copied into the card" "nix copy --no-check-sigs --to $C35 $(readlink -f "$BASH_BIN" | sed -E 's|^(/nix/store/[^/]+).*|\1|')" "$MOCK_LOG"
+expect_grepf "chroot emu (bridge needed): interpreter visible in the chroot during nixos-install" "interp-visible-in-chroot" "$MOCK_LOG"
+expect_true "chroot emu (bridge needed): bridge removed afterwards" test ! -e "$C35$INTERP" -a ! -L "$C35$INTERP"
+expect_true "chroot emu (bridge needed): empty dir removed too" test ! -d "$C35$(dirname "$INTERP")"
+expect_true "chroot emu (bridge needed): bridged before nixos-install" test "$(grep -n 'nix copy.*bash' "$MOCK_LOG" | tail -1 | cut -d: -f1)" -lt "$(grep -n '^nixos-install' "$MOCK_LOG" | tail -1 | cut -d: -f1)"
+
+# (c) the bridge does not help either: stop BEFORE nixos-install, with facts
+: > "$MOCK_LOG"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" MOCK_INTERP="$INTERP" MOCK_CHROOT_FAIL=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "chroot emu (hopeless): exit 1" 1
+expect_grep "chroot emu (hopeless): refuses to run a doomed install" "would fail. Nothing was installed"
+expect_grep "chroot emu (hopeless): prints the binfmt entry" "binfmt entry  :"
+expect_grep "chroot emu (hopeless): prints the interpreter" "interpreter   : "
+expect_grep "chroot emu (hopeless): prints the chroot error" "chroot output : chroot: failed to run command"
+expect_grep "chroot emu (hopeless): host fix" "emulatedSystems"
+expect_not_grep "chroot emu (hopeless): nixos-install not started" "^nixos-install" "$MOCK_LOG"
+expect_true "chroot emu (hopeless): bridge removed" test ! -L "$C35$INTERP"
+expect_not_grep "chroot emu (hopeless): no success claim" "installed mock-sys"
+
+# (d) F flag set but the chroot still fails: do not pretend, show the facts
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" MOCK_CHROOT_FAIL=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "chroot emu (F flag, still failing): exit 1" 1
+expect_grep "chroot emu (F flag, still failing): message" "has the F flag, which should work in a chroot"
+expect_grep "chroot emu (F flag, still failing): facts" "chroot output :"
+
+# (e) binfmt entry unreadable and the chroot fails
+run_cmd env RPI_BINMFT_DIR="$T/bmf-empty" RPI_BINMFT_RUN="$T/bmf-ok" MOCK_CHROOT_FAIL=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "chroot emu (entry unreadable, failing): exit 1" 1
+expect_grep "chroot emu (entry unreadable): message" "no aarch64 binfmt handler is readable"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-empty" RPI_BINMFT_RUN="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "chroot emu (entry unreadable, chroot works): exit 0" 0
+
+# (f) nixos-install itself failing: bridge removed, advice printed
+: > "$MOCK_LOG"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" MOCK_INTERP="$INTERP" MOCK_CHROOT_NEEDS="$INTERP" MOCK_NIXOS_INSTALL_RC=3 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
 expect_exit "nixos-install failure: exit 1" 1
 expect_true "nixos-install failure: bridge still removed" test ! -L "$C35$INTERP"
 expect_grep "nixos-install failure: safe to re-run" "re-run 'rpi-deploy install'"
-expect_grep "nixos-install failure: chroot hint" "chroot: failed to run command"
-expect_grep "nixos-install failure: says what to check" "binfmt_misc/aarch64-linux"
 expect_not_grep "nixos-install failure: no success claim" "installed mock-sys"
-# dry-run shows the bridge steps without touching the card
+
+# (g) dry-run shows the bridge steps without touching the card
 : > "$MOCK_LOG"
 run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C35"
 expect_exit "chroot emu dry-run: exit 0" 0
 expect_grep "chroot emu dry-run: prints the symlink" "dry-run: sudo ln -sfn"
 expect_true "chroot emu dry-run: runs nothing" test ! -s "$MOCK_LOG"
-# an unreadable binfmt entry is not fatal
-run_cmd env RPI_BINMFT_DIR="$T/bmf-empty" RPI_BINMFT_RUN="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (entry unreadable): exit 0" 0
-expect_grep "chroot emu (entry unreadable): warns" "cannot read the aarch64 binfmt entry"
-# show reports it
+
+# (h) show reports it
 run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" bash "$SCRIPT" show --flake "$F9"
 expect_grep "show: chroot emulation bridged" "chroot emu .*bridged automatically"
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" show --flake "$F9"

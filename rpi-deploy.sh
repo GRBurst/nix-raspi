@@ -795,23 +795,75 @@ bridge_binfmt() {
   fi
 }
 
-# Called before nixos-install (host is not aarch64 only).
+# chroot_works SYSTEM: can an aarch64 binary of the system be started inside a
+# chroot of the card? This is exactly what nixos-install does for `activate` and
+# the bootloader installer, so test it for real, on the system's own bash.
+chroot_works() {
+  $SUDO chroot "$MOUNT" "$1/sw/bin/bash" -c true >/dev/null 2>&1
+}
+
+# Facts needed to understand a failing chroot, printed instead of guessing.
+chroot_diagnostics() {
+  local sys="$1" entry interp real
+  {
+    echo "  system        : $sys"
+    echo "  bash on card  : $(ls -l "$MOUNT$sys/sw/bin/bash" 2>&1 | cut -c1-200)"
+    if entry="$(binfmt_entry)"; then
+      interp="$(binfmt_field "$entry" interpreter)"
+      real="$(readlink -f "$interp" 2>/dev/null || true)"
+      echo "  binfmt entry  : $entry"
+      sed 's/^/    | /' "$entry"
+      echo "  interpreter   : $interp -> ${real:-<unresolvable>}"
+      echo "  on the card   : $(ls -l "$MOUNT$interp" 2>&1 | cut -c1-200)"
+      echo "  real on card  : $(ls -ld "$MOUNT$real" 2>&1 | cut -c1-200)"
+    else
+      echo "  binfmt entry  : not readable under $BINMFT_DIR (is binfmt_misc mounted? is the aarch64 handler registered?)"
+    fi
+    echo "  chroot output : $($SUDO chroot "$MOUNT" "$sys/sw/bin/bash" -c true 2>&1 | head -n 3 | tr '\n' ' ')"
+  } >&2
+}
+
+# Called before nixos-install, with the system store path. Makes sure aarch64
+# binaries start inside the card chroot; if they do not, tries the interpreter
+# bridge and tests again, and refuses to continue (instead of running a
+# doomed nixos-install) if it still does not work.
 prepare_chroot_emulation() {
+  local sys="$1" entry flags interp
   [[ "$(uname -m)" == "aarch64" && -z "${RPI_FORCE_EMULATION_CHECK:-}" ]] && return 0
-  local entry flags interp
+
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    if chroot_works "$sys"; then
+      log "card chroot: aarch64 binaries start (emulation works inside the chroot)"
+      return 0
+    fi
+    warn "aarch64 binaries do not start inside a chroot of the card (nixos-install would fail with 'chroot: failed to run command ... No such file or directory')"
+  fi
+
   if ! entry="$(binfmt_entry)"; then
-    warn "cannot read the aarch64 binfmt entry under $BINMFT_DIR; if nixos-install fails with 'chroot: failed to run command ... No such file or directory', see: rpi-deploy show"
-    return 0
+    [[ "$DRY_RUN" -eq 1 ]] && { warn "cannot read the aarch64 binfmt entry under $BINMFT_DIR"; return 0; }
+    chroot_diagnostics "$sys"
+    die "no aarch64 binfmt handler is readable under $BINMFT_DIR. Enable emulation on the host: boot.binfmt.emulatedSystems = [ \"aarch64-linux\" ]; boot.binfmt.preferStaticEmulators = true;"
   fi
   flags="$(binfmt_field "$entry" flags)"
   interp="$(binfmt_field "$entry" interpreter)"
-  if [[ "$flags" == *F* ]]; then
-    log "binfmt: the aarch64 handler has the F flag; it works inside the card chroot"
-    return 0
+
+  if [[ "$flags" == *F* && "$DRY_RUN" -eq 0 ]]; then
+    chroot_diagnostics "$sys"
+    die "the binfmt handler has the F flag, which should work in a chroot, but the test failed anyway; see the facts above"
   fi
-  warn "the aarch64 binfmt handler (interpreter $interp, flags '${flags:-none}') has no F flag, so it is not usable inside the card chroot of nixos-install (it would fail with 'chroot: failed to run command ... No such file or directory')."
+  [[ "$flags" == *F* ]] || warn "the aarch64 binfmt handler (interpreter $interp, flags '${flags:-none}') has no F flag, so the kernel looks for the interpreter inside the card chroot, where it does not exist"
   warn "bridging the interpreter into the card for this install. Permanent fix on the host: boot.binfmt.preferStaticEmulators = true; (the build-host module sets it)"
   bridge_binfmt "$interp"
+
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    if chroot_works "$sys"; then
+      log "card chroot: aarch64 binaries start now (through the bridged interpreter)"
+    else
+      chroot_diagnostics "$sys"
+      cleanup_bridge
+      die "aarch64 binaries still do not start inside the card chroot, so nixos-install would fail. Nothing was installed; fix the emulator (see the facts above; host fix: boot.binfmt.emulatedSystems = [ \"aarch64-linux\" ]; boot.binfmt.preferStaticEmulators = true; then nixos-rebuild switch) and re-run: rpi-deploy install"
+    fi
+  fi
 }
 
 # --- sudo -------------------------------------------------------------------------
@@ -957,7 +1009,7 @@ do_install() {
     die "verification failed: the system was not copied completely ($MOUNT/nix/store/$(basename "$sys")/activate is missing). Re-run: rpi-deploy install"
   fi
 
-  prepare_chroot_emulation
+  prepare_chroot_emulation "$sys"
 
   log "running nixos-install (root: $MOUNT, flake: $FLAKE#$ATTR)"
   # accept-flake-config: the flake's nixConfig (nvmd binary cache) is applied
