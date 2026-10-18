@@ -23,7 +23,7 @@
 #   devices    list removable disks (candidates for prepare DEVICE) and card status
 #   show       show the last build record and host/card status
 #
-# Usage: rpi-deploy.sh prepare [DEVICE] [--format] [--yes] [--boot-size SIZE]
+# Usage: rpi-deploy.sh prepare [DEVICE] [--format] [-y|--yes] [--boot-size SIZE]
 #        rpi-deploy.sh [build|install|config|eject|all|show|devices] [TARGET] [OPTIONS]
 #   TARGET         root of the target NixOS system (default: /media/nixos)
 #
@@ -34,7 +34,8 @@
 #   --from PATH    (install) use this store path instead of the last build
 #   --format       (prepare) partition + format DEVICE (destroys all data)
 #   --boot-size S  (prepare --format) FAT partition size (default: 256MiB)
-#   --yes          (prepare --format) do not ask for confirmation
+#   -y, --yes      answer yes to every confirmation: formatting, building the
+#                  kernel locally, installing without any way to log in
 #   --dry-run      print the heavy commands instead of executing them
 #   -h, --help     show this help
 #
@@ -54,6 +55,7 @@ DEVICE=""
 LABELS_CHANGED=0
 DEV_MOUNTS=()
 PART_SCRIPT=""
+LOGIN_CONFIRMED=0
 FORMAT=0
 ASSUME_YES=0
 BOOT_SIZE="256MiB"
@@ -74,7 +76,7 @@ ALLOW_NONBLOCK="${RPI_ALLOW_NONBLOCK:-0}"
 
 usage() {
   cat <<'USAGE_EOF'
-Usage: rpi-deploy prepare [DEVICE] [--format] [--yes] [--boot-size SIZE]
+Usage: rpi-deploy prepare [DEVICE] [--format] [-y|--yes] [--boot-size SIZE]
        rpi-deploy [build|install|config|eject|all|show|devices] [TARGET] [OPTIONS]
 
   TARGET     root of the target NixOS system, e.g. /media/nixos
@@ -102,7 +104,8 @@ Options:
   --from PATH    (install) use this store path instead of the last build
   --format       (prepare) partition + format DEVICE (destroys all data)
   --boot-size S  (prepare --format) FAT partition size (default: 256MiB)
-  --yes          (prepare --format) do not ask for confirmation
+  -y, --yes      answer yes to every confirmation: formatting, building the
+                 kernel locally, installing without any way to log in
   --dry-run      print the heavy commands instead of executing them
   -h, --help     show this help
 USAGE_EOF
@@ -122,7 +125,7 @@ while [[ $# -gt 0 ]]; do
     --from) FROM="$2"; shift ;;
     --boot-size) BOOT_SIZE="$2"; shift ;;
     --format) FORMAT=1 ;;
-    --yes) ASSUME_YES=1 ;;
+    -y|--yes) ASSUME_YES=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -270,16 +273,65 @@ require_card() {
   fi
 }
 
-# Warn (not fatal) if the nixos-raspberrypi binary cache is not configured on
-# this host. The build passes --accept-flake-config, which makes a *trusted*
-# nix user pick it up from the flake's nixConfig; otherwise the vendor kernel
-# is compiled locally under qemu (16+ hours).
+# confirm QUESTION: ask y/N. --yes answers yes. In dry-run nothing is asked
+# (answer: yes). Without a terminal and without --yes the answer is no.
+# (RPI_ASSUME_TTY=1 lets tests feed answers on stdin.)
+confirm() {
+  local ans
+  if [[ "$DRY_RUN" -eq 1 ]]; then return 0; fi
+  if [[ "$ASSUME_YES" -eq 1 ]]; then warn "continuing because of --yes: $1"; return 0; fi
+  if [[ ! -t 0 && "${RPI_ASSUME_TTY:-0}" != 1 ]]; then return 1; fi
+  printf '%s [y/N] ' "$1" >&2
+  read -r ans || { echo >&2; return 1; }
+  [[ "$ans" =~ ^[yY]([eE][sS])?$ ]]
+}
+
+# Reports how the nixos-raspberrypi binary cache gets enabled on this host.
+# The flake's nixConfig (extra-substituters) only takes effect for *trusted*
+# nix users, or when the host's nix.conf lists the cache itself. (A plain
+# `nix show-config` never shows a flake's nixConfig, so it cannot be used to
+# decide; the authoritative test is check_kernel_cached below.)
 check_cache() {
-  if nix show-config 2>/dev/null | grep -E '^(extra-)?substituters' | grep -q 'nixos-raspberrypi.cachix.org'; then
-    log "binary cache: nixos-raspberrypi.cachix.org configured"
-  else
-    warn "nixos-raspberrypi.cachix.org is not in the host's nix substituters. Builds pass --accept-flake-config, which only works for trusted nix users (nix.settings.trusted-users). Otherwise the vendor kernel is compiled locally (16+ h). Fix: rpi.buildHost.enable = true (adds the cache), or add it to nix.conf."
+  local subs trusted t u ok=0
+  subs="$(nix config show substituters 2>/dev/null || true)"
+  if [[ "$subs" == *nixos-raspberrypi.cachix.org* ]]; then
+    log "binary cache: nixos-raspberrypi.cachix.org is configured on this host"
+    return 0
   fi
+  u="$(id -un)"
+  trusted="$(nix config show trusted-users 2>/dev/null || true)"
+  [[ "$EUID" -eq 0 ]] && ok=1
+  for t in $trusted; do
+    case "$t" in
+      "$u"|'*') ok=1 ;;
+      @*) id -Gn | tr ' ' '\n' | grep -qx "${t#@}" && ok=1 ;;
+    esac
+  done
+  if [[ "$ok" -eq 1 ]]; then
+    log "binary cache: nixos-raspberrypi.cachix.org is enabled through the flake (you are a trusted nix user)"
+  else
+    warn "'$u' is not a trusted nix user, so nix ignores the flake's binary cache setting (nixos-raspberrypi.cachix.org). Fix on NixOS: nix.settings.trusted-users = [ \"$u\" ]; or enable the cache host-wide with rpi.buildHost.enable = true (or nix.settings.extra-substituters + extra-trusted-public-keys, see flake.nix nixConfig). Elsewhere: add 'trusted-users = $u' to /etc/nix/nix.conf and restart nix-daemon."
+  fi
+}
+
+# The authoritative cache test: ask nix (dry-run, nothing is built) whether the
+# vendor kernel would be fetched or compiled. Compiling it locally under qemu
+# takes 16+ hours, so ask before starting that.
+check_kernel_cached() {
+  local out building
+  log "checking that the vendor kernel comes from the binary cache"
+  out="$(cd "$FLAKE" && nix build --dry-run --accept-flake-config "$TOPOLEVEL" 2>&1)" || {
+    warn "could not evaluate the build plan; skipping the kernel cache check"; return 0; }
+  building="$(printf '%s\n' "$out" | awk '/will be built/ { f = 1; next } /^[^ ]/ { f = 0 } f' | grep -E 'linux[-_]rpi' | sed 's|/nix/store/[a-z0-9]*-||' | sort -u || true)"
+  if [[ -z "$building" ]]; then
+    log "vendor kernel: available from the binary cache (will not be compiled)"
+    return 0
+  fi
+  warn "the vendor kernel is NOT in any enabled binary cache and would be compiled locally under qemu (16+ hours):"
+  printf '    %s\n' $building >&2
+  warn "likely causes: you are not a trusted nix user (see above), nixpkgs no longer follows nixos-raspberrypi/nixpkgs, or nvmd has not built the current pin yet"
+  confirm "Compile the kernel locally anyway?" \
+    || die "aborted. Fix the cache setup, or pass --yes to build anyway"
 }
 
 git_head() {
@@ -499,6 +551,15 @@ ensure_labels() {
   fi
 }
 
+# duplicate_labels: "LABEL: /dev/a /dev/b" lines for NIXOS_SD / NIXOS_BOOT
+# labels that more than one partition carries (e.g. an old and a new card in
+# two readers). /dev/disk/by-label then points at an arbitrary one of them.
+duplicate_labels() {
+  lsblk -nlo PATH,LABEL 2>/dev/null | awk '
+    $2 == "NIXOS_SD" || $2 == "NIXOS_BOOT" { c[$2]++; p[$2] = p[$2] " " $1 }
+    END { for (l in c) if (c[l] > 1) print l ":" p[l] }'
+}
+
 # Mounts root at $MOUNT and the FAT partition at $MOUNT/boot/firmware.
 mount_card() {
   need_cmd findmnt
@@ -512,9 +573,15 @@ mount_card() {
     if [[ "$DRY_RUN" -eq 0 ]]; then
       [[ "$(readlink -f "$BYLABEL_DIR/NIXOS_SD" 2>/dev/null)" == "$(readlink -f "$root_dev")" \
          && "$(readlink -f "$BYLABEL_DIR/NIXOS_BOOT" 2>/dev/null)" == "$(readlink -f "$boot_dev")" ]] \
-        || die "$DEVICE does not have the expected layout/labels (NIXOS_BOOT on $boot_dev, NIXOS_SD on $root_dev). New or foreign card? Run: rpi-deploy prepare $DEVICE --format"
+        || die "$DEVICE does not have the expected layout/labels (NIXOS_BOOT on $boot_dev, NIXOS_SD on $root_dev). New or foreign card? Run: rpi-deploy prepare $DEVICE --format. If another card with the same labels is connected, unplug it (labels are then ambiguous): $(duplicate_labels | tr '\n' ';')"
     fi
   else
+    local dups
+    dups="$(duplicate_labels)"
+    if [[ -n "$dups" ]]; then
+      echo "$dups" >&2
+      die "several partitions carry the NIXOS_SD / NIXOS_BOOT labels (two cards connected?), so the label is ambiguous. Unplug the other card, or name the device: rpi-deploy prepare /dev/sdX"
+    fi
     root_dev="$(readlink -f "$BYLABEL_DIR/NIXOS_SD" 2>/dev/null || true)"
     boot_dev="$(readlink -f "$BYLABEL_DIR/NIXOS_BOOT" 2>/dev/null || true)"
     if [[ ! -e "$root_dev" || ! -e "$boot_dev" ]]; then
@@ -614,6 +681,9 @@ do_build() {
 
   check_emulation || die "aarch64 emulation preflight failed (see hints above)"
   check_cache
+  check_kernel_cached
+  # Ask about the missing ssh key now, not after hours of building.
+  check_login
 
   log "building $FLAKE$TOPOLEVEL (this takes a while for kernel changes)"
   mkdir -p "$STATE"
@@ -708,7 +778,7 @@ check_space() {
 # Warns when nobody could log in: the pi is headless, so a system without an
 # ssh key or password for a normal user is unreachable after boot.
 check_login() {
-  [[ "$DRY_RUN" -eq 1 ]] && return 0
+  [[ "$DRY_RUN" -eq 1 || "$LOGIN_CONFIRMED" -eq 1 ]] && return 0
   local out name keys pw any=0
   out="$(nix eval --raw --accept-flake-config "$FLAKE#nixosConfigurations.$ATTR.config.users.users" --apply '
     us: builtins.concatStringsSep "\n" (map (u:
@@ -722,8 +792,12 @@ check_login() {
     if (( keys > 0 )) || [[ "$pw" == 1 ]]; then any=1; fi
   done <<< "$out"
   if (( any == 0 )); then
-    warn "no normal user in the config has an ssh key or a password, so you could not log in to the pi (password ssh is off). Add users.users.<name>.openssh.authorizedKeys.keys in configuration.nix, then run: rpi-deploy build && rpi-deploy install"
+    warn "no normal user in the config has an ssh key or a password, so you could not log in to the pi (password ssh is off)"
+    echo "  Add users.users.<name>.openssh.authorizedKeys.keys in configuration.nix first." >&2
+    confirm "Continue without any way to log in?" \
+      || die "aborted: add an ssh key to configuration.nix (then: rpi-deploy build && rpi-deploy install), or pass --yes to continue anyway"
   fi
+  LOGIN_CONFIRMED=1
 }
 
 # --- install ----------------------------------------------------------------

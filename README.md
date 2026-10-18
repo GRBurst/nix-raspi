@@ -114,6 +114,24 @@ Two partitions on an MBR (dos) partition table, found by their **labels**
 | p1        | 256 MiB | FAT32 | `NIXOS_BOOT` | `/boot/firmware` | Pi firmware, `config.txt`, U-Boot, DTBs |
 | p2        | rest    | ext4  | `NIXOS_SD`   | `/`              | system, `/boot` (kernel, initrd, extlinux), `/etc/nixos` |
 
+**Why 256 MiB is enough.** With the U-Boot bootloader used here the FAT
+partition only holds the Pi firmware (at most ~80 MB for all boards), `config.txt`
+and `u-boot.bin` (<1 MB). Kernels and initrds (~60 MB per generation) are
+copied to `/boot` on the *ext4 root*, so the number of generations never fills
+p1. The older advice to use 512 MiB (or 1 GiB) comes from layouts where the FAT
+partition is `/boot` and holds a kernel + initrd per generation; nixos-raspberrypi
+only needs that with `boot.loader.raspberry-pi.bootloader = "kernel"` (its image
+uses 1024 MiB there). If you switch to that, use `--boot-size 1GiB`.
+
+**Labels instead of fixed UUIDs.** Image builders pin UUIDs/partition IDs so a
+reproducible image can reference its partitions before any card exists. Here the
+card is made on the host, so there is nothing to pin: `configuration.nix`
+mounts by label, which is stable, readable, and survives re-flashing a card (a
+fixed UUID would need to be written by `prepare` anyway). Labels have one
+weakness — two cards with the same label are ambiguous — so `rpi-deploy`
+refuses to guess when it sees duplicates and asks you to unplug the other card
+or name the device. The Pi firmware itself boots by partition order, not by ID.
+
 There is no third partition. The Pi's ROM reads p1, which starts U-Boot; U-Boot
 reads `extlinux.conf` + kernel + initrd from `/boot` on p2.
 `rpi-deploy prepare` creates this layout and mounts it as
@@ -165,12 +183,14 @@ it.
 
 Before copying, `install` prints the target card with its size and free space,
 stops if the system closure cannot fit on the card at all (and warns if it
-exceeds the free space), and warns if no normal user in the config has an ssh
-key or password — the pi is headless and password ssh is off, so it would be
-unreachable. Build and install report their duration and the next step;
+exceeds the free space), and asks `Continue without any way to log in? [y/N]`
+if no normal user in the config has an ssh key or password — the pi is headless
+and password ssh is off, so it would be unreachable. That question is asked
+already at `build` (not after hours of building), once per run; without a
+terminal it aborts unless you pass `--yes`. Build and install report their duration and the next step;
 colours are only used on a terminal (`NO_COLOR` disables them).
 
-Usage: `rpi-deploy prepare [DEVICE] [--format] [--yes] [--boot-size SIZE]` and
+Usage: `rpi-deploy prepare [DEVICE] [--format] [-y|--yes] [--boot-size SIZE]` and
 `rpi-deploy [build|install|config|eject|all|show] [TARGET] [OPTIONS]`. `TARGET`
 is the root of the target NixOS system (default `/media/nixos`; same as
 `--mount`). Options: `--flake PATH` (default `$RPI_FLAKE` or `$PWD`),
@@ -231,11 +251,16 @@ The vendor kernel is **not** in `cache.nixos.org`; it is in the
 2. The cache must be enabled on the build host: `flake.nix` carries it in
    `nixConfig`, `rpi-deploy` passes `--accept-flake-config` (works for
    trusted nix users), and `rpi.buildHost.enable = true` adds it to the host's
-   `nix.conf` (`rpi.buildHost.nvmdCache`). `rpi-deploy` warns if it is
-   missing. The Pi itself trusts the cache via nixos-raspberrypi's
-   `trusted-nix-caches` module.
+   `nix.conf` (`rpi.buildHost.nvmdCache`). The Pi itself trusts the cache via
+   nixos-raspberrypi's `trusted-nix-caches` module.
 
-Check that the kernel is a cache hit before a long build:
+`rpi-deploy build` checks this for you before the long build: it reports how the
+cache is enabled (host-wide, or through the flake because you are a trusted nix
+user — or tells you to add yourself to `nix.settings.trusted-users`), and then
+asks nix for the build plan (`nix build --dry-run`, builds nothing). If the
+vendor kernel would be *compiled* instead of fetched, it lists it and asks
+`Compile the kernel locally anyway? [y/N]` (`--yes` answers yes; without a
+terminal it aborts). The same check by hand:
 
 ```sh
 nix build --accept-flake-config --dry-run .#nixosConfigurations.rpi.config.system.build.toplevel 2>&1 \
@@ -335,13 +360,13 @@ Three layers, all wired into `nix flake check`:
 
 ```sh
 nix flake check                                   # everything below
-nix build .#checks.x86_64-linux.rpi-deploy-unit  # 204 unit tests for rpi-deploy.sh
+nix build .#checks.x86_64-linux.rpi-deploy-unit  # 240 unit tests for rpi-deploy.sh
 nix build .#checks.x86_64-linux.rpi-host-vm       # boots a real VM (qemu), ~1-16 min
 nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module, eval-only proof
 ```
 
 1. **`rpi-deploy-syntax`** (both systems) — `bash -n` of the script.
-2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 204 unit tests
+2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 240 unit tests
    with mocked `nix`/`nixos-install`: preflight fail/success, build record
    round-trip (all fields), `show`, install verification incl. a failing
    store copy, `--from` with/without record, attr mismatch, HEAD-moved and

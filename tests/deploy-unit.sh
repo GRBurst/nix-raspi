@@ -52,6 +52,18 @@ cat > "$BIN/nix" <<'MOCK'
 case " $* " in
   *" path-info "*) echo "$MOCK_SYS ${MOCK_CLOSURE-1000}" ;;
   *" --apply "*) echo "${MOCK_LOGIN-pi 1 0}" ;;
+  *" config show "*)
+    case "${@: -1}" in
+      substituters) echo "https://cache.nixos.org/ ${MOCK_CACHE:+https://nixos-raspberrypi.cachix.org}" ;;
+      trusted-users) echo "${MOCK_TRUSTED-$(id -un)}" ;;
+    esac ;;
+  *" build --dry-run "*)
+    [[ -n "${MOCK_PLAN_FAIL:-}" ]] && { echo "error: evaluation failed" >&2; exit 1; }
+    if [[ "${MOCK_KERNEL:-fetch}" == build ]]; then
+      printf 'these 2 derivations will be built:\n  /nix/store/aaaa-linux_rpi-bcm2711-6.18.34.drv\n  /nix/store/bbbb-nixos-system-neptun.drv\nthese 9 paths will be fetched (10 MiB download):\n  /nix/store/cccc-glibc\n'
+    else
+      printf 'these 9 paths will be fetched (300 MiB download, 900 MiB unpacked):\n  /nix/store/dddd-linux_rpi-bcm2711-6.18.34\n  /nix/store/eeee-glibc\nthis derivation will be built:\n  /nix/store/ffff-nixos-system-neptun.drv\n'
+    fi ;;
   *" show-config "*)
     if [[ "${MOCK_PLATFORMS:-}" == *aarch64* ]]; then
       echo "extra-platforms = x86_64-linux aarch64-linux"
@@ -160,6 +172,7 @@ case " $* " in
   *" -no LABEL "*)
     case "${@: -1}" in *p1|*[a-z]1) echo "${MOCK_LABEL_BOOT-NIXOS_BOOT}" ;; *) echo "${MOCK_LABEL_ROOT-NIXOS_SD}" ;; esac ;;
   *" -no MOUNTPOINT "*) echo "${MOCK_PART_MNT:-}" ;;
+  *" -nlo PATH,LABEL "*) [[ -n "${MOCK_DUP_LABELS:-}" ]] && printf '%b\n' "$MOCK_DUP_LABELS" ;;
   *" -nlo MOUNTPOINT "*) [[ -n "${MOCK_DEV_MOUNTS:-}" ]] && printf '%s\n' "$MOCK_DEV_MOUNTS" ;;
   *) echo "NAME SIZE FSTYPE LABEL MODEL (mock)" ;;
 esac
@@ -482,9 +495,39 @@ F25="$(new_flake t25)"
 run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --dry-run --flake "$F25"
 expect_grep "build: passes --accept-flake-config (eval)" "nix eval --raw .*--accept-flake-config"
 expect_grep "build: passes --accept-flake-config (build)" "nix build --accept-flake-config"
-expect_grep "build: warns when cache not configured" "nixos-raspberrypi.cachix.org is not in"
+expect_grep "build: trusted user -> cache enabled via flake" "enabled through the flake (you are a trusted nix user)"
+expect_grep "build: kernel comes from the cache" "available from the binary cache"
+expect_not_grep "build: no cache warning for a trusted user" "not a trusted nix user"
 run_cmd env "${EMUL_OK[@]}" MOCK_CACHE=1 bash "$SCRIPT" build --dry-run --flake "$F25"
-expect_grep "build: cache configured is reported" "binary cache: nixos-raspberrypi.cachix.org configured"
+expect_grep "build: cache configured is reported" "nixos-raspberrypi.cachix.org is configured on this host"
+run_cmd env "${EMUL_OK[@]}" MOCK_TRUSTED=nobody-here bash "$SCRIPT" build --dry-run --flake "$F25"
+expect_grep "build: untrusted user is told how to fix it" "not a trusted nix user"
+expect_grep "build: untrusted: suggests trusted-users" "trusted-users"
+run_cmd env "${EMUL_OK[@]}" MOCK_TRUSTED="@$(id -gn)" bash "$SCRIPT" build --dry-run --flake "$F25"
+expect_grep "build: trusted through a group" "you are a trusted nix user"
+
+# 25b. the authoritative cache test: would the vendor kernel be compiled?
+F25B="$(new_flake t25b)"
+run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build bash "$SCRIPT" build --flake "$F25B"
+expect_exit "kernel not cached (no tty): exit 1" 1
+expect_grep "kernel not cached: explains" "would be compiled locally under qemu"
+expect_grep "kernel not cached: names the kernel" "linux_rpi-bcm2711-6.18.34.drv"
+expect_grep "kernel not cached: aborts, offers --yes" "aborted. Fix the cache setup, or pass --yes"
+expect_true "kernel not cached: nothing built" test ! -f "$F25B/.rpi-build/last"
+run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build bash "$SCRIPT" build --flake "$F25B" --yes
+expect_exit "kernel not cached (--yes): exit 0" 0
+expect_grep "kernel not cached (--yes): continues" "continuing because of --yes"
+run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build RPI_ASSUME_TTY=1 bash "$SCRIPT" build --flake "$F25B" <<< "n"
+expect_exit "kernel not cached (answer n): exit 1" 1
+expect_grep "kernel not cached: question asked" "Compile the kernel locally anyway?"
+run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build RPI_ASSUME_TTY=1 bash "$SCRIPT" build --flake "$F25B" <<< "y"
+expect_exit "kernel not cached (answer y): exit 0" 0
+run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build bash "$SCRIPT" build --dry-run --flake "$F25B"
+expect_exit "kernel not cached (--dry-run): warns only, exit 0" 0
+expect_grep "kernel not cached (--dry-run): still reported" "would be compiled locally"
+run_cmd env "${EMUL_OK[@]}" MOCK_PLAN_FAIL=1 bash "$SCRIPT" build --flake "$F25B"
+expect_exit "build plan unavailable: exit 0" 0
+expect_grep "build plan unavailable: skipped with a note" "skipping the kernel cache check"
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C24"
 expect_grep "install: nixos-install accepts flake config" "nixos-install --root $C24 --flake $F9#rpi --option accept-flake-config true"
 
@@ -677,7 +720,7 @@ expect_grep "install: auto-mount announced" "mounting the card found by its labe
 expect_grepf "install: auto-mount mounted the root" "mount $DEVDIR/mmcblk0p2 $C27" "$MOCK_LOG"
 
 # 33. install: card summary, space check, login check, next steps
-C33="$(new_card t33)"
+C33="$(new_card t33)"; F34B="$(new_flake t34b)"
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
 expect_exit "install (ux): exit 0" 0
 expect_grep "install: card summary" "target card: .* total, .* free"
@@ -688,8 +731,24 @@ run_cmd env MOCK_CLOSURE=99999999999999999 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCR
 expect_exit "install (closure too big): exit 1" 1
 expect_grep "install (closure too big): message" "does not fit on the card"
 run_cmd env MOCK_LOGIN="pi 0 0" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
-expect_exit "install (no login): still installs" 0
+expect_exit "install (no login, no tty): refuses" 1
 expect_grep "install (no login): warns" "could not log in to the pi"
+expect_grep "install (no login): aborted with advice" "aborted: add an ssh key to configuration.nix"
+run_cmd env MOCK_LOGIN="pi 0 0" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33" --yes
+expect_exit "install (no login, --yes): installs" 0
+expect_grep "install (no login, --yes): says so" "continuing because of --yes: Continue without any way to log in?"
+run_cmd env MOCK_LOGIN="pi 0 0" RPI_ASSUME_TTY=1 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33" <<< "n"
+expect_exit "install (no login, answer n): refuses" 1
+expect_grep "install (no login): question asked" "Continue without any way to log in?"
+expect_not_grep "install (no login, answer n): nothing installed" "installed mock-sys"
+run_cmd env MOCK_LOGIN="pi 0 0" RPI_ASSUME_TTY=1 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33" <<< "y"
+expect_exit "install (no login, answer y): installs" 0
+run_cmd env "${EMUL_OK[@]}" MOCK_LOGIN="pi 0 0" bash "$SCRIPT" build --flake "$F34B"
+expect_exit "build (no login, no tty): asks before the long build -> refuses" 1
+expect_true "build (no login): nothing built" test ! -f "$F34B/.rpi-build/last"
+run_cmd env "${EMUL_OK[@]}" MOCK_LOGIN="pi 0 0" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" all --flake "$F34B" --mount "$C33" --yes
+expect_exit "all (no login, --yes): exit 0" 0
+expect_true "all (no login): asked only once" test "$(grep -c 'Continue without any way to log in' "$OUT")" = 1
 run_cmd env MOCK_LOGIN="pi 0 1" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
 expect_not_grep "install (password set): no warning" "could not log in"
 run_cmd env MOCK_LOGIN="garbage" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
@@ -704,6 +763,17 @@ expect_grep "build: next steps" "next: insert the SD card"
 expect_not_grep "no ANSI colours off a tty" $'\033'
 run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" all --flake "$F34" --mount "$C33"
 expect_not_grep "all: no premature next-step hint after build" "next: insert the SD card"
+
+# 29a. two cards with the same labels: ambiguous, never guess
+run_cmd env MOCK_DUP_LABELS='/dev/sdx2 NIXOS_SD\n/dev/sdy2 NIXOS_SD\n/dev/sdx1 NIXOS_BOOT' bash "$SCRIPT" prepare --mount "$C27"
+expect_exit "duplicate labels: exit 1" 1
+expect_grep "duplicate labels: explained" "label is ambiguous"
+expect_grep "duplicate labels: lists the partitions" "NIXOS_SD: /dev/sdx2 /dev/sdy2"
+run_cmd env MOCK_DUP_LABELS='/dev/sdx2 NIXOS_SD\n/dev/sdx1 NIXOS_BOOT' bash "$SCRIPT" prepare --mount "$C27"
+expect_exit "unique labels: exit 0" 0
+run_cmd env MOCK_DUP_LABELS='/dev/sdx2 NIXOS_SD\n/dev/sdy2 NIXOS_SD' bash "$SCRIPT" prepare /dev/sdq --mount "$C27"
+expect_exit "duplicate labels + foreign DEVICE: exit 1" 1
+expect_grep "duplicate labels + DEVICE: hint to unplug" "unplug it"
 
 # 29. eject
 : > "$MOCK_LOG"
