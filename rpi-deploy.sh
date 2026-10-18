@@ -1056,7 +1056,7 @@ do_install() {
     local sysname drvname
     sysname="$(basename "$sys")"
     drvname="$(basename "$drv")"
-    [[ -d "$MOUNT/nix/store/$sysname" && -d "$MOUNT/nix/store/$drvname" ]] \
+    [[ -d "$MOUNT/nix/store/$sysname" && -f "$MOUNT/nix/store/$drvname" ]] \
       || die "verification failed: system or drv not found in target store"
     [[ -e "$MOUNT/etc/NIXOS" ]] || warn "missing $MOUNT/etc/NIXOS; the install may be incomplete"
     [[ -e "$MOUNT/boot/firmware/config.txt" ]] || warn "no $MOUNT/boot/firmware/config.txt; the firmware partition was not populated, check before booting"

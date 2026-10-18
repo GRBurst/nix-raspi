@@ -96,7 +96,7 @@ case " $* " in
         case "$state" in
           pre)        [[ "$a" == "--to" ]] && state="wanttarget" ;;
           wanttarget) target="$a"; state="paths" ;;
-          paths)      mkdir -p "$target/nix/store/$(basename "$a")"; case "$a" in *.drv) ;; *) : > "$target/nix/store/$(basename "$a")/activate"; chmod +x "$target/nix/store/$(basename "$a")/activate" ;; esac ;;
+          paths)      case "$a" in *.drv) mkdir -p "$target/nix/store"; echo "Derive(...)" > "$target/nix/store/$(basename "$a")" ;; *) mkdir -p "$target/nix/store/$(basename "$a")"; : > "$target/nix/store/$(basename "$a")/activate"; chmod +x "$target/nix/store/$(basename "$a")/activate" ;; esac ;;
         esac
       done
     fi
@@ -455,7 +455,7 @@ sysname="$(basename "$MOCK_SYS")"; drvname="$(basename "$MOCK_DRV")"
 expect_true "install: system path landed on card" \
   test -d "$C13/nix/store/$sysname"
 expect_true "install: drv path landed on card" \
-  test -d "$C13/nix/store/$drvname"
+  test -f "$C13/nix/store/$drvname"
 
 # 14. real install fails verification when the copy produced nothing
 C14="$(new_card t14)"
