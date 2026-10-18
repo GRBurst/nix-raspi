@@ -2,8 +2,9 @@
 
 > **Maintain this file.** Update it at the end of every work step: status,
 > decisions, open problems, what was verified vs. assumed. A new session should
-> be able to start from this file alone. Last updated: end of session 1
-> (HEAD `9f59d77` plus uncommitted work, see "Uncommitted").
+> be able to start from this file alone. Last updated: session 2 (see §10 for the
+> latest experiments and the pending decision; §4/§5 describe the older
+> `nixos-install` path, which has since been made to work with VPN off).
 
 Legend: **[V]** verified by running it · **[M]** only verified against mocks /
 unit tests · **[?]** assumption or guess, not verified.
@@ -216,18 +217,136 @@ My view:
 
 ## 8. Uncommitted at the time of writing
 
-- `rpi-deploy.sh`: when building `.#rpi-binfmt` fails, show the nix output tail
-  and the network hint (log in `.rpi-build/binfmt-build.log`).
-- `tests/deploy-unit.sh`: tests for that (307 pass).
-- `HANDOFF.md` (this file).
+Committed so far in session 2 (latest `df6b4da`): error visibility for the binfmt
+build, `.drv`-is-a-file fix. **Uncommitted** (commit with the next step):
+- `flake.nix`: experimental `nixosConfigurations.rpi-image` (minimal sd-image,
+  recommended) and `rpi-image-nvmd` (upstream module as is, comparison only).
+- `tests/boot-smoke.sh`: root-free qemu boot test of an image (§10.4).
+- `.gitignore`: `.scratch/`; `HANDOFF.md` §10.
 
 ## 9. Suggested next steps
 
-1. Decide the direction (§6) with the user before adding more workarounds.
-2. If staying with `nixos-install`: get the static qemu (or the host fix), run
-   `./rpi-deploy.sh install`, send the full output of any failure.
-3. After a successful install: `./rpi-deploy.sh eject`, boot the Pi, check
-   `ssh -p 2222 pi@<ip>`, wifi, then commit and update this file.
-4. Remaining nice-to-haves: VM check never completed here; consider an
-   integration test that does not need sudo (e.g. nixos VM test that runs
-   `rpi-deploy` against a loop device).
+1. **The card from the user's last `install` run is probably already good**
+   (nixos-install finished, config copied; only my verification was wrong).
+   Eject, boot the Pi, check `ssh -p 2222 pi@<ip>`, wifi, U-Boot stage. Report
+   the result: that is the first real hardware evidence either way (§4 "not yet
+   reached").
+2. Get the user's decision on §10.6 (image flow vs. keeping `nixos-install`).
+3. If image flow: implement `rpi-deploy flash DEVICE` (stream `zstdcat` to the
+   device with the same safety checks as `prepare --format`: refuse host disks,
+   whole-disk only, unmount, confirmation), make `build` produce the image
+   (+ optional `tests/boot-smoke.sh`), keep `config`/`devices`/`show`/`eject`,
+   delete the binfmt/chroot/bridge/`prepare --format` code and its tests.
+   Consider importing the sd-image module into `rpi` itself so the image system
+   and `nixos-rebuild --target-host` deploy the same derivation.
+4. Remaining nice-to-haves: VM check never completed here (downloads); real
+   hardware validation of the image's first boot incl. `expandOnBoot`.
+
+## 10. Decision record: how to get the system onto the card
+
+Status: **experiments run, decision pending the user** (HEAD + uncommitted flake
+variants `rpi-image` / `rpi-image-nvmd`, see §8). Method: define criteria, run
+spikes that can run without root, record numbers.
+
+### 10.1 Options
+
+| id | option | one-line description |
+|---|---|---|
+| A | `nixos-install` + temporary F handler | what `rpi-deploy install` does today |
+| B | `nixos-install` + permanent host fix | `boot.binfmt.preferStaticEmulators = true` on the host, delete the workaround code |
+| C | **SD image** | `nix build` an image from our own config (nvmd/nixpkgs sd-image modules), flash it with `dd`/`zstdcat`; populate runs inside the nix build, no chroot |
+| D | install on the Pi | boot a stock image, `nixos-rebuild --target-host` (not evaluated: needs a stock boot + network first, rejected as first step) |
+| E | re-implement nixos-install natively | rejected by analysis: duplicates activate/bootloader logic, brittle across NixOS versions |
+
+### 10.2 Criteria
+
+R1 dependence on host/kernel boundary (binfmt flags, chroot, mount namespaces) ·
+R2 time to a card · R3 time for a config-only change · R4 root needed for what ·
+R5 verifiable before touching the card · R6 code/complexity in `rpi-deploy` ·
+R7 upstream-supported path · R8 secrets handling · R9 known failure modes.
+
+### 10.3 Measurements (sessions 1–2)
+
+**A (current), real run by the user, VPN off:** the whole `nixos-install`
+succeeded with the temporary F handler ("installation finished!", bootloader
+installed, root password set). The only failure left was my own post-install
+check (`-d` on a `.drv` file; fixed in `df6b4da`). Before that: three real
+failures, all at the binfmt/chroot boundary (§5). The VPN was the cause of the
+cut-off cache downloads. Install duration was not captured.
+**[V]** works; **[V]** needs sudo + writes to `/proc/sys/fs/binfmt_misc` on every
+run; depends on a 100 MiB static qemu download.
+
+**C (image), spike, no root, no chroot:**
+- `nix build .#nixosConfigurations.rpi-image.config.system.build.sdImage`
+  built in **481 s** (8 min) cold for the image step (inputs cached; 20
+  derivations, 3.8 MiB download). **[V]**
+- Output `neptun-rpi3.img.zst`: **2.07 GiB compressed, 5.67 GiB raw**. Flash
+  time at ~20 MB/s ≈ 5 min **[?, not measured]**.
+- Contents checked without root (`sfdisk`, `mdir`, `debugfs`) **[V]**: MBR with
+  pinned disk id `0x2175794e`; p1 FAT32 256 MiB label `NIXOS_BOOT` (volume id
+  2175-794E) holding bootcode/start*.elf/fixup*.dat/dtbs/overlays, `config.txt`
+  (`kernel=u-boot-rpi-arm64.bin`), `u-boot-rpi-arm64.bin`; p2 ext4 5.4 GiB label
+  `NIXOS_SD` with `nix-path-registration`, `/boot/extlinux/extlinux.conf`,
+  `/boot/nixos/{Image 35 MB, initrd 28 MB, dtbs}`, `/boot/firmware` mount point.
+  Equivalent to what `nixos-install` produced in A.
+- Closure sizes **[V]**: installed `rpi` 3.97 GiB; image variant B (generic
+  `sd-image.nix` only) 3.97 GiB (identical); variant A (nvmd's
+  `sd-image-raspberrypi.nix` as is, which imports `profiles/base.nix`) 4.08 GiB
+  (+110 MiB rescue tools, 53 derivations to build instead of 20). → use B.
+- **Boot smoke test of the exact image in qemu (`-M raspi3b`, direct kernel
+  boot, 8 GiB card)** **[V]**: vendor kernel 6.18.34 boots ("Machine model:
+  Raspberry Pi 3 Model B"), systemd initrd finds the root **by label**
+  (`mmcblk0p2`), switches root, hostname `neptun`, **first-boot expansion
+  works** ("resizing filesystem from 1419800 to 2029568 blocks"). Guest runs
+  ~5x slower than real time under TCG. Reaches the login prompt: see 10.4.
+  Limits: qemu has no VideoCore firmware (VCHI/expgpio errors are expected),
+  no U-Boot/GPU boot stage, no wifi; the UART of the Pi 3 is claimed by
+  Bluetooth, so direct boot needs `earlycon=pl011,0x3f201000` and output after
+  journald needs `systemd.log_target=kmsg` to be visible.
+
+### 10.4 Smoke test result (userspace) **[V]**
+
+The unmodified image reached the login prompt in qemu `raspi3b`: a framebuffer
+screenshot (taken through the qemu monitor, `screendump -f png`) shows
+`<<< Welcome to NixOS sd-card-26.05.20260724.597283a (aarch64) - tty1 >>>` and
+`neptun login:` about 4-5 minutes (wall) after start. That covers kernel, initrd,
+root by label, stage-2 systemd, first-boot expansion and getty. Not covered: GPU
+firmware/U-Boot, wifi, sshd reachability (qemu run had no network; sshd start was
+not observed directly), real hardware.
+
+Lessons about the harness (do not repeat): adding `systemd.log_target=kmsg
+systemd.log_level=info` made the guest stall after "Queued start job for default
+target Multi-User System" in one run (observation changed behaviour; not
+understood); `console=ttyAMA0` alone prints nothing (UART owned by Bluetooth);
+`nc` to the monitor blocks forever without a timeout.
+Reproducible as `tests/boot-smoke.sh IMAGE.img.zst` (~6 min, no root); the script
+itself was validated with a second full run (same login prompt, exit 0).
+Evidence screenshot (git-ignored): `.scratch/login-prompt-evidence.png`.
+
+### 10.5 Drawbacks (there is no option without any)
+
+- **C:** any config change re-creates the whole ext4 image (~8 min) instead of
+  copying a delta → iterate afterwards with `nixos-rebuild --target-host` (B/D
+  style, native activation on the Pi), not by re-flashing. The image is
+  5.67 GiB raw, written in full (~5 min). Secrets (`wireless.env`) must still be
+  put on the card after flashing (mount p2, copy `/etc/nixos`), because the image
+  lives in the world-readable nix store. `prepare --format` is replaced by
+  "flash overwrites the card".
+- **A/B:** every run depends on qemu-in-chroot behaviour that mocks cannot test,
+  needs sudo for the heavy part, and A additionally needs a 100 MiB download and
+  binfmt writes. B is the cleanest variant of this family.
+- **Image path unknowns:** U-Boot/firmware stage and wifi on real hardware are
+  not covered by any experiment so far (same for A, nvmd upstream ships the same
+  populate commands).
+
+### 10.6 Preliminary conclusion (to confirm with the user)
+
+C removes the whole class of failures we kept hitting (R1), can be fully built
+and boot-tested **without root before the card is touched** (R5), uses the
+upstream populate path (R7), and shrinks `rpi-deploy` (R6). Its cost is R3
+(slower config iteration), which a native `nixos-rebuild --target-host` covers.
+Recommended shape: `rpi-deploy build` = build the image (+ qemu smoke test as an
+optional check), `rpi-deploy flash DEVICE` = stream the image to the card with
+confirmation, `rpi-deploy config` = copy `/etc/nixos` incl. secrets, keep
+`devices`/`show`/`eject`; drop `prepare --format`, the chroot probe, the binfmt
+registration and the bridge.
