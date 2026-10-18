@@ -50,6 +50,7 @@ MOUNT_SET=0
 ATTR="rpi"
 FROM=""
 DEVICE=""
+LABELS_CHANGED=0
 FORMAT=0
 ASSUME_YES=0
 BOOT_SIZE="256MiB"
@@ -78,7 +79,8 @@ Usage: rpi-deploy prepare [DEVICE] [--format] [--yes] [--boot-size SIZE]
 
   prepare    mount the card at TARGET (found by its labels NIXOS_SD /
              NIXOS_BOOT). `prepare DEVICE --format` first creates the
-             2-partition layout on a new card — DESTROYS everything on DEVICE:
+             2-partition layout on a new card — DESTROYS everything on DEVICE.
+             Without --format, DEVICE only gets its labels repaired:
                p1 256MiB FAT32 NIXOS_BOOT -> TARGET/boot/firmware
                p2 rest   ext4  NIXOS_SD   -> TARGET
   build      build from the local checkout (no SD card needed)
@@ -337,12 +339,64 @@ format_card() {
   run $SUDO udevadm settle
 }
 
+# blk_prop LSBLK_COLUMN BLKID_TAG DEV: a file-system property, from the udev
+# database (lsblk) and, if that has nothing (no udev, stale), from the device
+# itself (blkid, needs root; skipped in dry-run).
+blk_prop() {
+  local v
+  v="$(lsblk -no "$1" "$3" 2>/dev/null | head -n1 || true)"
+  if [[ -z "$v" && "$DRY_RUN" -eq 0 ]] && command -v blkid >/dev/null 2>&1; then
+    v="$($SUDO blkid -o value -s "$2" "$3" 2>/dev/null | head -n1 || true)"
+  fi
+  printf '%s\n' "$v"
+}
+
+# ensure_label PARTITION FSTYPE LABEL SETTER: verify PARTITION holds FSTYPE and
+# carries LABEL; fix a wrong/missing label in place (non-destructive). A
+# partition with another file system is never touched.
+ensure_label() {
+  local part="$1" want_fs="$2" want_label="$3" setter="$4" fs label mnt
+  fs="$(blk_prop FSTYPE TYPE "$part")"
+  if [[ -z "$fs" && "$DRY_RUN" -eq 1 ]]; then
+    warn "cannot read the file system of $part (dry-run, no udev data); assuming $want_fs"
+    fs="$want_fs"
+  fi
+  [[ "$fs" == "$want_fs" ]] \
+    || die "$part is '${fs:-unformatted}', expected $want_fs. Not a card made by this kit? Run: rpi-deploy prepare $DEVICE --format"
+  label="$(blk_prop LABEL LABEL "$part")"
+  [[ "$label" == "$want_label" ]] && return 0
+  mnt="$(lsblk -no MOUNTPOINT "$part" 2>/dev/null | head -n1 || true)"
+  [[ -z "$mnt" ]] || die "$part has label '${label:-<none>}' (want $want_label) but is mounted at $mnt; unmount it first"
+  log "setting label of $part: '${label:-<none>}' -> $want_label"
+  case "$setter" in
+    fat) run $SUDO fatlabel "$part" "$want_label" ;;
+    ext) run $SUDO e2label "$part" "$want_label" ;;
+  esac
+  LABELS_CHANGED=1
+}
+
+# Make the card findable by label (what configuration.nix mounts by):
+# p1 = FAT32 NIXOS_BOOT, p2 = ext4 NIXOS_SD.
+ensure_labels() {
+  need_cmd lsblk fatlabel e2label udevadm
+  LABELS_CHANGED=0
+  ensure_label "$1" vfat NIXOS_BOOT fat
+  ensure_label "$2" ext4 NIXOS_SD ext
+  if [[ "$LABELS_CHANGED" -eq 1 ]]; then
+    # let udev refresh /dev/disk/by-label before it is consulted
+    run $SUDO udevadm trigger --action=change --settle "$1" "$2"
+  fi
+}
+
 # Mounts root at $MOUNT and the FAT partition at $MOUNT/boot/firmware.
 mount_card() {
   need_cmd findmnt
   local root_dev boot_dev cur
   if [[ -n "$DEVICE" ]]; then
     root_dev="$(part_dev "$DEVICE" 2)"; boot_dev="$(part_dev "$DEVICE" 1)"
+    # a fresh --format has just created the labels (mkfs -n / -L); otherwise
+    # repair missing/wrong ones on an existing NIXOS-style card
+    [[ "$FORMAT" -eq 1 ]] || ensure_labels "$boot_dev" "$root_dev"
     # (a fresh --format has just set the labels; in dry-run nothing exists yet)
     if [[ "$DRY_RUN" -eq 0 ]]; then
       [[ "$(readlink -f "$BYLABEL_DIR/NIXOS_SD" 2>/dev/null)" == "$(readlink -f "$root_dev")" \

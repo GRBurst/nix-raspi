@@ -129,7 +129,8 @@ rpi-deploy build                      # 1. build in the host store, record the r
 # ... insert the card ...
 rpi-deploy prepare /dev/sdX --format  # 2a. NEW/foreign card: partition + format + mount
                                       #     (DESTROYS /dev/sdX; asks you to type the device)
-rpi-deploy prepare                    # 2b. already-formatted card: just mount it (by label)
+rpi-deploy prepare /dev/sdX           # 2b. existing NixOS-style card: fix labels if needed, mount
+rpi-deploy prepare                    # 2c. card already labelled: just mount it (by label)
 rpi-deploy install                    # 3. copy system, nixos-install, copy config to etc/nixos
 rpi-deploy eject                      # 4. sync + unmount; boot the pi: ssh -p 2222 pi@<address>
 ```
@@ -137,6 +138,15 @@ rpi-deploy eject                      # 4. sync + unmount; boot the pi: ssh -p 2
 Everything else: `rpi-deploy config` re-copies only the configuration to
 `/etc/nixos` (no reinstall), `rpi-deploy show` prints the last build and the
 card/firmware mount state, `rpi-deploy all` is `build` + `install`.
+
+`prepare --format` sets the labels while creating the file systems
+(`mkfs.vfat -n NIXOS_BOOT`, `mkfs.ext4 -L NIXOS_SD`), the partition types
+(`c` FAT32 LBA, `83` Linux) and the boot flag on p1, then checks that
+`/dev/disk/by-label` resolves to the right partitions. `prepare /dev/sdX`
+without `--format` is non-destructive: if p1 is FAT and p2 is ext4 but their
+labels are missing or wrong (e.g. a card laid out by hand), it relabels them
+with `fatlabel`/`e2label` and refreshes udev; a partition with any other file
+system, or one that is mounted, is refused, never touched.
 
 Find the device with `lsblk` (the card shows up as `/dev/sdX` in a USB reader or
 `/dev/mmcblk0` in a built-in one). `prepare --format` refuses a disk the host
@@ -310,13 +320,13 @@ Three layers, all wired into `nix flake check`:
 
 ```sh
 nix flake check                                   # everything below
-nix build .#checks.x86_64-linux.rpi-deploy-unit  # 154 unit tests for rpi-deploy.sh
+nix build .#checks.x86_64-linux.rpi-deploy-unit  # 172 unit tests for rpi-deploy.sh
 nix build .#checks.x86_64-linux.rpi-host-vm       # boots a real VM (qemu), ~1-16 min
 nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module, eval-only proof
 ```
 
 1. **`rpi-deploy-syntax`** (both systems) — `bash -n` of the script.
-2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 154 unit tests
+2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 172 unit tests
    with mocked `nix`/`nixos-install`: preflight fail/success, build record
    round-trip (all fields), `show`, install verification incl. a failing
    store copy, `--from` with/without record, attr mismatch, HEAD-moved and
