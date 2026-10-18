@@ -108,7 +108,7 @@ export PATH="$BIN:$PATH"
 # All privileged commands go through the `sudo` mock, so the mutating tools
 # only record their arguments.
 MOCK_MNT="$T/mnt-state"; mkdir -p "$MOCK_MNT"; export MOCK_MNT
-for tool in wipefs mkfs.vfat mkfs.ext4 udevadm umount mount sync; do
+for tool in wipefs mkfs.vfat mkfs.ext4 udevadm umount mount sync fatlabel e2label; do
   cat > "$BIN/$tool" <<'MOCK'
 #!BASHPLACEHOLDER
 echo "$(basename "$0") $*" >> "$MOCK_LOG"
@@ -143,13 +143,18 @@ case " $* " in
   *" -nlso NAME "*)
     src="${@: -1}"; n="$(basename "$src")"; echo "$n"
     case "$n" in nvme*p[0-9]*) echo "${n%p[0-9]*}" ;; sd*[0-9]) echo "${n%[0-9]*}" ;; esac ;;
+  *" -no FSTYPE "*)
+    case "${@: -1}" in *p1|*[a-z]1) echo "${MOCK_FS_BOOT-vfat}" ;; *) echo "${MOCK_FS_ROOT-ext4}" ;; esac ;;
+  *" -no LABEL "*)
+    case "${@: -1}" in *p1|*[a-z]1) echo "${MOCK_LABEL_BOOT-NIXOS_BOOT}" ;; *) echo "${MOCK_LABEL_ROOT-NIXOS_SD}" ;; esac ;;
+  *" -no MOUNTPOINT "*) echo "${MOCK_PART_MNT:-}" ;;
   *" -nlo MOUNTPOINT "*) [[ -n "${MOCK_DEV_MOUNTS:-}" ]] && printf '%s\n' "$MOCK_DEV_MOUNTS" ;;
   *) echo "NAME SIZE FSTYPE LABEL MODEL (mock)" ;;
 esac
 exit 0
 MOCK
-sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,sfdisk,findmnt,lsblk}
-chmod 755 "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,sfdisk,findmnt,lsblk}
+sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,sfdisk,findmnt,lsblk}
+chmod 755 "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,sfdisk,findmnt,lsblk}
 
 # mountpoint helper that reports "not mounted" only for <dir>/boot/firmware
 cat > "$BIN/mp-nofw" <<'MOCK'
@@ -596,6 +601,36 @@ expect_exit "--format on build: exit 2" 2
 run_cmd bash "$SCRIPT" prepare /dev/sdq --mount "$C27"
 expect_exit "prepare DEVICE (foreign card, no --format): exit 1" 1
 expect_grep "prepare DEVICE (foreign card): hint" "prepare /dev/sdq --format"
+
+# 28b. labels: an existing card with missing/wrong labels is repaired, nothing is formatted
+: > "$MOCK_LOG"
+run_cmd env MOCK_LABEL_BOOT= MOCK_LABEL_ROOT=old bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
+expect_exit "labels repaired: exit 0" 0
+expect_grepf "labels: FAT label set" "fatlabel $DEVDIR/mmcblk0p1 NIXOS_BOOT" "$MOCK_LOG"
+expect_grepf "labels: ext4 label set" "e2label $DEVDIR/mmcblk0p2 NIXOS_SD" "$MOCK_LOG"
+expect_grepf "labels: udev refreshed" "udevadm trigger --action=change --settle" "$MOCK_LOG"
+expect_not_grep "labels: never formats" "mkfs" "$MOCK_LOG"
+expect_grep "labels: reported" "setting label of"
+: > "$MOCK_LOG"
+run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
+expect_exit "labels correct: exit 0" 0
+expect_not_grep "labels correct: nothing relabelled" "label" "$MOCK_LOG"
+run_cmd env MOCK_FS_ROOT=btrfs bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
+expect_exit "labels: foreign fs: exit 1" 1
+expect_grep "labels: foreign fs: message" "expected ext4"
+run_cmd env MOCK_FS_BOOT= bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
+expect_exit "labels: unformatted partition: exit 1" 1
+expect_grep "labels: unformatted: message" "unformatted"
+: > "$MOCK_LOG"
+run_cmd env MOCK_LABEL_ROOT=old MOCK_PART_MNT=/mnt/x bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
+expect_exit "labels: mounted partition not relabelled: exit 1" 1
+expect_grep "labels: mounted partition: message" "unmount it first"
+expect_not_grep "labels: mounted partition untouched" "e2label" "$MOCK_LOG"
+: > "$MOCK_LOG"
+run_cmd env MOCK_LABEL_ROOT=old bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --dry-run --mount "$C27"
+expect_exit "labels dry-run: exit 0" 0
+expect_grep "labels dry-run: prints e2label" "dry-run: sudo e2label"
+expect_true "labels dry-run: runs nothing" test ! -s "$MOCK_LOG"
 
 # 29. eject
 : > "$MOCK_LOG"
