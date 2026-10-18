@@ -30,7 +30,7 @@
       fsType = "ext4";
     };
     # FAT firmware partition (label kept from the previous layout, so existing
-    # cards need no re-partitioning). install.sh requires it mounted at
+    # cards need no re-partitioning). `rpi-deploy prepare` creates/mounts it at
     # <target>/boot/firmware during install.
     "/boot/firmware" = {
       device = "/dev/disk/by-label/NIXOS_BOOT";

@@ -2,7 +2,7 @@
 
 Headless NixOS system (no graphics server) for a Raspberry Pi 3 Model B V1.2,
 plus everything needed on the x86_64 build host: a NixOS / Home Manager module
-for aarch64 emulation and the `rpi-install` script that builds the system from
+for aarch64 emulation and the `rpi-deploy` script that builds the system from
 a checkout and installs it onto an SD card.
 
 - Hostname `neptun`, system `aarch64-linux`, NixOS 26.05 (the nixpkgs pinned
@@ -29,9 +29,9 @@ configuration.nix   the pi NixOS config
 home.nix            the pi home-manager config
 modules/
   build-host.nix        NixOS module: aarch64 build host (rpi.buildHost)
-  build-host-home.nix   Home Manager module: rpi-install on the PATH
+  build-host-home.nix   Home Manager module: rpi-deploy on the PATH
 tests/build-host.nix    x86_64 test system for the build-host module
-install.sh          rpi-install: build / install / show / all
+rpi-deploy.sh       rpi-deploy: prepare / build / install / config / eject / show / all
 secrets/            gitignored per-machine secrets (wireless.env)
 ```
 
@@ -54,7 +54,7 @@ modules = [
   inputs.pi.nixosModules.rpiBuildHost
   {
     rpi.buildHost.enable = true;
-    # optional: pre-sets RPI_FLAKE so `rpi-install` needs no --flake
+    # optional: pre-sets RPI_FLAKE so `rpi-deploy` needs no --flake
     rpi.buildHost.flakePath = "/home/pallon/projects/pi/nixos";
   }
 ];
@@ -67,14 +67,14 @@ then `nixos-rebuild switch --flake /etc/nixos`. That gives you:
   sandbox (`extra-sandbox-paths`) and adds `aarch64-linux` to
   `nix.extra-platforms`, so cross builds work out of the box;
 - `nix` experimental features `nix-command` and `flakes`;
-- `rpi-install` on the PATH (in `environment.systemPackages`), optionally
+- `rpi-deploy` on the PATH (in `environment.systemPackages`), optionally
   wrapped so `RPI_FLAKE` is preset.
 
 Verify with:
 
 ```sh
 nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # module test system
-rpi-install show                                                                # preflight overview
+rpi-deploy show                                                                # preflight overview
 ```
 
 ### B. Non-NixOS build host (Home Manager module)
@@ -99,30 +99,58 @@ nix.settings.extra-platforms = [ "aarch64-linux" ];  # or set in nix.conf
 
 Without aarch64 emulation every aarch64 derivation fails with
 `builder failed with exit code 255` (that is an emulation problem, not a
-configuration or graphics problem). `rpi-install build` refuses to start in
+configuration or graphics problem). `rpi-deploy build` refuses to start in
 that case.
 
 ## Building and installing
 
-The SD card is only needed at install time. `build` runs entirely from a
-local checkout of this repo, so the pi can keep running (card not mounted)
-while the build happens — including the multi-hour kernel build.
+### The SD card
+
+Two partitions on an MBR (dos) partition table, found by their **labels**
+(`configuration.nix` mounts by label, so the order/device name do not matter):
+
+| partition | size    | fs    | label        | mounted at       | holds                                   |
+|-----------|---------|-------|--------------|------------------|-----------------------------------------|
+| p1        | 256 MiB | FAT32 | `NIXOS_BOOT` | `/boot/firmware` | Pi firmware, `config.txt`, U-Boot, DTBs |
+| p2        | rest    | ext4  | `NIXOS_SD`   | `/`              | system, `/boot` (kernel, initrd, extlinux), `/etc/nixos` |
+
+There is no third partition. The Pi's ROM reads p1, which starts U-Boot; U-Boot
+reads `extlinux.conf` + kernel + initrd from `/boot` on p2.
+`rpi-deploy prepare` creates this layout and mounts it as
+`/media/nixos` + `/media/nixos/boot/firmware` (what `nixos-install` needs).
+
+### The flow
+
+The SD card is only needed from `prepare` on. `build` runs entirely from a local
+checkout, so the pi can keep running (card not inserted) while it builds.
 
 ```sh
-rpi-install build                  # build from the checkout, record the result
-rpi-install show                   # last build record + emulation preflight
-# ... later, with the card mounted at /media/nixos:
-rpi-install install                # install the recorded build (minutes)
-rpi-install install /media/nixos   # same, with an explicit target system root
-rpi-install all                    # build + install in one go (old behaviour)
+rpi-deploy build                      # 1. build in the host store, record the result
+# ... insert the card ...
+rpi-deploy prepare /dev/sdX --format  # 2a. NEW/foreign card: partition + format + mount
+                                      #     (DESTROYS /dev/sdX; asks you to type the device)
+rpi-deploy prepare                    # 2b. already-formatted card: just mount it (by label)
+rpi-deploy install                    # 3. copy system, nixos-install, copy config to etc/nixos
+rpi-deploy eject                      # 4. sync + unmount; boot the pi: ssh -p 2222 pi@<address>
 ```
 
-Usage: `rpi-install [build|install|all|show] [TARGET] [OPTIONS]`. `TARGET` is the
-root of the target NixOS system (default `/media/nixos`; same as `--mount`).
+Everything else: `rpi-deploy config` re-copies only the configuration to
+`/etc/nixos` (no reinstall), `rpi-deploy show` prints the last build and the
+card/firmware mount state, `rpi-deploy all` is `build` + `install`.
 
-Options: `--flake PATH` (default `$RPI_FLAKE` or `$PWD`), `--mount DIR`
-(default `/media/nixos`), `--attr NAME` (default `rpi`), `--from STOREPATH`
-(install a specific system), `--dry-run`.
+Find the device with `lsblk` (the card shows up as `/dev/sdX` in a USB reader or
+`/dev/mmcblk0` in a built-in one). `prepare --format` refuses a disk the host
+runs from (`/`, `/boot`, `/nix`, `/home`, ...), a partition instead of a whole
+disk, and a device that is mounted elsewhere; without `--yes` it makes you
+type the device path first. `--dry-run` prints every command without running
+it.
+
+Usage: `rpi-deploy prepare [DEVICE] [--format] [--yes] [--boot-size SIZE]` and
+`rpi-deploy [build|install|config|eject|all|show] [TARGET] [OPTIONS]`. `TARGET`
+is the root of the target NixOS system (default `/media/nixos`; same as
+`--mount`). Options: `--flake PATH` (default `$RPI_FLAKE` or `$PWD`),
+`--mount DIR`, `--attr NAME` (default `rpi`), `--from STOREPATH` (install a
+specific system), `--boot-size` (default `256MiB`), `--dry-run`.
 
 `build` writes a record to `<checkout>/.rpi-build/last` (gitignored):
 
@@ -130,25 +158,40 @@ Options: `--flake PATH` (default `$RPI_FLAKE` or `$PWD`), `--mount DIR`
 flake=...  attr=rpi  rev=<git HEAD>  dirty=clean|dirty  sys=<store path>  drv=<drv path>  built=<utc>
 ```
 
-`install` first requires the FAT firmware partition to be mounted at
-`<mount>/boot/firmware` (`sudo mount /dev/disk/by-label/NIXOS_BOOT
-<mount>/boot/firmware`); it refuses otherwise. It then:
+`install` requires the card root to be a real mount point and the FAT partition
+to be mounted at `<mount>/boot/firmware` (`prepare` does both); it refuses
+otherwise. It then:
 
 1. copies the recorded system + toplevel drv into the card's store
    (`sudo nix copy --no-check-sigs --to <mount>`),
 2. runs `sudo nixos-install --root <mount> --flake <checkout>#rpi` — pointed at
    the **host checkout**, so the evaluation matches the recorded build
-   bit-for-bit and **nothing is rebuilt**,
-3. verifies the paths exist in the target store.
+   bit-for-bit and **nothing is rebuilt**. The bootloader step fills
+   `/boot/firmware`,
+3. copies the configuration checkout to `<mount>/etc/nixos` (see below),
+4. verifies the paths exist in the target store and that `etc/NIXOS`,
+   `boot/firmware/config.txt`, `boot/firmware/u-boot-rpi-arm64.bin` and
+   `etc/nixos/flake.nix` are present.
+
+**Configuration on the card.** `nixos-install --flake` does *not* put the
+configuration on the target, but the pi needs it at `/etc/nixos`: the wifi
+password file lives at `/etc/nixos/secrets/wireless.env`, and that is where you
+edit and `nixos-rebuild` on the pi. `install` (and `config`) therefore mirror
+the checkout there — as root, **including `.git` and `secrets/`**, excluding
+`.rpi-build*`, `result*`, `.nixcache`, `.direnv`; files on the card that are not
+in the checkout are removed. Keep `.git` in the copy: with it nix treats the
+directory as a git flake, in which the untracked `secrets/wireless.env` is not
+copied into the world-readable nix store (the script warns if there is no
+`.git`, or no `secrets/wireless.env`).
 
 The record carries the git revision; if the checkout HEAD or the working tree
 has changed since the build, `install` warns that the target may rebuild.
 
 > **Why not just `nixos-install`?** It does not build in the host store: it
-> compiles the whole closure (kernel included) directly into the card's
-> `/nix/store`, as root, with build temp files on the SD. That is slow, wears
-> the card, and repeats in full after every re-flash. Building in the host
-> store once and copying over makes re-flashing a matter of minutes.
+> compiles the whole closure directly into the card's `/nix/store`, as root,
+> with build temp files on the SD. That is slow, wears the card, and repeats in
+> full after every re-flash. Building in the host store once and copying over
+> makes re-flashing a matter of minutes.
 
 ### Binary cache and pins
 
@@ -161,9 +204,9 @@ The vendor kernel is **not** in `cache.nixos.org`; it is in the
    16+ hour local kernel build under qemu. Do not add `nixpkgs.url`; update
    with `nix flake update nixos-raspberrypi` (moves the nixpkgs pin along).
 2. The cache must be enabled on the build host: `flake.nix` carries it in
-   `nixConfig`, `rpi-install` passes `--accept-flake-config` (works for
+   `nixConfig`, `rpi-deploy` passes `--accept-flake-config` (works for
    trusted nix users), and `rpi.buildHost.enable = true` adds it to the host's
-   `nix.conf` (`rpi.buildHost.nvmdCache`). `rpi-install` warns if it is
+   `nix.conf` (`rpi.buildHost.nvmdCache`). `rpi-deploy` warns if it is
    missing. The Pi itself trusts the cache via nixos-raspberrypi's
    `trusted-nix-caches` module.
 
@@ -180,7 +223,7 @@ that is minutes to an hour, not the kernel.
 
 ### Manual equivalent (for troubleshooting)
 
-Run from the checkout; this is what `rpi-install all` does:
+Run from the checkout; this is what `rpi-deploy all` does:
 
 ```sh
 T=.#nixosConfigurations.rpi.config.system.build.toplevel
@@ -194,13 +237,19 @@ sys=$(nix build --accept-flake-config $T --print-out-paths)
 drv=$(nix eval --raw --accept-flake-config $T.drvPath)
 sudo nix copy --no-check-sigs --to /media/nixos "$sys" "$drv"
 
-# 3. mount the FAT firmware partition inside the target root, then install
-#    (nothing is built here; the bootloader step fills /boot/firmware)
+# 3. card (new card: mkfs as in "The SD card"), mounted as root + firmware
+sudo mkdir -p /media/nixos && sudo mount /dev/disk/by-label/NIXOS_SD /media/nixos
 sudo mkdir -p /media/nixos/boot/firmware
 sudo mount /dev/disk/by-label/NIXOS_BOOT /media/nixos/boot/firmware
+
+# 4. install (nothing is built here; the bootloader step fills /boot/firmware)
 sudo nixos-install --root /media/nixos --flake .#rpi --option accept-flake-config true
 
-# 4. boot the pi, then: ssh -p 2222 pi@<pi-address>
+# 5. configuration onto the card (incl. .git and secrets/)
+sudo mkdir -p /media/nixos/etc/nixos
+tar -C . --exclude=./.rpi-build --exclude=./result --exclude=./.nixcache -cf - . | sudo tar -C /media/nixos/etc/nixos -xpf -
+
+# 6. sync, umount -R /media/nixos; boot the pi, then: ssh -p 2222 pi@<pi-address>
 ```
 
 `nixos-install --flake` builds from the **working tree**, not the commit;
@@ -219,7 +268,7 @@ Notes on the client side, evaluated and applied:
   and `extlinux.conf` live in `/boot` on the ext4 root `NIXOS_SD`. The
   partition labels are unchanged, so existing cards keep their layout. The
   firmware partition must be mounted at `<target>/boot/firmware` for the
-  install (`rpi-install install` checks and refuses otherwise).
+  install (`rpi-deploy install` checks and refuses otherwise).
 - **Home Manager is master**, not release-26.05: nix-terminal needs
   `programs.devenv`, which only exists on master. `home.nix` silences the
   release-mismatch warning and disables HM's nushell fzf integration (needs
@@ -252,7 +301,7 @@ Possible once a deploy key is in place: run
 `nixos-rebuild build --flake <host-checkout>#rpi` on the host and push the
 result to the pi over SSH (`nix copy --to` + `nixos-rebuild switch --flake`
 with the store pre-populated, or `devenv`/`deploy-rs`). Not implemented here;
-the current `rpi-install install` flow is the card-based baseline that it
+the current `rpi-deploy install` flow is the card-based baseline that it
 replaces.
 
 ## Testing
@@ -261,13 +310,13 @@ Three layers, all wired into `nix flake check`:
 
 ```sh
 nix flake check                                   # everything below
-nix build .#checks.x86_64-linux.rpi-install-unit  # 72 unit tests for install.sh
+nix build .#checks.x86_64-linux.rpi-deploy-unit  # 154 unit tests for rpi-deploy.sh
 nix build .#checks.x86_64-linux.rpi-host-vm       # boots a real VM (qemu), ~1-16 min
 nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module, eval-only proof
 ```
 
-1. **`rpi-install-syntax`** (both systems) — `bash -n` of the script.
-2. **`rpi-install-unit`** (`tests/install-unit.sh`, x86_64) — 72 unit tests
+1. **`rpi-deploy-syntax`** (both systems) — `bash -n` of the script.
+2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 154 unit tests
    with mocked `nix`/`nixos-install`: preflight fail/success, build record
    round-trip (all fields), `show`, install verification incl. a failing
    store copy, `--from` with/without record, attr mismatch, HEAD-moved and
@@ -278,7 +327,7 @@ nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  #
    reality: `nix` accepts flakes (experimental features from the module),
    the `aarch64-linux` binfmt handler is registered in
    `/proc/sys/fs/binfmt_misc`, an **aarch64 binary actually executes**
-   under emulation, the installed `rpi-install` is the `RPI_FLAKE` wrapper
+   under emulation, the installed `rpi-deploy` is the `RPI_FLAKE` wrapper
    pointing at `rpi.buildHost.flakePath`, and the script's own dry-run
    flows (including its emulation preflight) pass inside the VM.
 
@@ -292,7 +341,7 @@ sandbox paths, wrapper package present) — any drift fails every flake
 operation fast.
 
 ```sh
-nix build .#packages.x86_64-linux.rpi-install     # the script as a package
+nix build .#packages.x86_64-linux.rpi-deploy     # the script as a package
 ```
 
 ## Notes
