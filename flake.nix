@@ -211,6 +211,25 @@
             packages = forSystem [ "aarch64-linux" "x86_64-linux" ] (system: {
               rpi-deploy = rpiDeploy system;
               default = rpiDeploy system;
+            } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+              # The binfmt_misc registration line (with the F flag) that
+              # `rpi-deploy install` writes temporarily to
+              # /proc/sys/fs/binfmt_misc/register while nixos-install runs.
+              # Derived from the build-host module's own aarch64 registration
+              # (static qemu), so it is what boot.binfmt.preferStaticEmulators
+              # would set up permanently. Building it fetches that qemu.
+              # The interpreter is referenced directly instead of through
+              # /run/binfmt/<name>, so it needs no tmpfiles/systemd state.
+              rpi-binfmt =
+                let
+                  r = hostTestSystem.config.boot.binfmt.registrations.aarch64-linux;
+                  flags = nixpkgs.lib.optionalString r.preserveArgvZero "P"
+                    + nixpkgs.lib.optionalString (r.openBinary && !r.matchCredentials) "O"
+                    + nixpkgs.lib.optionalString r.matchCredentials "C"
+                    + "F";
+                in
+                (pkgsFor system).writeText "rpi-binfmt-register"
+                  ":rpi-deploy-aarch64:M:${toString r.offset}:${r.magicOrExtension}:${toString r.mask}:${r.interpreter}:${flags}";
             });
 
             checks = forSystem [ "aarch64-linux" "x86_64-linux" ] (system: {
