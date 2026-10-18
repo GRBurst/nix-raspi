@@ -257,9 +257,17 @@ refreshed while it runs.
 **`chroot: failed to run command ... No such file or directory`** during
 `nixos-install` is *not* a copy or path problem (the closure is complete
 in the card's store); it is the aarch64 emulator being unusable inside the
-chroot, see the F flag above. `install` prints this and how to check it when
-`nixos-install` fails, and verifies right after the copy that the system's
-`activate` is on the card.
+chroot, see the F flag above. `install` therefore **tests the chroot before it
+starts `nixos-install`**: right after the copy it verifies that the system's
+`activate` is on the card and runs the system's own `bash` inside a chroot of
+the card. If that fails it bridges the emulator interpreter into the card and
+tests again; if it still fails it stops *before* installing and prints the facts
+(binfmt entry and flags, where the interpreter resolves, whether it exists on
+the card, the chroot's error) instead of running a doomed `nixos-install`.
+
+**Clean install.** Nothing on the card needs to be removed for a re-run (see
+above). For a strictly clean card: `rpi-deploy prepare /dev/sdX --format`, then
+`rpi-deploy install`.
 
 > **Why not just `nixos-install`?** It does not build in the host store: it
 > compiles the whole closure directly into the card's `/nix/store`, as root,
@@ -389,13 +397,13 @@ Three layers, all wired into `nix flake check`:
 
 ```sh
 nix flake check                                   # everything below
-nix build .#checks.x86_64-linux.rpi-deploy-unit  # 273 unit tests for rpi-deploy.sh
+nix build .#checks.x86_64-linux.rpi-deploy-unit  # 287 unit tests for rpi-deploy.sh
 nix build .#checks.x86_64-linux.rpi-host-vm       # boots a real VM (qemu), ~1-16 min
 nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module, eval-only proof
 ```
 
 1. **`rpi-deploy-syntax`** (both systems) — `bash -n` of the script.
-2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 273 unit tests
+2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 287 unit tests
    with mocked `nix`/`nixos-install`: preflight fail/success, build record
    round-trip (all fields), `show`, install verification incl. a failing
    store copy, `--from` with/without record, attr mismatch, HEAD-moved and
