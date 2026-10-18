@@ -50,6 +50,8 @@ mkdir -p "$BIN"
 cat > "$BIN/nix" <<'MOCK'
 #!BASHPLACEHOLDER
 case " $* " in
+  *" path-info "*) echo "$MOCK_SYS ${MOCK_CLOSURE-1000}" ;;
+  *" --apply "*) echo "${MOCK_LOGIN-pi 1 0}" ;;
   *" show-config "*)
     if [[ "${MOCK_PLATFORMS:-}" == *aarch64* ]]; then
       echo "extra-platforms = x86_64-linux aarch64-linux"
@@ -115,6 +117,14 @@ echo "$(basename "$0") $*" >> "$MOCK_LOG"
 exit 0
 MOCK
 done
+# flock DEV CMD...: record, then run CMD (like util-linux flock on a path)
+cat > "$BIN/flock" <<'MOCK'
+#!BASHPLACEHOLDER
+echo "flock $1" >> "$MOCK_LOG"
+shift
+exec "$@"
+MOCK
+
 # sfdisk also records the partition script it reads from stdin
 cat > "$BIN/sfdisk" <<'MOCK'
 #!BASHPLACEHOLDER
@@ -139,6 +149,8 @@ MOCK
 cat > "$BIN/lsblk" <<'MOCK'
 #!BASHPLACEHOLDER
 case " $* " in
+  *" -dnP "*) echo 'PATH="/dev/sdq" SIZE="29.8G" TRAN="usb" RM="1" MODEL="Card Reader"' ;;
+  *" -dno RM "*) echo "${MOCK_RM:-1}" ;;
   *" -dno TYPE "*) echo "${MOCK_LSBLK_TYPE:-disk}" ;;
   *" -nlso NAME "*)
     src="${@: -1}"; n="$(basename "$src")"; echo "$n"
@@ -153,8 +165,8 @@ case " $* " in
 esac
 exit 0
 MOCK
-sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,sfdisk,findmnt,lsblk}
-chmod 755 "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,sfdisk,findmnt,lsblk}
+sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,flock,sfdisk,findmnt,lsblk}
+chmod 755 "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,flock,sfdisk,findmnt,lsblk}
 
 # mountpoint helper that reports "not mounted" only for <dir>/boot/firmware
 cat > "$BIN/mp-nofw" <<'MOCK'
@@ -166,7 +178,7 @@ sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/mp-nofw"; chmod 755 "$BIN/mp-
 # by-label fixtures: a card whose labels point at $DEVDIR/mmcblk0p{1,2} (names
 # only; nothing is opened), plus the dummy "device" used by the format tests
 DEVDIR="$T/dev"; mkdir -p "$DEVDIR"; touch "$DEVDIR/mmcblk0p1" "$DEVDIR/mmcblk0p2"
-mkdir -p "$T/by-label"
+mkdir -p "$T/by-label" "$T/by-label-empty"
 ln -s $DEVDIR/mmcblk0p2 "$T/by-label/NIXOS_SD"
 ln -s $DEVDIR/mmcblk0p1 "$T/by-label/NIXOS_BOOT"
 export RPI_BYLABEL_DIR="$T/by-label"
@@ -362,7 +374,7 @@ expect_grep "install --dry-run: store copy" "dry-run: sudo nix copy --no-check-s
 expect_grepf "install --dry-run: nixos-install args" "dry-run: sudo nixos-install --root $C11 --flake $F9#rpi"
 
 # 12. real install with missing card
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$T/no-card"
+run_cmd env RPI_BYLABEL_DIR="$T/by-label-empty" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$T/no-card"
 expect_exit "install (card missing): exit 1" 1
 expect_grep "install (card missing): message" "mount point does not exist"
 
@@ -540,7 +552,7 @@ expect_exit "prepare (mount point busy): exit 1" 1
 expect_grep "prepare (mount point busy): message" "already mounted from /dev/sdz9"
 rm -f "$MOCK_MNT"/*
 # no labelled card at all
-mkdir -p "$T/by-label-empty"
+
 run_cmd env RPI_BYLABEL_DIR="$T/by-label-empty" bash "$SCRIPT" prepare --mount "$C27"
 expect_exit "prepare (no card): exit 1" 1
 expect_grep "prepare (no card): hint to format" "prepare /dev/sdX --format"
@@ -574,7 +586,7 @@ expect_grep "format: bad --boot-size: message" "boot-size must look like"
 : > "$MOCK_LOG"
 run_cmd bash "$SCRIPT" prepare /dev/sdq --format --dry-run --mount "$C27"
 expect_exit "format --dry-run: exit 0" 0
-expect_grep "format --dry-run: prints sfdisk" "dry-run: sudo sfdisk"
+expect_grep "format --dry-run: prints sfdisk (under flock)" "dry-run: sudo flock /dev/sdq sfdisk --quiet /dev/sdq"
 expect_grep "format --dry-run: warns about data loss" "DESTROY ALL DATA on /dev/sdq"
 expect_true "format --dry-run: runs nothing" test ! -s "$MOCK_LOG"
 # safety
@@ -584,9 +596,15 @@ expect_grep "format (host disk): message" "holds the host's"
 run_cmd env MOCK_LSBLK_TYPE=part bash "$SCRIPT" prepare /dev/sdq1 --format --yes --mount "$C27"
 expect_exit "format (partition given): exit 1" 1
 expect_grep "format (partition given): message" "not a whole disk"
-run_cmd env MOCK_DEV_MOUNTS=/mnt/other bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
-expect_exit "format (mounted elsewhere): exit 1" 1
-expect_grep "format (mounted elsewhere): message" "mounted at /mnt/other"
+: > "$MOCK_LOG"
+run_cmd env MOCK_DEV_MOUNTS=/run/media/u/NIXOS_SD bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
+expect_grep "format (automounted): announced" "will be unmounted"
+expect_grepf "format (automounted): unmounted before partitioning" "umount -R /run/media/u/NIXOS_SD" "$MOCK_LOG"
+run_cmd env MOCK_DEV_MOUNTS="[SWAP]" bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
+expect_exit "format (swap): exit 1" 1
+expect_grep "format (swap): message" "used as swap"
+run_cmd env MOCK_RM=0 bash "$SCRIPT" prepare /dev/sdq --format --dry-run --mount "$C27"
+expect_grep "format (non-removable): warns" "not a removable device"
 run_cmd env RPI_ALLOW_NONBLOCK=0 bash "$SCRIPT" prepare /tmp/not-a-device --format --yes --mount "$C27"
 expect_exit "format (not a block device): exit 1" 1
 expect_grep "format (not a block device): message" "not a block device"
@@ -631,6 +649,61 @@ run_cmd env MOCK_LABEL_ROOT=old bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --dry-run
 expect_exit "labels dry-run: exit 0" 0
 expect_grep "labels dry-run: prints e2label" "dry-run: sudo e2label"
 expect_true "labels dry-run: runs nothing" test ! -s "$MOCK_LOG"
+
+# 28c. regression: sfdisk runs exactly once, under flock, after wipefs + settle
+: > "$MOCK_LOG"
+run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --format --yes --mount "$C27"
+expect_exit "format (sfdisk once): exit 0" 0
+expect_true "format: sfdisk invoked exactly once" test "$(grep -c '^sfdisk ' "$MOCK_LOG")" = 1
+expect_grepf "format: partition table written under flock" "flock $DEVDIR/mmcblk0" "$MOCK_LOG"
+expect_true "format: wipefs before sfdisk" test "$(grep -n '^wipefs' "$MOCK_LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n '^sfdisk' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+expect_true "format: mkfs once per partition" test "$(grep -c '^mkfs' "$MOCK_LOG")" = 2
+
+# 31. devices: candidates + card status
+run_cmd bash "$SCRIPT" devices
+expect_exit "devices: exit 0" 0
+expect_grep "devices: lists removable disk" "/dev/sdq .*29.8G.*usb.*Card Reader"
+expect_grep "devices: card present hint" "NIXOS_SD / NIXOS_BOOT is present"
+run_cmd env RPI_BYLABEL_DIR="$T/by-label-empty" bash "$SCRIPT" devices
+expect_grep "devices: no card hint" "prepare /dev/sdX --format"
+run_cmd env RPI_BYLABEL_DIR="$T/by-label-empty" bash "$SCRIPT" prepare --mount "$C27"
+expect_exit "prepare (no card): exit 1 (still)" 1
+expect_grep "prepare (no card): lists candidates" "removable / MMC disks"
+
+# 32. install mounts a labelled but unmounted card by itself
+: > "$MOCK_LOG"
+run_cmd env RPI_MOUNTPOINT_CMD=false RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C27"
+expect_grep "install: auto-mount announced" "mounting the card found by its labels"
+expect_grepf "install: auto-mount mounted the root" "mount $DEVDIR/mmcblk0p2 $C27" "$MOCK_LOG"
+
+# 33. install: card summary, space check, login check, next steps
+C33="$(new_card t33)"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
+expect_exit "install (ux): exit 0" 0
+expect_grep "install: card summary" "target card: .* total, .* free"
+expect_grep "install: duration reported" "in [0-9][0-9]*s"
+expect_grep "install: next steps" "next: rpi-deploy eject"
+expect_not_grep "install: no login warning when a key exists" "could not log in"
+run_cmd env MOCK_CLOSURE=99999999999999999 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
+expect_exit "install (closure too big): exit 1" 1
+expect_grep "install (closure too big): message" "does not fit on the card"
+run_cmd env MOCK_LOGIN="pi 0 0" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
+expect_exit "install (no login): still installs" 0
+expect_grep "install (no login): warns" "could not log in to the pi"
+run_cmd env MOCK_LOGIN="pi 0 1" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
+expect_not_grep "install (password set): no warning" "could not log in"
+run_cmd env MOCK_LOGIN="garbage" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
+expect_not_grep "install (unparsable login info): silent" "could not log in"
+
+# 34. build: next steps; no colour codes when not on a terminal
+F34="$(new_flake t34)"
+run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --flake "$F34"
+expect_exit "build (ux): exit 0" 0
+expect_grep "build: duration reported" "built in [0-9][0-9]*s"
+expect_grep "build: next steps" "next: insert the SD card"
+expect_not_grep "no ANSI colours off a tty" $'\033'
+run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" all --flake "$F34" --mount "$C33"
+expect_not_grep "all: no premature next-step hint after build" "next: insert the SD card"
 
 # 29. eject
 : > "$MOCK_LOG"

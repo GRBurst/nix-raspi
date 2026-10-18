@@ -20,10 +20,11 @@
 #   config     only copy the config checkout to <mount>/etc/nixos
 #   eject      sync and unmount the card
 #   all        build + install (default when no subcommand is given)
+#   devices    list removable disks (candidates for prepare DEVICE) and card status
 #   show       show the last build record and host/card status
 #
 # Usage: rpi-deploy.sh prepare [DEVICE] [--format] [--yes] [--boot-size SIZE]
-#        rpi-deploy.sh [build|install|config|eject|all|show] [TARGET] [OPTIONS]
+#        rpi-deploy.sh [build|install|config|eject|all|show|devices] [TARGET] [OPTIONS]
 #   TARGET         root of the target NixOS system (default: /media/nixos)
 #
 # Options:
@@ -51,6 +52,8 @@ ATTR="rpi"
 FROM=""
 DEVICE=""
 LABELS_CHANGED=0
+DEV_MOUNTS=()
+PART_SCRIPT=""
 FORMAT=0
 ASSUME_YES=0
 BOOT_SIZE="256MiB"
@@ -72,7 +75,7 @@ ALLOW_NONBLOCK="${RPI_ALLOW_NONBLOCK:-0}"
 usage() {
   cat <<'USAGE_EOF'
 Usage: rpi-deploy prepare [DEVICE] [--format] [--yes] [--boot-size SIZE]
-       rpi-deploy [build|install|config|eject|all|show] [TARGET] [OPTIONS]
+       rpi-deploy [build|install|config|eject|all|show|devices] [TARGET] [OPTIONS]
 
   TARGET     root of the target NixOS system, e.g. /media/nixos
              (default: /media/nixos; same as --mount)
@@ -89,6 +92,7 @@ Usage: rpi-deploy prepare [DEVICE] [--format] [--yes] [--boot-size SIZE]
   config     only copy the config checkout to TARGET/etc/nixos
   eject      sync and unmount the card
   all        build + install (default when no subcommand is given)
+  devices    list removable disks (candidates for prepare DEVICE) and card status
   show       show the last build record and host/card status
 
 Options:
@@ -108,7 +112,7 @@ USAGE_EOF
 ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    prepare|build|install|config|eject|all|show)
+    prepare|build|install|config|eject|all|show|devices)
       [[ -n "$SUBCOMMAND" ]] && { echo "error: multiple subcommands ($SUBCOMMAND, $1)" >&2; exit 2; }
       SUBCOMMAND="$1"
       ;;
@@ -139,7 +143,7 @@ else
   done
 fi
 [[ "$FORMAT" -eq 0 || "$SUBCOMMAND" == "prepare" ]] || { echo "error: --format only applies to 'prepare'" >&2; exit 2; }
-[[ "$FORMAT" -eq 0 || -n "$DEVICE" ]] || { echo "error: --format needs a DEVICE, e.g.: rpi-deploy prepare /dev/sdX --format" >&2; exit 2; }
+[[ "$FORMAT" -eq 0 || -n "$DEVICE" ]] || { echo "error: --format needs a DEVICE, e.g.: rpi-deploy prepare /dev/sdX --format (list candidates: rpi-deploy devices)" >&2; exit 2; }
 
 # The long build must not run as root (root-owned results, .rpi-build state).
 # If started via sudo, re-exec as the invoking user; sudo is used only for the
@@ -154,9 +158,28 @@ STATE="$FLAKE/.rpi-build"
 LAST="$STATE/last"
 TOPOLEVEL="#nixosConfigurations.${ATTR}.config.system.build.toplevel"
 
-log()  { printf '\033[1;34m==> %s\033[0m\n' "$*"; }
-warn() { printf '\033[1;33mwarning: %s\033[0m\n' "$*" >&2; }
-die()  { printf '\033[1;31merror: %s\033[0m\n' "$*" >&2; exit 1; }
+# Colours only on a terminal (and not with NO_COLOR), so logs stay clean.
+if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+  C_BLUE=$'\033[1;34m'; C_YEL=$'\033[1;33m'; C_RED=$'\033[1;31m'; C_OFF=$'\033[0m'
+else
+  C_BLUE=""; C_YEL=""; C_RED=""; C_OFF=""
+fi
+log()  { printf '%s==> %s%s\n' "$C_BLUE" "$*" "$C_OFF"; }
+warn() { printf '%swarning: %s%s\n' "$C_YEL" "$*" "$C_OFF" >&2; }
+die()  { printf '%serror: %s%s\n' "$C_RED" "$*" "$C_OFF" >&2; exit 1; }
+
+# human_secs N: 754 -> 12m34s
+human_secs() {
+  local s="$1"
+  if (( s >= 3600 )); then printf '%dh%02dm%02ds' $((s/3600)) $((s%3600/60)) $((s%60))
+  elif (( s >= 60 )); then printf '%dm%02ds' $((s/60)) $((s%60))
+  else printf '%ds' "$s"; fi
+}
+
+# human_bytes N: 1536 -> 1.5 KiB
+human_bytes() {
+  awk -v b="$1" 'BEGIN { split("B KiB MiB GiB TiB", u, " "); i = 1; while (b >= 1024 && i < 5) { b /= 1024; i++ } printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'
+}
 
 # run <cmd...>: executes the command, or just prints it in dry-run mode.
 # Only for commands whose stdout is not captured.
@@ -210,8 +233,19 @@ EOF
   return $(( 1 - ok ))
 }
 
+# Best effort: if a card with our labels is present but not (fully) mounted
+# yet, mount it exactly like `rpi-deploy prepare` would. Convenience, so a
+# plain `rpi-deploy install` works right after inserting the card.
+auto_mount() {
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+  [[ -e "$BYLABEL_DIR/NIXOS_SD" && -e "$BYLABEL_DIR/NIXOS_BOOT" ]] || return 0
+  log "mounting the card found by its labels (same as: rpi-deploy prepare)"
+  mount_card
+}
+
 # The card root must be a real mount (not an empty directory on the host disk).
 require_card_root() {
+  $MOUNTPOINT_CMD "$MOUNT" >/dev/null 2>&1 || auto_mount
   if [[ ! -d "$MOUNT" ]]; then
     if [[ "$DRY_RUN" -eq 1 ]]; then warn "mount point does not exist: $MOUNT"; return; fi
     die "mount point does not exist: $MOUNT (run: rpi-deploy prepare)"
@@ -229,6 +263,7 @@ require_card() {
   # installer writes the Pi firmware, config.txt and U-Boot there during
   # nixos-install. Unmounted, it would land on the root fs and the Pi would
   # not boot.
+  $MOUNTPOINT_CMD "$MOUNT/boot/firmware" >/dev/null 2>&1 || auto_mount
   if ! $MOUNTPOINT_CMD "$MOUNT/boot/firmware" >/dev/null 2>&1; then
     if [[ "$DRY_RUN" -eq 1 ]]; then warn "$MOUNT/boot/firmware is not a mount point"; return; fi
     die "$MOUNT/boot/firmware is not a mount point (run: rpi-deploy prepare)"
@@ -278,6 +313,35 @@ part_dev() {
   if [[ "$1" =~ [0-9]$ ]]; then printf '%sp%s\n' "$1" "$2"; else printf '%s%s\n' "$1" "$2"; fi
 }
 
+# --- devices ------------------------------------------------------------------
+# Lists removable / MMC disks so the user can pick the DEVICE for `prepare`.
+list_devices() {
+  command -v lsblk >/dev/null 2>&1 || return 0
+  local out
+  out="$(lsblk -dnP -o PATH,SIZE,TRAN,RM,MODEL 2>/dev/null \
+    | awk -F'"' '$8 == "1" || $2 ~ /mmcblk/ { printf "  %-14s %8s  %-5s %s\n", $2, $4, $6, $10 }')"
+  if [[ -n "$out" ]]; then
+    echo "removable / MMC disks (candidates for DEVICE):"
+    echo "$out"
+  else
+    echo "no removable or MMC disk found; insert the card (see: lsblk)"
+  fi
+}
+
+do_devices() {
+  list_devices
+  echo
+  if [[ -e "$BYLABEL_DIR/NIXOS_SD" && -e "$BYLABEL_DIR/NIXOS_BOOT" ]]; then
+    echo "a card with the labels NIXOS_SD / NIXOS_BOOT is present:"
+    echo "  root     $(readlink -f "$BYLABEL_DIR/NIXOS_SD")"
+    echo "  firmware $(readlink -f "$BYLABEL_DIR/NIXOS_BOOT")"
+    echo "  -> rpi-deploy prepare  (mount it)  /  rpi-deploy install"
+  else
+    echo "no card with the labels NIXOS_SD / NIXOS_BOOT"
+    echo "  -> new card: rpi-deploy prepare /dev/sdX --format"
+  fi
+}
+
 # --- prepare ------------------------------------------------------------------
 # Refuse to touch a disk the host itself runs from.
 refuse_host_disk() {
@@ -303,24 +367,28 @@ format_card() {
   [[ "$BOOT_SIZE" =~ ^[0-9]+(MiB|GiB)$ ]] || die "--boot-size must look like 256MiB or 1GiB (got: $BOOT_SIZE)"
   refuse_host_disk
 
-  # Everything of this device that is mounted must be our own card mount.
+  # Mount points of the device (and its partitions) that must go before it
+  # can be repartitioned: our own card mount, or e.g. a desktop automount.
+  # They are unmounted after the confirmation below.
   local mp
+  DEV_MOUNTS=()
   while IFS= read -r mp; do
-    [[ -n "$mp" ]] || continue
-    if [[ "$mp" == "$MOUNT" || "$mp" == "$MOUNT"/* ]]; then
-      log "unmounting $MOUNT first"
-      run $SUDO umount -R "$MOUNT"
-      break
-    fi
-    die "$DEVICE is mounted at $mp; unmount it first"
-  done < <(lsblk -nlo MOUNTPOINT "$DEVICE" 2>/dev/null)
+    [[ -n "$mp" ]] && DEV_MOUNTS+=("$mp")
+  done < <(lsblk -nlo MOUNTPOINT "$DEVICE" 2>/dev/null | awk '!seen[$0]++')
 
   local p1 p2
   p1="$(part_dev "$DEVICE" 1)"; p2="$(part_dev "$DEVICE" 2)"
   echo "About to DESTROY ALL DATA on $DEVICE and create:" >&2
-  echo "  $p1  $BOOT_SIZE  FAT32  NIXOS_BOOT  (-> $MOUNT/boot/firmware)" >&2
-  echo "  $p2  rest        ext4   NIXOS_SD    (-> $MOUNT)" >&2
+  printf '  %s  %-8s %-6s %-11s (-> %s)\n' "$p1" "$BOOT_SIZE" FAT32 NIXOS_BOOT "$MOUNT/boot/firmware" >&2
+  printf '  %s  %-8s %-6s %-11s (-> %s)\n' "$p2" rest ext4 NIXOS_SD "$MOUNT" >&2
   lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL "$DEVICE" >&2 || true
+  if [[ ${#DEV_MOUNTS[@]} -gt 0 ]]; then
+    echo "  currently mounted (will be unmounted): ${DEV_MOUNTS[*]}" >&2
+  fi
+  # (built-in SD readers, mmcblk*, report RM=0 although the card is removable)
+  if [[ "$DEVICE" != */mmcblk* && "$(lsblk -dno RM "$DEVICE" 2>/dev/null | tr -d ' ')" == "0" ]]; then
+    warn "$DEVICE is not a removable device; make sure it really is the SD card"
+  fi
   if [[ "$DRY_RUN" -eq 0 && "$ASSUME_YES" -eq 0 ]]; then
     [[ -t 0 ]] || die "not interactive: pass --yes to confirm formatting $DEVICE"
     local ans
@@ -328,15 +396,58 @@ format_card() {
     [[ "$ans" == "$DEVICE" ]] || die "confirmation did not match; nothing was changed"
   fi
 
+  # Anything of this device that desktop automounters (udisks) or an earlier
+  # run left mounted would make sfdisk refuse ("disk is currently in use").
+  # The user has just confirmed the destruction, so unmount it.
+  local m
+  for m in "${DEV_MOUNTS[@]}"; do
+    [[ "$m" == "[SWAP]" ]] && die "$DEVICE is used as swap; run: sudo swapoff -a (or the right device) first"
+    log "unmounting $m"
+    run $SUDO umount -R "$m"
+  done
+
   log "partitioning $DEVICE"
   run $SUDO wipefs -a "$DEVICE"
+  run $SUDO udevadm settle
   [[ "$DRY_RUN" -eq 1 ]] && echo "dry-run: sfdisk script: label: dos; ,$BOOT_SIZE,c,* (FAT32 LBA, bootable); ,,83 (Linux, rest)"
-  printf 'label: dos\n,%s,c,*\n,,83\n' "$BOOT_SIZE" | run $SUDO sfdisk --quiet "$DEVICE"| run $SUDO sfdisk --quiet "$DEVICE"
-  run $SUDO udevadm settle
+  PART_SCRIPT="$(printf 'label: dos\n,%s,c,*\n,,83\n' "$BOOT_SIZE")"
+  retry 5 "partitioning $DEVICE" apply_partition_table
+  wait_for_nodes "$p1" "$p2"
   log "creating file systems"
-  run $SUDO mkfs.vfat -F 32 -n NIXOS_BOOT "$p1"
-  run $SUDO mkfs.ext4 -q -F -L NIXOS_SD "$p2"
+  retry 5 "formatting $p1" run $SUDO mkfs.vfat -F 32 -n NIXOS_BOOT "$p1"
+  retry 5 "formatting $p2" run $SUDO mkfs.ext4 -q -F -L NIXOS_SD "$p2"
   run $SUDO udevadm settle
+}
+
+# Writes $PART_SCRIPT as the partition table. flock takes the exclusive lock
+# udev honours, so udev's own probe of the freshly wiped disk cannot race us.
+apply_partition_table() {
+  run $SUDO flock "$DEVICE" sfdisk --quiet "$DEVICE" <<< "$PART_SCRIPT"
+}
+
+# retry N WHAT CMD...: a device that was just wiped/partitioned is briefly
+# busy (udev, automounters); retry a few times before giving up.
+retry() {
+  local n="$1" what="$2" i; shift 2
+  for (( i = 1; i <= n; i++ )); do
+    "$@" && return 0
+    if (( i < n )); then
+      warn "$what failed (device busy?); retrying ($i/$n)"
+      [[ "$DRY_RUN" -eq 1 ]] || { sleep 1; $SUDO udevadm settle || true; }
+    fi
+  done
+  die "$what failed after $n attempts (is something using $DEVICE? check: lsblk $DEVICE; sudo fuser -vm $DEVICE)"
+}
+
+# wait_for_nodes DEV...: the kernel/udev create partition nodes asynchronously.
+wait_for_nodes() {
+  [[ "$DRY_RUN" -eq 1 || "$ALLOW_NONBLOCK" -eq 1 ]] && return 0
+  local d i
+  $SUDO udevadm settle || true
+  for d in "$@"; do
+    for (( i = 0; i < 50; i++ )); do [[ -b "$d" ]] && break; sleep 0.2; done
+    [[ -b "$d" ]] || die "partition node $d did not appear after partitioning"
+  done
 }
 
 # blk_prop LSBLK_COLUMN BLKID_TAG DEV: a file-system property, from the udev
@@ -410,6 +521,7 @@ mount_card() {
       if [[ "$DRY_RUN" -eq 1 ]]; then
         warn "no card with labels NIXOS_SD / NIXOS_BOOT found"; root_dev="<NIXOS_SD>"; boot_dev="<NIXOS_BOOT>"
       else
+        list_devices >&2
         die "no card with labels NIXOS_SD / NIXOS_BOOT found. New card? Run: rpi-deploy prepare /dev/sdX --format"
       fi
     fi
@@ -505,6 +617,7 @@ do_build() {
 
   log "building $FLAKE$TOPOLEVEL (this takes a while for kernel changes)"
   mkdir -p "$STATE"
+  local t0=$SECONDS
 
   local drv=""
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -544,7 +657,10 @@ sys=$sys
 drv=$drv
 built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-    log "recorded build: $sys"
+    log "recorded build: $sys (built in $(human_secs $((SECONDS - t0))))"
+    if [[ "$SUBCOMMAND" == "build" ]]; then
+      log "next: insert the SD card (new card: rpi-deploy prepare /dev/sdX --format), then: rpi-deploy install"
+    fi
   fi
 }
 
@@ -560,6 +676,56 @@ read_record() {
   printf '%s\n' "$v"
 }
 
+# --- install checks ---------------------------------------------------------
+# Prints which card is about to be written (device, size, free space).
+card_summary() {
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+  local dev size avail
+  dev="$(mnt_source "$MOUNT")"
+  read -r size avail < <(df -B1 --output=size,avail "$MOUNT" 2>/dev/null | tail -n1) || true
+  if [[ "${size:-}" =~ ^[0-9]+$ && "${avail:-}" =~ ^[0-9]+$ ]]; then
+    log "target card: ${dev:-$MOUNT} at $MOUNT, $(human_bytes "$size") total, $(human_bytes "$avail") free"
+  fi
+}
+
+# check_space SYSTEM_PATH: does the system closure fit on the card? Dies only
+# if it cannot fit at all; warns if it exceeds the free space (it may still be
+# fine when most paths are already on the card from an earlier install).
+check_space() {
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+  local need size avail
+  need="$(nix path-info -S "$1" 2>/dev/null | awk 'END { print $NF }')"
+  [[ "$need" =~ ^[0-9]+$ ]] || return 0
+  read -r size avail < <(df -B1 --output=size,avail "$MOUNT" 2>/dev/null | tail -n1) || return 0
+  [[ "$size" =~ ^[0-9]+$ && "$avail" =~ ^[0-9]+$ ]] || return 0
+  if (( need + need / 10 > size )); then
+    die "the system closure ($(human_bytes "$need")) does not fit on the card ($(human_bytes "$size")); use a larger card"
+  elif (( need > avail )); then
+    warn "the system closure is $(human_bytes "$need") but only $(human_bytes "$avail") are free on the card; fine if most of it is already there, otherwise the copy will run out of space"
+  fi
+}
+
+# Warns when nobody could log in: the pi is headless, so a system without an
+# ssh key or password for a normal user is unreachable after boot.
+check_login() {
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+  local out name keys pw any=0
+  out="$(nix eval --raw --accept-flake-config "$FLAKE#nixosConfigurations.$ATTR.config.users.users" --apply '
+    us: builtins.concatStringsSep "\n" (map (u:
+      "${u.name} ${toString (builtins.length u.openssh.authorizedKeys.keys + builtins.length u.openssh.authorizedKeys.keyFiles)} ${
+        if (u.hashedPassword != null || u.initialHashedPassword != null || u.hashedPasswordFile != null
+            || u.password != null || u.initialPassword != null) then "1" else "0"}")
+      (builtins.filter (u: u.isNormalUser) (builtins.attrValues us)))' 2>/dev/null)" || return 0
+  [[ -n "$out" ]] || return 0
+  while read -r name keys pw; do
+    [[ "$keys" =~ ^[0-9]+$ ]] || return 0   # unexpected output: stay silent
+    if (( keys > 0 )) || [[ "$pw" == 1 ]]; then any=1; fi
+  done <<< "$out"
+  if (( any == 0 )); then
+    warn "no normal user in the config has an ssh key or a password, so you could not log in to the pi (password ssh is off). Add users.users.<name>.openssh.authorizedKeys.keys in configuration.nix, then run: rpi-deploy build && rpi-deploy install"
+  fi
+}
+
 # --- install ----------------------------------------------------------------
 # Copies the last built system into the card's store and runs nixos-install.
 # nixos-install is pointed at the *host checkout* (not the card copy), so the
@@ -567,6 +733,8 @@ read_record() {
 do_install() {
   require_nix
   require_card
+  local t0=$SECONDS
+  card_summary
 
   local sys="" drv=""
   if [[ -n "$FROM" ]]; then
@@ -615,6 +783,9 @@ do_install() {
     warn "checkout has uncommitted changes; the installed config will reflect them (possible rebuild on target)"
   fi
 
+  check_space "$sys"
+  check_login
+
   log "copying system into $MOUNT/nix store"
   # Paths built as a regular user are unsigned, hence --no-check-sigs; the
   # card store is root-owned, hence sudo (verified on real hardware).
@@ -637,7 +808,8 @@ do_install() {
     [[ -e "$MOUNT/boot/firmware/config.txt" ]] || warn "no $MOUNT/boot/firmware/config.txt; the firmware partition was not populated, check before booting"
     [[ -e "$MOUNT/boot/firmware/u-boot-rpi-arm64.bin" ]] || warn "no $MOUNT/boot/firmware/u-boot-rpi-arm64.bin; U-Boot missing, the Pi will not boot"
     [[ -f "$MOUNT/etc/nixos/flake.nix" ]] || warn "no $MOUNT/etc/nixos/flake.nix; the configuration was not copied to the card"
-    log "installed $sysname onto $MOUNT"
+    log "installed $sysname onto $MOUNT in $(human_secs $((SECONDS - t0)))"
+    log "next: rpi-deploy eject, put the card into the pi and power it on, then ssh in (port and user: see configuration.nix)"
   fi
 }
 
@@ -660,6 +832,8 @@ do_show() {
     echo "card    : not mounted (run: rpi-deploy prepare)"
   fi
   echo
+  do_devices
+  echo
   if [[ -f "$LAST" ]]; then
     echo "last build record ($LAST):"
     cat "$LAST"
@@ -677,4 +851,5 @@ case "$SUBCOMMAND" in
   install) do_install ;;
   all)     do_build; do_install ;;
   show)    do_show ;;
+  devices) do_devices ;;
 esac

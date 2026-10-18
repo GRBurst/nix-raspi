@@ -135,9 +135,13 @@ rpi-deploy install                    # 3. copy system, nixos-install, copy conf
 rpi-deploy eject                      # 4. sync + unmount; boot the pi: ssh -p 2222 pi@<address>
 ```
 
+`install` also mounts a card that carries the labels but is not mounted yet, so
+after inserting an already-prepared card a plain `rpi-deploy install` is enough.
+
 Everything else: `rpi-deploy config` re-copies only the configuration to
-`/etc/nixos` (no reinstall), `rpi-deploy show` prints the last build and the
-card/firmware mount state, `rpi-deploy all` is `build` + `install`.
+`/etc/nixos` (no reinstall), `rpi-deploy devices` lists the removable/MMC disks (the candidates for
+`prepare DEVICE`) and whether a labelled card is present, `rpi-deploy show`
+prints the last build and the card/firmware mount state, `rpi-deploy all` is `build` + `install`.
 
 `prepare --format` sets the labels while creating the file systems
 (`mkfs.vfat -n NIXOS_BOOT`, `mkfs.ext4 -L NIXOS_SD`), the partition types
@@ -152,8 +156,19 @@ Find the device with `lsblk` (the card shows up as `/dev/sdX` in a USB reader or
 `/dev/mmcblk0` in a built-in one). `prepare --format` refuses a disk the host
 runs from (`/`, `/boot`, `/nix`, `/home`, ...), a partition instead of a whole
 disk, and a device that is mounted elsewhere; without `--yes` it makes you
-type the device path first. `--dry-run` prints every command without running
+type the device path first. `--format` also unmounts whatever of that device is mounted (e.g. a desktop
+automount) after your confirmation, takes an exclusive `flock` while writing
+the partition table (udev probes a freshly wiped disk and would otherwise make
+`sfdisk` fail with "disk is currently in use"), retries briefly if the device
+is still busy and waits for the partition nodes. `--dry-run` prints every command without running
 it.
+
+Before copying, `install` prints the target card with its size and free space,
+stops if the system closure cannot fit on the card at all (and warns if it
+exceeds the free space), and warns if no normal user in the config has an ssh
+key or password — the pi is headless and password ssh is off, so it would be
+unreachable. Build and install report their duration and the next step;
+colours are only used on a terminal (`NO_COLOR` disables them).
 
 Usage: `rpi-deploy prepare [DEVICE] [--format] [--yes] [--boot-size SIZE]` and
 `rpi-deploy [build|install|config|eject|all|show] [TARGET] [OPTIONS]`. `TARGET`
@@ -320,13 +335,13 @@ Three layers, all wired into `nix flake check`:
 
 ```sh
 nix flake check                                   # everything below
-nix build .#checks.x86_64-linux.rpi-deploy-unit  # 172 unit tests for rpi-deploy.sh
+nix build .#checks.x86_64-linux.rpi-deploy-unit  # 204 unit tests for rpi-deploy.sh
 nix build .#checks.x86_64-linux.rpi-host-vm       # boots a real VM (qemu), ~1-16 min
 nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module, eval-only proof
 ```
 
 1. **`rpi-deploy-syntax`** (both systems) — `bash -n` of the script.
-2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 172 unit tests
+2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 204 unit tests
    with mocked `nix`/`nixos-install`: preflight fail/success, build record
    round-trip (all fields), `show`, install verification incl. a failing
    store copy, `--from` with/without record, attr mismatch, HEAD-moved and
