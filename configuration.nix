@@ -106,8 +106,6 @@
   };
   nixpkgs.config.allowUnfree = true;
 
-  # networking.firewall.allowedUDPPortRanges = [ { from = 60000; to = 61000; } ]; # for mosh
-
   services = {
     # nixosManual.enable = false;
     openssh = {
@@ -134,10 +132,17 @@
     };
   };
 
-  networking.hostName = "neptun";
-
   # https://github.com/NixOS/nixpkgs/issues/82462#issuecomment-604634627
   systemd.services.iwd.serviceConfig.Restart = "always";
+  systemd.network.networks."10-lan-static" = {
+    matchConfig = {
+      Type = "ether"; # Matches ANY physical wired ethernet interface
+    };
+    networkConfig = {
+      Address = "192.168.100.20/24";
+      Gateway = "192.168.100.1";
+    };
+  };
   hardware.enableRedistributableFirmware = true;
   hardware.firmware = [pkgs.wireless-regdb];
   boot = {
@@ -146,14 +151,18 @@
     '';
   };
 
-  networking.wireless = {
-    enable = true;
-    userControlled = true;
-
-    secretsFile = "/etc/nixos/secrets/wireless.env";
-    networks = {
-      "Pfefferoni" = {
-        psk = "@MY_WIFI_PASSWORD@";
+  networking = {
+    hostName = "neptun";
+    useNetworkd = true;
+    # networking.firewall.allowedUDPPortRanges = [ { from = 60000; to = 61000; } ]; # for mosh
+    wireless = {
+      enable = false;
+      userControlled = true;
+      secretsFile = "/etc/nixos/secrets/wireless.env";
+      networks = {
+        "Pfefferoni" = {
+          psk = "@MY_WIFI_PASSWORD@";
+        };
       };
     };
   };
