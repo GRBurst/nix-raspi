@@ -68,16 +68,17 @@ then `nixos-rebuild switch --flake /etc/nixos`. That gives you:
   `nix.extra-platforms`, so cross builds work out of the box;
 - `boot.binfmt.preferStaticEmulators = true` — a static qemu registered with
   the binfmt **F flag**. This matters for `install`: `nixos-install` runs the
-  new system's `activate` and the bootloader installer *inside a chroot of the
-  SD card*. A handler without the F flag (the NixOS default) is resolved at
-  exec time relative to the chroot, where `/run/binfmt/aarch64-linux` does not
-  exist, so it fails with
-  `chroot: failed to run command '/nix/var/nix/profiles/system/activate': No such file or directory`
-  although every file is in place. (`rpi-deploy install` detects such a host
+  new system's `activate` and the bootloader installer through `nixos-enter`,
+  i.e. *inside a chroot of the SD card in a fresh mount namespace*. A handler
+  without the F flag (the NixOS default) is resolved at exec time inside that
+  chroot, where `/run/binfmt/aarch64-linux` does not exist, so programs fail with
+  `cannot execute: required file not found` and
+  `chroot: failed to run command '.../sw/bin/bash': No such file or directory`
+  although every file is on the card. (`rpi-deploy install` detects such a host
   — `cat /proc/sys/fs/binfmt_misc/aarch64-linux` shows `flags: P` without `F` —
-  and bridges the interpreter into the card for the install, so it works
-  either way; the F flag is the clean fix.) The static qemu is a ~110 MiB
-  download from cache.nixos.org;
+  and registers a *temporary* F-flag handler for the duration of the install, so
+  it works either way; the permanent F flag is the clean fix.) The static qemu
+  is a ~100 MiB download from cache.nixos.org;
 - `nix` experimental features `nix-command` and `flakes`;
 - `rpi-deploy` on the PATH (in `environment.systemPackages`), optionally
   wrapped so `RPI_FLAKE` is preset.
@@ -260,10 +261,20 @@ in the card's store); it is the aarch64 emulator being unusable inside the
 chroot, see the F flag above. `install` therefore **tests the chroot before it
 starts `nixos-install`**: right after the copy it verifies that the system's
 `activate` is on the card and runs the system's own `bash` inside a chroot of
-the card. If that fails it bridges the emulator interpreter into the card and
-tests again; if it still fails it stops *before* installing and prints the facts
-(binfmt entry and flags, where the interpreter resolves, whether it exists on
-the card, the chroot's error) instead of running a doomed `nixos-install`.
+the card, *and a program started from that emulated bash* (a handler that only
+starts the first program is not enough). If that fails it registers a temporary
+binfmt handler with the F flag (`/proc/sys/fs/binfmt_misc/register`, the static
+qemu from the flake package `.#rpi-binfmt`, the newest registration wins) and
+tests again. The handler is removed when the script ends, whether it succeeded,
+failed or was interrupted. If the test still fails, `install` stops *before*
+installing and prints the facts (binfmt entries and flags, the chroot's error)
+instead of running a doomed `nixos-install`.
+
+Before copying, a real `install` also checks that the checkout still evaluates to
+the recorded system (the derivation, not git revisions). If it does not, the
+difference would be rebuilt inside the card's store; it asks
+`Install anyway (slow)?` (`--yes` answers yes) and otherwise tells you to run
+`rpi-deploy build` first.
 
 **Clean install.** Nothing on the card needs to be removed for a re-run (see
 above). For a strictly clean card: `rpi-deploy prepare /dev/sdX --format`, then
