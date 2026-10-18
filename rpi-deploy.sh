@@ -795,9 +795,17 @@ register_binfmt_f() {
     printf 'dry-run: sudo tee %s/register <<< <line from rpi-binfmt>\n' "$BINMFT_DIR"
     return 0
   fi
-  out="$(cd "$FLAKE" && nix build --accept-flake-config --no-link --print-out-paths ".#rpi-binfmt" 2>&1 | tail -n1)" \
-    && [[ -f "$out" ]] \
-    || die "could not build the binfmt registration (.#rpi-binfmt; it fetches a static qemu, ~100 MiB, check the network): $out"
+  local log="$STATE/binfmt-build.log"
+  mkdir -p "$STATE"
+  if ! out="$(cd "$FLAKE" && nix build --accept-flake-config --no-link --print-out-paths ".#rpi-binfmt" 2>"$log" | tail -n1)" \
+      || [[ ! -f "$out" ]]; then
+    echo "--- nix output (full log: $log) ---" >&2
+    grep -v '^warning: Git' "$log" | tail -15 | sed 's/^/  | /' >&2
+    if grep -q 'unable to download\|Failure when receiving data\|substitut' "$log"; then
+      warn "the download of the static qemu (~100 MiB, cache.nixos.org) failed; this is a network problem (large downloads are cut off). Retry, or fetch it once with: nix build --accept-flake-config .#rpi-binfmt --option download-attempts 20"
+    fi
+    die "could not build the binfmt registration (.#rpi-binfmt)"
+  fi
   line="$(cat "$out")"
   [[ "$line" == :"$BINFMT_TEMP_NAME":* ]] || die "unexpected binfmt registration line in $out: $line"
   if [[ -e "$BINMFT_DIR/$BINFMT_TEMP_NAME" ]]; then   # left over from a crashed run

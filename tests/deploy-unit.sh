@@ -51,7 +51,7 @@ cat > "$BIN/nix" <<'MOCK'
 #!BASHPLACEHOLDER
 case " $* " in
   *"#rpi-binfmt"*)
-    [[ -n "${MOCK_BINFMT_BUILD_FAIL:-}" ]] && { echo "error: download of qemu failed" >&2; exit 1; }
+    [[ -n "${MOCK_BINFMT_BUILD_FAIL:-}" ]] && { echo "error: unable to download qemu: Failure when receiving data from the peer" >&2; exit 1; }
     echo "nix build rpi-binfmt" >> "$MOCK_LOG"; echo "$MOCK_BINFMT_FILE" ;;
   *" path-info "*) echo "$MOCK_SYS ${MOCK_CLOSURE-1000}" ;;
   *" --apply "*) echo "${MOCK_LOGIN-pi 1 0}" ;;
@@ -887,6 +887,8 @@ B="$(fresh_bmf "$T/bmf-nof")"; : > "$MOCK_LOG"
 run_cmd env RPI_BINMFT_DIR="$B" MOCK_CHROOT_NEEDS_F=1 MOCK_BINFMT_BUILD_FAIL=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
 expect_exit "chroot emu (registration unbuildable): exit 1" 1
 expect_grep "chroot emu (registration unbuildable): message" "could not build the binfmt registration"
+expect_grep "chroot emu (registration unbuildable): shows the real nix error" "Failure when receiving data from the peer"
+expect_grep "chroot emu (registration unbuildable): names the network cause" "large downloads are cut off"
 expect_not_grep "chroot emu (registration unbuildable): nixos-install not started" "^nixos-install" "$MOCK_LOG"
 
 # (d) even the F handler does not help: stop BEFORE nixos-install, with facts
