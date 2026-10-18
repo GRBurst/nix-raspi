@@ -201,8 +201,7 @@
     # zsh is provided by the nix-terminal kit (home-manager); make it the login shell
     shell = pkgs.zsh;
     openssh.authorizedKeys.keys = [
-      # TODO: add the host's deploy/ssh public key (needed for the
-      # remote-install follow-up: nixos-rebuild --flake <host-repo>#rpi via ssh)
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKxv8UiT62T7r81Z3h/L/7qhZZqVhF5ogXXthjhdAJVe pallon@andromeda->pi3 on 2026-10-18"
     ];
   };
 
