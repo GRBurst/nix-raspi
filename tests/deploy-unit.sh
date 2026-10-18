@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
-# Unit tests for install.sh (rpi-install).
+# Unit tests for rpi-deploy.sh (rpi-deploy).
 #
 # Runs the real script against a mocked `nix` and `nixos-install`, so no
 # real builds happen and no aarch64 emulation is needed in the test
 # environment (binfmt locations are overridden via RPI_BINMFT_*).
 #
-# Invoked by the flake check `checks.x86_64-linux.rpi-install-unit`:
+# Invoked by the flake check `checks.x86_64-linux.rpi-deploy-unit`:
 #
-#   RPI_INSTALL_SRC=<path to install.sh> bash tests/install-unit.sh
+#   RPI_DEPLOY_SRC=<path to rpi-deploy.sh> bash tests/deploy-unit.sh
 #
 # Exits non-zero if any test fails.
 
 set -u
 
-SCRIPT="${RPI_INSTALL_SRC:?RPI_INSTALL_SRC must point at install.sh}"
+SCRIPT="${RPI_DEPLOY_SRC:?RPI_DEPLOY_SRC must point at rpi-deploy.sh}"
 [[ -f "$SCRIPT" ]] || { echo "FAIL: script not found: $SCRIPT"; exit 1; }
 
 T="$(mktemp -d)"
@@ -103,11 +103,75 @@ sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/nix" "$BIN/nixos-install" "$B
 chmod 755 "$BIN/nix" "$BIN/nixos-install" "$BIN/sudo"
 export PATH="$BIN:$PATH"
 
+
+# --- mocks for the card tools (prepare / eject) ------------------------------
+# All privileged commands go through the `sudo` mock, so the mutating tools
+# only record their arguments.
+MOCK_MNT="$T/mnt-state"; mkdir -p "$MOCK_MNT"; export MOCK_MNT
+for tool in wipefs mkfs.vfat mkfs.ext4 udevadm umount mount sync; do
+  cat > "$BIN/$tool" <<'MOCK'
+#!BASHPLACEHOLDER
+echo "$(basename "$0") $*" >> "$MOCK_LOG"
+exit 0
+MOCK
+done
+# sfdisk also records the partition script it reads from stdin
+cat > "$BIN/sfdisk" <<'MOCK'
+#!BASHPLACEHOLDER
+echo "sfdisk $*" >> "$MOCK_LOG"
+sed 's/^/sfdisk-script: /' >> "$MOCK_LOG"
+exit 0
+MOCK
+# findmnt: --mountpoint DIR -> contents of $MOCK_MNT/<DIR with / -> _> (else rc 1);
+#          -T PATH          -> the host source device $MOCK_HOST_SRC
+cat > "$BIN/findmnt" <<'MOCK'
+#!BASHPLACEHOLDER
+case " $* " in
+  *" --mountpoint "*)
+    f="$MOCK_MNT/$(printf '%s' "${@: -1}" | tr / _)"
+    [[ -f "$f" ]] && { cat "$f"; exit 0; }
+    exit 1 ;;
+  *" -T "*) echo "${MOCK_HOST_SRC:-/dev/nvme0n1p1}" ;;
+esac
+MOCK
+# lsblk: -dno TYPE -> $MOCK_LSBLK_TYPE (disk); -nlso NAME <src> -> src and its disk;
+#        -nlo MOUNTPOINT -> $MOCK_DEV_MOUNTS; anything else -> a table line
+cat > "$BIN/lsblk" <<'MOCK'
+#!BASHPLACEHOLDER
+case " $* " in
+  *" -dno TYPE "*) echo "${MOCK_LSBLK_TYPE:-disk}" ;;
+  *" -nlso NAME "*)
+    src="${@: -1}"; n="$(basename "$src")"; echo "$n"
+    case "$n" in nvme*p[0-9]*) echo "${n%p[0-9]*}" ;; sd*[0-9]) echo "${n%[0-9]*}" ;; esac ;;
+  *" -nlo MOUNTPOINT "*) [[ -n "${MOCK_DEV_MOUNTS:-}" ]] && printf '%s\n' "$MOCK_DEV_MOUNTS" ;;
+  *) echo "NAME SIZE FSTYPE LABEL MODEL (mock)" ;;
+esac
+exit 0
+MOCK
+sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,sfdisk,findmnt,lsblk}
+chmod 755 "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,sfdisk,findmnt,lsblk}
+
+# mountpoint helper that reports "not mounted" only for <dir>/boot/firmware
+cat > "$BIN/mp-nofw" <<'MOCK'
+#!BASHPLACEHOLDER
+[[ "${@: -1}" != */boot/firmware ]]
+MOCK
+sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/mp-nofw"; chmod 755 "$BIN/mp-nofw"
+
+# by-label fixtures: a card whose labels point at $DEVDIR/mmcblk0p{1,2} (names
+# only; nothing is opened), plus the dummy "device" used by the format tests
+DEVDIR="$T/dev"; mkdir -p "$DEVDIR"; touch "$DEVDIR/mmcblk0p1" "$DEVDIR/mmcblk0p2"
+mkdir -p "$T/by-label"
+ln -s $DEVDIR/mmcblk0p2 "$T/by-label/NIXOS_SD"
+ln -s $DEVDIR/mmcblk0p1 "$T/by-label/NIXOS_BOOT"
+export RPI_BYLABEL_DIR="$T/by-label"
+export RPI_ALLOW_NONBLOCK=1      # test "devices" are not real block devices
+
 # binfmt fixtures for the emulation preflight
 mkdir -p "$T/bmf-ok" "$T/bmf-empty"
 touch "$T/bmf-ok/qemu-aarch64"
 export RPI_BINMFT_DIR="$T/bmf-ok"
-export RPI_MOUNTPOINT_CMD=true          # card layout: pretend /boot/firmware is mounted
+export RPI_MOUNTPOINT_CMD=true          # card layout: pretend root and /boot/firmware are mounted
 export RPI_BINMFT_RUN="$T/bmf-run"   # does not exist: exercises the OR branch
 EMUL_OK=( MOCK_PLATFORMS="x86_64-linux aarch64-linux" )
 EMUL_BAD=( MOCK_PLATFORMS="x86_64-linux" "RPI_BINMFT_DIR=$T/bmf-empty" )
@@ -199,7 +263,7 @@ record_val() {  # file key -> value (empty if absent)
 # 1. help
 run_cmd bash "$SCRIPT" --help
 expect_exit "help: exit 0" 0
-expect_grep "help: prints usage" "Usage: rpi-install"
+expect_grep "help: prints usage" "Usage: rpi-deploy"
 
 # 2. unknown argument
 run_cmd bash "$SCRIPT" --bogus
@@ -389,10 +453,10 @@ expect_grep "install: warns missing u-boot" "u-boot-rpi-arm64.bin"
 
 # 24. firmware partition must be a mount point (real install dies, dry-run warns)
 C24="$(new_card t24)"
-run_cmd env RPI_MOUNTPOINT_CMD=false RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C24"
+run_cmd env RPI_MOUNTPOINT_CMD=mp-nofw RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C24"
 expect_exit "install (firmware not mounted): exit 1" 1
 expect_grep "install (firmware not mounted): message" "boot/firmware is not a mount point"
-run_cmd env RPI_MOUNTPOINT_CMD=false RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C24"
+run_cmd env RPI_MOUNTPOINT_CMD=mp-nofw RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C24"
 expect_exit "install --dry-run (firmware not mounted): exit 0" 0
 expect_grep "install --dry-run (firmware not mounted): warns" "boot/firmware is not a mount point"
 
@@ -407,7 +471,149 @@ expect_grep "build: cache configured is reported" "binary cache: nixos-raspberry
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C24"
 expect_grep "install: nixos-install accepts flake config" "nixos-install --root $C24 --flake $F9#rpi --option accept-flake-config true"
 
+# 26. install copies the configuration checkout to <mount>/etc/nixos
+F26="$(new_flake t26)"; C26="$(mktemp -d "$T/card-t26.XXXX")"
+mkdir -p "$C26/etc/nixos"; echo stale > "$C26/etc/nixos/stale-file"
+mkdir -p "$F26/secrets" "$F26/.rpi-build" "$F26/.nixcache"
+echo "MY_WIFI_PASSWORD=x" > "$F26/secrets/wireless.env"
+echo junk > "$F26/.rpi-build/last"; echo junk > "$F26/.nixcache/x"; echo junk > "$F26/.rpi-build.log"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" config --flake "$F26" --mount "$C26"
+expect_exit "config: exit 0" 0
+expect_true "config: flake.nix copied" test -f "$C26/etc/nixos/flake.nix"
+expect_true "config: secrets copied" test -f "$C26/etc/nixos/secrets/wireless.env"
+expect_true "config: .git copied (secrets stay untracked on the pi)" test -d "$C26/etc/nixos/.git"
+expect_true "config: stale file removed (mirror)" test ! -e "$C26/etc/nixos/stale-file"
+expect_true "config: .rpi-build not copied" test ! -e "$C26/etc/nixos/.rpi-build"
+expect_true "config: .nixcache not copied" test ! -e "$C26/etc/nixos/.nixcache"
+expect_true "config: .rpi-build.log not copied" test ! -e "$C26/etc/nixos/.rpi-build.log"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" config --dry-run --flake "$F26" --mount "$C26"
+expect_exit "config --dry-run: exit 0" 0
+expect_grep "config --dry-run: prints the copy" "dry-run: tar -C"
+# a failed/absent mount must not be written to
+run_cmd env RPI_MOUNTPOINT_CMD=false bash "$SCRIPT" config --flake "$F26" --mount "$C26"
+expect_exit "config (not a mount point): exit 1" 1
+expect_grep "config (not a mount point): message" "is not a mount point"
+# real install ends with the config on the card
+C26B="$(new_card t26b)"; rm -rf "$C26B/etc/nixos"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C26B"
+expect_exit "install (fresh card, no etc/nixos): exit 0" 0
+expect_true "install: configuration copied to etc/nixos" test -f "$C26B/etc/nixos/flake.nix"
+expect_not_grep "install: no 'configuration was not copied' warning" "was not copied"
+
+# 27. prepare: mount an existing card by its labels
+: > "$MOCK_LOG"; rm -f "$MOCK_MNT"/*
+C27="$T/card-t27"
+run_cmd bash "$SCRIPT" prepare --dry-run --mount "$C27"
+expect_exit "prepare (by label, dry-run): exit 0" 0
+expect_grepf "prepare: mounts root" "dry-run: sudo mount $DEVDIR/mmcblk0p2 $C27" 
+expect_grepf "prepare: creates firmware dir" "mkdir -p $C27/boot/firmware"
+expect_grepf "prepare: mounts firmware partition" "mount $DEVDIR/mmcblk0p1 $C27/boot/firmware"
+run_cmd bash "$SCRIPT" prepare --mount "$C27"
+expect_exit "prepare (by label, real): exit 0" 0
+expect_grepf "prepare real: mount root recorded" "mount $DEVDIR/mmcblk0p2 $C27" "$MOCK_LOG"
+expect_grepf "prepare real: mount firmware recorded" "mount $DEVDIR/mmcblk0p1 $C27/boot/firmware" "$MOCK_LOG"
+expect_not_grep "prepare (by label) never formats" "mkfs" "$MOCK_LOG"
+# already mounted -> nothing mounted twice
+: > "$MOCK_LOG"
+echo $DEVDIR/mmcblk0p2 > "$MOCK_MNT/$(printf '%s' "$C27" | tr / _)"
+echo $DEVDIR/mmcblk0p1 > "$MOCK_MNT/$(printf '%s' "$C27/boot/firmware" | tr / _)"
+run_cmd bash "$SCRIPT" prepare --mount "$C27"
+expect_exit "prepare (already mounted): exit 0" 0
+expect_not_grep "prepare (already mounted): no second mount" "mount /dev" "$MOCK_LOG"
+# old layout: FAT mounted at <mount>/boot is moved to boot/firmware
+: > "$MOCK_LOG"; rm -f "$MOCK_MNT"/*
+echo $DEVDIR/mmcblk0p2 > "$MOCK_MNT/$(printf '%s' "$C27" | tr / _)"
+echo $DEVDIR/mmcblk0p1 > "$MOCK_MNT/$(printf '%s' "$C27/boot" | tr / _)"
+run_cmd bash "$SCRIPT" prepare --mount "$C27"
+expect_exit "prepare (old layout): exit 0" 0
+expect_grepf "prepare (old layout): FAT unmounted from /boot" "umount $C27/boot" "$MOCK_LOG"
+expect_grepf "prepare (old layout): FAT remounted at boot/firmware" "mount $DEVDIR/mmcblk0p1 $C27/boot/firmware" "$MOCK_LOG"
+# wrong device already at the mount point
+rm -f "$MOCK_MNT"/*; echo /dev/sdz9 > "$MOCK_MNT/$(printf '%s' "$C27" | tr / _)"
+run_cmd bash "$SCRIPT" prepare --mount "$C27"
+expect_exit "prepare (mount point busy): exit 1" 1
+expect_grep "prepare (mount point busy): message" "already mounted from /dev/sdz9"
+rm -f "$MOCK_MNT"/*
+# no labelled card at all
+mkdir -p "$T/by-label-empty"
+run_cmd env RPI_BYLABEL_DIR="$T/by-label-empty" bash "$SCRIPT" prepare --mount "$C27"
+expect_exit "prepare (no card): exit 1" 1
+expect_grep "prepare (no card): hint to format" "prepare /dev/sdX --format"
+
+# 28. prepare DEVICE --format
+: > "$MOCK_LOG"
+run_cmd bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
+expect_exit "format (labels not matching afterwards): exit 1" 1
+expect_grep "format: verifies the labels afterwards" "does not have the expected layout"
+expect_grepf "format: wipes the device" "wipefs -a /dev/sdq" "$MOCK_LOG"
+expect_grepf "format: MBR table" "sfdisk-script: label: dos" "$MOCK_LOG"
+expect_grepf "format: 256MiB FAT32 boot partition, bootable" "sfdisk-script: ,256MiB,c,*" "$MOCK_LOG"
+expect_grepf "format: root takes the rest" "sfdisk-script: ,,83" "$MOCK_LOG"
+expect_grepf "format: FAT32 label" "mkfs.vfat -F 32 -n NIXOS_BOOT /dev/sdq1" "$MOCK_LOG"
+expect_grepf "format: ext4 label" "mkfs.ext4 -q -F -L NIXOS_SD /dev/sdq2" "$MOCK_LOG"
+# the same with matching labels (mmcblk0 -> p1/p2) ends mounted correctly
+: > "$MOCK_LOG"
+run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --format --yes --mount "$C27"
+expect_exit "format mmcblk0: exit 0" 0
+expect_grepf "format mmcblk0: partition names use the p suffix" "mkfs.vfat -F 32 -n NIXOS_BOOT $DEVDIR/mmcblk0p1" "$MOCK_LOG"
+expect_grepf "format mmcblk0: root mounted" "mount $DEVDIR/mmcblk0p2 $C27" "$MOCK_LOG"
+expect_grepf "format mmcblk0: firmware mounted" "mount $DEVDIR/mmcblk0p1 $C27/boot/firmware" "$MOCK_LOG"
+# custom boot size
+: > "$MOCK_LOG"
+run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --format --yes --boot-size 512MiB --mount "$C27"
+expect_grepf "format: custom boot size" "sfdisk-script: ,512MiB,c,*" "$MOCK_LOG"
+run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --format --yes --boot-size lots --mount "$C27"
+expect_exit "format: bad --boot-size: exit 1" 1
+expect_grep "format: bad --boot-size: message" "boot-size must look like"
+# dry-run changes nothing
+: > "$MOCK_LOG"
+run_cmd bash "$SCRIPT" prepare /dev/sdq --format --dry-run --mount "$C27"
+expect_exit "format --dry-run: exit 0" 0
+expect_grep "format --dry-run: prints sfdisk" "dry-run: sudo sfdisk"
+expect_grep "format --dry-run: warns about data loss" "DESTROY ALL DATA on /dev/sdq"
+expect_true "format --dry-run: runs nothing" test ! -s "$MOCK_LOG"
+# safety
+run_cmd env MOCK_HOST_SRC=/dev/sdq1 bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
+expect_exit "format (host disk): exit 1" 1
+expect_grep "format (host disk): message" "holds the host's"
+run_cmd env MOCK_LSBLK_TYPE=part bash "$SCRIPT" prepare /dev/sdq1 --format --yes --mount "$C27"
+expect_exit "format (partition given): exit 1" 1
+expect_grep "format (partition given): message" "not a whole disk"
+run_cmd env MOCK_DEV_MOUNTS=/mnt/other bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
+expect_exit "format (mounted elsewhere): exit 1" 1
+expect_grep "format (mounted elsewhere): message" "mounted at /mnt/other"
+run_cmd env RPI_ALLOW_NONBLOCK=0 bash "$SCRIPT" prepare /tmp/not-a-device --format --yes --mount "$C27"
+expect_exit "format (not a block device): exit 1" 1
+expect_grep "format (not a block device): message" "not a block device"
+run_cmd bash "$SCRIPT" prepare /dev/sdq --format --mount "$C27" < /dev/null
+expect_exit "format (no tty, no --yes): exit 1" 1
+expect_grep "format (no tty, no --yes): message" "pass --yes"
+run_cmd bash "$SCRIPT" prepare --format --mount "$C27"
+expect_exit "format without device: exit 2" 2
+run_cmd bash "$SCRIPT" build --format
+expect_exit "--format on build: exit 2" 2
+# an explicit DEVICE without --format must carry the labels
+run_cmd bash "$SCRIPT" prepare /dev/sdq --mount "$C27"
+expect_exit "prepare DEVICE (foreign card, no --format): exit 1" 1
+expect_grep "prepare DEVICE (foreign card): hint" "prepare /dev/sdq --format"
+
+# 29. eject
+: > "$MOCK_LOG"
+run_cmd bash "$SCRIPT" eject --mount "$C27"
+expect_exit "eject: exit 0" 0
+expect_grepf "eject: syncs" "sync" "$MOCK_LOG"
+expect_grepf "eject: unmounts recursively" "umount -R $C27" "$MOCK_LOG"
+: > "$MOCK_LOG"
+run_cmd env RPI_MOUNTPOINT_CMD=false bash "$SCRIPT" eject --mount "$C27"
+expect_exit "eject (not mounted): exit 0" 0
+expect_not_grep "eject (not mounted): nothing unmounted" "umount" "$MOCK_LOG"
+
+# 30. show reports card + firmware state
+run_cmd env RPI_MOUNTPOINT_CMD=mp-nofw bash "$SCRIPT" show --flake "$F26" --mount "$C27"
+expect_exit "show: exit 0" 0
+expect_grep "show: firmware not mounted" "firmware: NOT mounted"
+
 # --- summary -----------------------------------------------------------------
 echo
-echo "rpi-install unit tests: $pass passed, $fail failed"
+echo "rpi-deploy unit tests: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]

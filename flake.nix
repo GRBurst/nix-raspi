@@ -1,11 +1,11 @@
 {
-  description = "NixOS Flake for Raspberry Pi 3 Model B V1.2, plus aarch64 build-host tooling (rpi-install)";
+  description = "NixOS Flake for Raspberry Pi 3 Model B V1.2, plus aarch64 build-host tooling (rpi-deploy)";
 
   # Binary cache of nvmd/nixos-raspberrypi: holds the vendor kernel
   # (linux_rpi3), firmware and RPi packages built for the nixpkgs revision
   # that nixos-raspberrypi pins. Without it the kernel is compiled locally
   # (16+ h under qemu). Applied when the flake config is accepted
-  # (`--accept-flake-config`, which install.sh passes) and the user is
+  # (`--accept-flake-config`, which rpi-deploy.sh passes) and the user is
   # trusted, or when the host nix.conf lists it (see modules/build-host.nix).
   nixConfig = {
     extra-substituters = [ "https://nixos-raspberrypi.cachix.org" ];
@@ -58,16 +58,26 @@
     # writeShellScript* helpers' store-path shape varies between nixpkgs
     # versions, but $out/bin/<name> is what environment.systemPackages
     # (buildEnv) requires.
-    rpiInstall = system: (pkgsFor system).stdenv.mkDerivation {
-      name = "rpi-install";
+    #
+    # The card tools of `prepare`/`eject`/`config` are appended to PATH
+    # (suffix: the host's own tools win), so the script works on a host that
+    # has none of them in its profile. nix/nixos-install/sudo are deliberately
+    # NOT bundled: they must be the host's.
+    mkRpiDeploy = pkgs: pkgs.stdenv.mkDerivation {
+      name = "rpi-deploy";
       dontUnpack = true;
       dontBuild = true;
+      nativeBuildInputs = [ pkgs.makeWrapper ];
       installPhase = ''
         mkdir -p $out/bin
-        cp ${./install.sh} $out/bin/rpi-install
-        chmod 755 $out/bin/rpi-install
+        cp ${./rpi-deploy.sh} $out/bin/rpi-deploy
+        chmod 755 $out/bin/rpi-deploy
+        wrapProgram $out/bin/rpi-deploy --suffix PATH : ${lib.makeBinPath (with pkgs; [
+          util-linux dosfstools e2fsprogs gnutar findutils coreutils git
+        ])}
       '';
     };
+    rpiDeploy = system: mkRpiDeploy (pkgsFor system);
 
     # Importing the modules via the flake outputs pre-fills the
     # installScript option, so a plain `rpi.buildHost.enable = true` is
@@ -77,18 +87,7 @@
     # bypass).
     buildHostModule =
       { pkgs, ... }: {
-        rpi.buildHost.installScript = lib.mkDefault (
-          pkgs.stdenv.mkDerivation {
-            name = "rpi-install";
-            dontUnpack = true;
-            dontBuild = true;
-            installPhase = ''
-              mkdir -p $out/bin
-              cp ${./install.sh} $out/bin/rpi-install
-              chmod 755 $out/bin/rpi-install
-            '';
-          }
-        );
+        rpi.buildHost.installScript = lib.mkDefault (mkRpiDeploy pkgs);
       };
 
     # x86_64 test configuration for the build-host module (see tests/).
@@ -128,7 +127,7 @@
       nvmdCache = lib.elem "https://nixos-raspberrypi.cachix.org"
         hostTestSystem.config.nix.settings.extra-substituters;
       wrapperPkg = lib.any
-        (p: p.name == "rpi-install-flake-wrapper")
+        (p: p.name == "rpi-deploy-flake-wrapper")
         hostTestSystem.config.environment.systemPackages;
     };
   # The contract checks are forced by making them the guard of the
@@ -141,7 +140,7 @@
     && (lib.assertMsg contract.expFeatures "build-host contract: nix experimental-features include nix-command + flakes")
     && (lib.assertMsg contract.sandboxPaths "build-host contract: nix extra-sandbox-paths expose the qemu-aarch64 handler")
     && (lib.assertMsg contract.nvmdCache "build-host contract: nix extra-substituters include the nixos-raspberrypi cache")
-    && (lib.assertMsg contract.wrapperPkg "build-host contract: rpi-install wrapper is in environment.systemPackages")
+    && (lib.assertMsg contract.wrapperPkg "build-host contract: rpi-deploy wrapper is in environment.systemPackages")
   then
   {
             
@@ -175,12 +174,17 @@
                 ];
               };
 
+              # Alias under the pi's hostname: on the pi, `nixos-rebuild --flake
+              # /etc/nixos` (and autoUpgrade) default to `#<hostname>`. Same
+              # derivation as `rpi`, so the installed system does not change.
+              neptun = self.nixosConfigurations.rpi;
+
               # x86_64 test configuration for the build-host module:
               #   nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel
               rpiBuildHostTest = hostTestSystem;
             };
 
-            # Build-host modules: aarch64 emulation + rpi-install (see modules/).
+            # Build-host modules: aarch64 emulation + rpi-deploy (see modules/).
             nixosModules.rpiBuildHost = {
               imports = [
                 ./modules/build-host.nix
@@ -196,8 +200,8 @@
             };
 
             packages = forSystem [ "aarch64-linux" "x86_64-linux" ] (system: {
-              rpi-install = rpiInstall system;
-              default = rpiInstall system;
+              rpi-deploy = rpiDeploy system;
+              default = rpiDeploy system;
             });
 
             checks = forSystem [ "aarch64-linux" "x86_64-linux" ] (system: {
@@ -207,8 +211,8 @@
               # nativeBuildInputs as a setup hook, which would execute the
               # script (with `$pkg -1 0` as positional args) before the check
               # even starts.
-              rpi-install-syntax = (pkgsFor system).runCommand "rpi-install-syntax-check" {
-                src = ./install.sh;
+              rpi-deploy-syntax = (pkgsFor system).runCommand "rpi-deploy-syntax-check" {
+                src = ./rpi-deploy.sh;
               } ''
                 ${(pkgsFor system).bash}/bin/bash -n $src
                 touch $out
@@ -221,24 +225,24 @@
                 aarch64Pkgs = pkgsFor "aarch64-linux";
               in {
                 x86_64-linux = {
-                  # Unit tests for the rpi-install script: runs the real
+                  # Unit tests for the rpi-deploy script: runs the real
                   # script against mocked `nix`/`nixos-install`, so no real
                   # builds and no aarch64 emulation are needed. Covers the
                   # emulation preflight, build record round-trip, show,
                   # install verification, --from, attr mismatches,
                   # divergence warnings.
-                  rpi-install-unit = x86Pkgs.runCommand "rpi-install-unit-check" {
-                    scriptSrc = ./install.sh;
-                    unitSrc = ./tests/install-unit.sh;
+                  rpi-deploy-unit = x86Pkgs.runCommand "rpi-deploy-unit-check" {
+                    scriptSrc = ./rpi-deploy.sh;
+                    unitSrc = ./tests/deploy-unit.sh;
                     nativeBuildInputs = [ x86Pkgs.git ];
                   } ''
-                    RPI_INSTALL_SRC=$scriptSrc ${x86Pkgs.bash}/bin/bash $unitSrc
+                    RPI_DEPLOY_SRC=$scriptSrc ${x86Pkgs.bash}/bin/bash $unitSrc
                     touch $out
                   '';
 
                   # Boots the build-host test system in a VM and verifies
                   # the module end-to-end: binfmt registration, nix aarch64
-                  # support, the rpi-install wrapper, and that a real
+                  # support, the rpi-deploy wrapper, and that a real
                   # aarch64 binary runs via binfmt. Slow (qemu TCG without
                   # KVM); no kernel is involved (the aarch64 side is a
                   # prebuilt `hello`).
@@ -268,10 +272,10 @@
                       # nix can cross-build for aarch64 (no -q in the middle of
                       # the pipe: -q silences the stream the next grep reads)
                       host.succeed("nix show-config | grep extra-platforms | grep aarch64-linux")
-                      # rpi-install is on PATH, runs, and is the RPI_FLAKE wrapper
-                      host.succeed("command -v rpi-install >/dev/null")
-                      host.succeed("rpi-install --help")
-                      host.succeed("readlink -f $(command -v rpi-install) > /tmp/wrapper")
+                      # rpi-deploy is on PATH, runs, and is the RPI_FLAKE wrapper
+                      host.succeed("command -v rpi-deploy >/dev/null")
+                      host.succeed("rpi-deploy --help")
+                      host.succeed("readlink -f $(command -v rpi-deploy) > /tmp/wrapper")
                       # /tmp/wrapper holds the resolved wrapper PATH (not its
                       # contents) — grep the file at that path
                       host.succeed("grep -qF RPI_FLAKE= $(cat /tmp/wrapper)")
@@ -280,8 +284,8 @@
                       host.succeed("${aarch64Pkgs.hello}/bin/hello")
                       # the installed tool runs its dry-run flows end-to-end
                       host.succeed("mkdir -p /tmp/fake-flake && touch /tmp/fake-flake/flake.nix")
-                      host.succeed("rpi-install build --dry-run --flake /tmp/fake-flake")
-                      host.succeed("rpi-install show --flake /tmp/fake-flake | grep -q 'no build record'")
+                      host.succeed("rpi-deploy build --dry-run --flake /tmp/fake-flake")
+                      host.succeed("rpi-deploy show --flake /tmp/fake-flake | grep -q 'no build record'")
                     '';
                   };
                 };

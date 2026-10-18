@@ -1,6 +1,6 @@
 # NixOS module: turn this machine into a build host for the pi (aarch64).
 #
-# Import via the flake output (preferred — provides the rpi-install script):
+# Import via the flake output (preferred — provides the rpi-deploy script):
 #
 #   inputs.pi = { url = "git+file:///home/pallon/projects/pi/nixos"; flake = true; };
 #   ...
@@ -18,7 +18,7 @@
 #      cross builds work with `nix.settings.sandbox = true`)
 #   - nix experimental features: nix-command, flakes
 #   - nixos-raspberrypi binary cache (prebuilt vendor kernel), see nvmdCache
-#   - environment.systemPackages += rpi-install (optionally wrapped so
+#   - environment.systemPackages += rpi-deploy (optionally wrapped so
 #     RPI_FLAKE points at rpi.buildHost.flakePath)
 
 {
@@ -29,7 +29,7 @@
 }: let
   cfg = config.rpi.buildHost;
 
-  # Optionally pre-set RPI_FLAKE so `rpi-install` works without --flake.
+  # Optionally pre-set RPI_FLAKE so `rpi-deploy` works without --flake.
   # NOTE: the heredoc body must stay at column 0 — nix strips the MINIMAL
   # indentation of a long string, and a line at column 0 disables stripping
   # for the whole string. A shebang with leading spaces is not a shebang,
@@ -37,17 +37,17 @@
   scriptPackage =
     if cfg.flakePath != "" then
       pkgs.stdenv.mkDerivation {
-        name = "rpi-install-flake-wrapper";
+        name = "rpi-deploy-flake-wrapper";
         dontUnpack = true;
         dontBuild = true;
         installPhase = ''
           mkdir -p $out/bin
-          cat > $out/bin/rpi-install <<'EOF'
+          cat > $out/bin/rpi-deploy <<'EOF'
 #!/usr/bin/env bash
 export RPI_FLAKE="${cfg.flakePath}"
-exec ${cfg.installScript}/bin/rpi-install "$@"
+exec ${cfg.installScript}/bin/rpi-deploy "$@"
 EOF
-          chmod 755 $out/bin/rpi-install
+          chmod 755 $out/bin/rpi-deploy
         '';
       }
     else cfg.installScript;
@@ -61,8 +61,8 @@ in
       default = "";
       example = "/home/alice/projects/pi/nixos";
       description = ''
-        If set, the installed `rpi-install` wrapper pre-sets `RPI_FLAKE` to
-        this path, so `rpi-install build` / `rpi-install install` work without
+        If set, the installed `rpi-deploy` wrapper pre-sets `RPI_FLAKE` to
+        this path, so `rpi-deploy build` / `rpi-deploy install` work without
         `--flake`.
       '';
     };
@@ -81,7 +81,7 @@ in
       type = lib.types.nullOr lib.types.package;
       default = null;
       description = ''
-        The `rpi-install` script package to add to `environment.systemPackages`.
+        The `rpi-deploy` script package to add to `environment.systemPackages`.
         Defaults to the package provided by the flake when the module is
         imported through the flake output.
       '';
