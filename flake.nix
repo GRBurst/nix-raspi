@@ -188,6 +188,60 @@
               # derivation as `rpi`, so the installed system does not change.
               neptun = self.nixosConfigurations.rpi;
 
+              # EXPERIMENT (see HANDOFF.md, "Decision record"): the same system
+              # as an SD image, built with nixos-raspberrypi's sd-image module.
+              # The bootloader/firmware are populated inside the image build
+              # (nix sandbox) - no nixos-install, no chroot, no binfmt-in-chroot.
+              #   nix build .#nixosConfigurations.rpi-image.config.system.build.sdImage
+              #
+              # Variant A (`rpi-image-nvmd`): upstream's sd-image module as is.
+              # It imports nixpkgs' profiles/base.nix (rescue tools, zfs/btrfs/
+              # cryptsetup...), i.e. a heavier system than `rpi`. Kept only to
+              # measure that difference.
+              rpi-image-nvmd = self.nixosConfigurations.rpi.extendModules {
+                modules = [
+                  nixos-raspberrypi.nixosModules.sd-image
+                  {
+                    sdImage = {
+                      firmwarePartitionName = "NIXOS_BOOT";
+                      firmwareSize = nixpkgs.lib.mkForce 256;
+                    };
+                  }
+                ];
+              };
+
+              # Variant B (`rpi-image`): only nixpkgs' generic sd-image.nix plus
+              # the same populate commands upstream uses, so the image system
+              # is our system (no base profile).
+              rpi-image = self.nixosConfigurations.rpi.extendModules {
+                modules = [
+                  ({ config, lib, modulesPath, ... }: {
+                    imports = [ (modulesPath + "/installer/sd-card/sd-image.nix") ];
+                    # same mount options as the installed `rpi` system
+                    fileSystems."/boot/firmware".options = lib.mkForce [ "fmask=0077" "dmask=0077" ];
+                    fileSystems."/".options = [ "noatime" ];
+                    sdImage = {
+                      # keep our labels (configuration.nix mounts by label)
+                      firmwarePartitionName = "NIXOS_BOOT";
+                      # U-Boot: the FAT partition holds only firmware, config.txt,
+                      # u-boot (kernels live on the ext4 root), see README.
+                      firmwareSize = 256;
+                      firmwarePartitionID = "0x2175794e";
+                      compressImage = true;
+                      expandOnBoot = true;
+                      populateFirmwareCommands = ''
+                        ${config.boot.loader.raspberry-pi.firmwarePopulateCmd} -c ${config.system.build.toplevel} -f ./firmware
+                      '';
+                      populateRootCommands = ''
+                        mkdir -p ./files/boot/firmware
+                        ${config.boot.loader.raspberry-pi.bootPopulateCmd} -c ${config.system.build.toplevel} -b ./files/boot
+                      '';
+                    };
+                    image.baseName = "neptun-rpi3";
+                  })
+                ];
+              };
+
               # x86_64 test configuration for the build-host module:
               #   nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel
               rpiBuildHostTest = hostTestSystem;

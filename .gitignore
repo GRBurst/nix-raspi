@@ -5,3 +5,4 @@
 .rpi-build.log
 result
 .rpi-build/
+.scratch/
