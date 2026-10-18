@@ -56,6 +56,7 @@ case " $* " in
     else
       echo "extra-platforms = x86_64-linux"
     fi
+    [[ "${MOCK_CACHE:-0}" == 1 ]] && echo "extra-substituters = https://nixos-raspberrypi.cachix.org"
     ;;
   *" eval --raw "*)
     printf '%s\n' "$MOCK_DRV"
@@ -106,6 +107,7 @@ export PATH="$BIN:$PATH"
 mkdir -p "$T/bmf-ok" "$T/bmf-empty"
 touch "$T/bmf-ok/qemu-aarch64"
 export RPI_BINMFT_DIR="$T/bmf-ok"
+export RPI_MOUNTPOINT_CMD=true          # card layout: pretend /boot/firmware is mounted
 export RPI_BINMFT_RUN="$T/bmf-run"   # does not exist: exercises the OR branch
 EMUL_OK=( MOCK_PLATFORMS="x86_64-linux aarch64-linux" )
 EMUL_BAD=( MOCK_PLATFORMS="x86_64-linux" "RPI_BINMFT_DIR=$T/bmf-empty" )
@@ -377,12 +379,33 @@ run_cmd env "${EMUL_OK[@]}" MOCK_BUILD_FAIL=oom bash "$SCRIPT" build --flake "$F
 expect_exit "build failure (oom): exit 1" 1
 expect_grep "build failure (oom): hint" "out of memory"
 
-# 23. install warns when the card lacks etc/NIXOS and boot/kernel8.img
+# 23. install warns when the card lacks etc/NIXOS and the firmware files
 C23="$(new_card t23)"
 run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C23"
 expect_exit "install (incomplete card): exit 0" 0
 expect_grep "install: warns missing etc/NIXOS" "etc/NIXOS"
-expect_grep "install: warns missing kernel8.img" "kernel8.img"
+expect_grep "install: warns missing config.txt" "firmware/config.txt"
+expect_grep "install: warns missing u-boot" "u-boot-rpi-arm64.bin"
+
+# 24. firmware partition must be a mount point (real install dies, dry-run warns)
+C24="$(new_card t24)"
+run_cmd env RPI_MOUNTPOINT_CMD=false RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C24"
+expect_exit "install (firmware not mounted): exit 1" 1
+expect_grep "install (firmware not mounted): message" "boot/firmware is not a mount point"
+run_cmd env RPI_MOUNTPOINT_CMD=false RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C24"
+expect_exit "install --dry-run (firmware not mounted): exit 0" 0
+expect_grep "install --dry-run (firmware not mounted): warns" "boot/firmware is not a mount point"
+
+# 25. nvmd binary cache: flake config accepted for build + install; warn if cache missing
+F25="$(new_flake t25)"
+run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --dry-run --flake "$F25"
+expect_grep "build: passes --accept-flake-config (eval)" "nix eval --raw .*--accept-flake-config"
+expect_grep "build: passes --accept-flake-config (build)" "nix build --accept-flake-config"
+expect_grep "build: warns when cache not configured" "nixos-raspberrypi.cachix.org is not in"
+run_cmd env "${EMUL_OK[@]}" MOCK_CACHE=1 bash "$SCRIPT" build --dry-run --flake "$F25"
+expect_grep "build: cache configured is reported" "binary cache: nixos-raspberrypi.cachix.org configured"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C24"
+expect_grep "install: nixos-install accepts flake config" "nixos-install --root $C24 --flake $F9#rpi --option accept-flake-config true"
 
 # --- summary -----------------------------------------------------------------
 echo

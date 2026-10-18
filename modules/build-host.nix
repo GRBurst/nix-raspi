@@ -17,6 +17,7 @@
 #     (qemu user-mode emulation; also wires up the nix sandbox paths so
 #      cross builds work with `nix.settings.sandbox = true`)
 #   - nix experimental features: nix-command, flakes
+#   - nixos-raspberrypi binary cache (prebuilt vendor kernel), see nvmdCache
 #   - environment.systemPackages += rpi-install (optionally wrapped so
 #     RPI_FLAKE points at rpi.buildHost.flakePath)
 
@@ -66,6 +67,16 @@ in
       '';
     };
 
+    nvmdCache = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Add the nixos-raspberrypi binary cache (nixos-raspberrypi.cachix.org)
+        to the nix substituters. It holds the prebuilt Raspberry Pi vendor
+        kernel; without it the kernel is compiled locally under qemu (16+ h).
+      '';
+    };
+
     installScript = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
       default = null;
@@ -83,7 +94,14 @@ in
     # `nix.settings.extra-platforms`, so cross builds work out of the box.
     boot.binfmt.emulatedSystems = [ "aarch64-linux" ];
 
-    nix.settings.experimental-features = lib.mkDefault [ "nix-command" "flakes" ];
+    nix.settings = {
+      experimental-features = lib.mkDefault [ "nix-command" "flakes" ];
+    } // lib.optionalAttrs cfg.nvmdCache {
+      extra-substituters = [ "https://nixos-raspberrypi.cachix.org" ];
+      extra-trusted-public-keys = [
+        "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI="
+      ];
+    };
 
     environment.systemPackages = lib.optionals (cfg.installScript != null) [ scriptPackage ];
   };

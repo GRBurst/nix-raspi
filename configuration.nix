@@ -4,10 +4,14 @@
   lib,
   ...
 }: {
-  # NixOS wants to enable GRUB by default
-  boot.loader.grub.enable = false;
-  # Enables the generation of /boot/extlinux/extlinux.conf
-  boot.loader.generic-extlinux-compatible.enable = true;
+  # Bootloader: provided by nixos-raspberrypi (nvmd), pulled in through
+  # `nixosModules.raspberry-pi-3.base` in flake.nix. For the Pi 3 it is U-Boot
+  # (default): the firmware partition (/boot/firmware: Pi firmware, config.txt,
+  # u-boot-rpi-arm64.bin, DTBs) is populated by the bootloader installer at
+  # nixos-install / switch time; kernel, initrd and extlinux.conf live in
+  # /boot on the root filesystem. GRUB / generic-extlinux are not enabled here.
+  # config.txt is generated from `hardware.raspberry-pi.config`, e.g.:
+  #   hardware.raspberry-pi.config.all.dt-params.audio = { enable = true; value = "on"; };
 
   # !!! Needed for the virtual console to work on the RPi 3, as the default of 16M doesn't seem to be enough.
   # If X.org behaves weirdly (I only saw the cursor) then try increasing this to 256M.
@@ -25,7 +29,10 @@
       device = "/dev/disk/by-label/NIXOS_SD";
       fsType = "ext4";
     };
-    "/boot" = {
+    # FAT firmware partition (label kept from the previous layout, so existing
+    # cards need no re-partitioning). install.sh requires it mounted at
+    # <target>/boot/firmware during install.
+    "/boot/firmware" = {
       device = "/dev/disk/by-label/NIXOS_BOOT";
       fsType = "vfat";
       options = ["fmask=0077" "dmask=0077"];
@@ -116,18 +123,14 @@
     # sshd.usePAM = false;
 
     journald = {
-      settings.Journal = {
-        Storage = "volatile";
-        Compress = "yes";
-        SystemMaxUse = "128M";
-        RuntimeMaxUse = "8M";
-      };
-      # extraConfig = ''
-      #   Storage=volatile
-      #   Compress=yes
-      #   SystemMaxUse=128M
-      #   RuntimeMaxUse=8M
-      # '';
+      # nixos-26.05 (the nixpkgs pinned by nixos-raspberrypi) has no
+      # journald.settings yet; that arrives in 26.11.
+      storage = "volatile";
+      extraConfig = ''
+        Compress=yes
+        SystemMaxUse=128M
+        RuntimeMaxUse=8M
+      '';
     };
   };
 

@@ -1,12 +1,32 @@
 {
   description = "NixOS Flake for Raspberry Pi 3 Model B V1.2, plus aarch64 build-host tooling (rpi-install)";
 
-  inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+  # Binary cache of nvmd/nixos-raspberrypi: holds the vendor kernel
+  # (linux_rpi3), firmware and RPi packages built for the nixpkgs revision
+  # that nixos-raspberrypi pins. Without it the kernel is compiled locally
+  # (16+ h under qemu). Applied when the flake config is accepted
+  # (`--accept-flake-config`, which install.sh passes) and the user is
+  # trusted, or when the host nix.conf lists it (see modules/build-host.nix).
+  nixConfig = {
+    extra-substituters = [ "https://nixos-raspberrypi.cachix.org" ];
+    extra-trusted-public-keys = [
+      "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI="
+    ];
+  };
 
-    nixos-hardware.url = "github:NixOS/nixos-hardware/master";
+  inputs = {
+    nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi/main";
+
+    # CRITICAL: use exactly the nixpkgs that nixos-raspberrypi pins (and
+    # builds its cache from). Any other revision changes the kernel
+    # derivation hash -> cache miss -> local kernel build.
+    nixpkgs.follows = "nixos-raspberrypi/nixpkgs";
 
     home-manager = {
+      # master, not release-26.05: nix-terminal needs HM options that only
+      # exist on master (programs.devenv). Master against the older nixpkgs of
+      # nixos-raspberrypi works; the release-mismatch warning is silenced in
+      # home.nix.
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
@@ -23,7 +43,7 @@
   outputs = {
     self,
     nixpkgs,
-    nixos-hardware,
+    nixos-raspberrypi,
     home-manager,
     nix-terminal,
     llm-agents,
@@ -105,6 +125,8 @@
       sandboxPaths = lib.any
         (p: lib.strings.hasInfix "qemu-aarch64" p || p == "/run/binfmt")
         hostTestSystem.config.nix.settings.extra-sandbox-paths;
+      nvmdCache = lib.elem "https://nixos-raspberrypi.cachix.org"
+        hostTestSystem.config.nix.settings.extra-substituters;
       wrapperPkg = lib.any
         (p: p.name == "rpi-install-flake-wrapper")
         hostTestSystem.config.environment.systemPackages;
@@ -118,17 +140,23 @@
     && (lib.assertMsg contract.extraPlatforms "build-host contract: nix extra-platforms includes aarch64-linux")
     && (lib.assertMsg contract.expFeatures "build-host contract: nix experimental-features include nix-command + flakes")
     && (lib.assertMsg contract.sandboxPaths "build-host contract: nix extra-sandbox-paths expose the qemu-aarch64 handler")
+    && (lib.assertMsg contract.nvmdCache "build-host contract: nix extra-substituters include the nixos-raspberrypi cache")
     && (lib.assertMsg contract.wrapperPkg "build-host contract: rpi-install wrapper is in environment.systemPackages")
   then
   {
             
             nixosConfigurations = {
-              rpi = nixpkgs.lib.nixosSystem {
-                system = "aarch64-linux";
+              # nixos-raspberrypi.lib.nixosSystem is a drop-in for
+              # nixpkgs.lib.nixosSystem: it injects the vendor kernel /
+              # firmware overlays and trusts the nvmd binary cache.
+              # (nixosSystemFull would apply RPi overlays globally = more
+              # rebuilds; not needed for this headless system.)
+              rpi = nixos-raspberrypi.lib.nixosSystem {
                 specialArgs = { inherit inputs; };
                 modules = [
-                  # Hardware optimization for Raspberry Pi 3
-                  nixos-hardware.nixosModules.raspberry-pi-3
+                  # Raspberry Pi 3 base: U-Boot, firmware, config.txt,
+                  # vendor kernel (linuxPackages_rpi3)
+                  nixos-raspberrypi.nixosModules.raspberry-pi-3.base
 
                   ./configuration.nix
 
