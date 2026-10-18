@@ -99,9 +99,9 @@ Git: commits are made **unsigned** (`--no-gpg-sign`), the sandbox cannot sign.
 `nixos-install` runs the new system's `activate` and `switch-to-configuration
 boot` through `nixos-enter`: `unshare --mount`, bind-mount /dev,/sys,/proc,
 `chroot <root> …`. All those programs are **aarch64**, run on the x86 host via
-qemu-user + binfmt_misc. The user's host registration (from the first run,
-paste of `/proc/sys/fs/binfmt_misc/aarch64-linux`, plus the script's own
-read): interpreter `/run/binfmt/aarch64-linux`, flags **`P`** (no `F`).
+qemu-user + binfmt_misc. The user's host registration, as reported by the
+script's own read in the user's pasted output (I never saw the raw file;
+`/proc/sys/fs/binfmt_misc` is unreadable from my sandbox): interpreter `/run/binfmt/aarch64-linux`, flags **`P`** (no `F`).
 Without the `F` (fix-binary) flag the kernel resolves the interpreter path at
 exec time *inside the chroot*, where `/run/binfmt/aarch64-linux` does not exist
 → "required file not found". With `F` the kernel opens the interpreter once at
