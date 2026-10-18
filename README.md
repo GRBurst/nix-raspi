@@ -5,10 +5,13 @@ plus everything needed on the x86_64 build host: a NixOS / Home Manager module
 for aarch64 emulation and the `rpi-install` script that builds the system from
 a checkout and installs it onto an SD card.
 
-- Hostname `neptun`, system `aarch64-linux`, NixOS 26.11 (nixos-unstable).
-- Hardware module: `nixos-hardware` `raspberry-pi-3`. Its custom `linux-rpi`
-  kernel (vendor defconfig) is used; see the build notes below — it compiles
-  locally, once per kernel pin.
+- Hostname `neptun`, system `aarch64-linux`, NixOS 26.05 (the nixpkgs pinned
+  by nixos-raspberrypi).
+- Hardware support: [nvmd/nixos-raspberrypi](https://github.com/nvmd/nixos-raspberrypi)
+  (`raspberry-pi-3.base`): vendor kernel `linuxPackages_rpi3`, Pi firmware,
+  U-Boot and a declarative `config.txt`. The kernel comes **prebuilt from the
+  nixos-raspberrypi binary cache** — no local kernel build (see "Binary cache
+  and pins").
 - User `pi` (wheel, docker, video groups), login shell zsh.
 - User environment: the [nix-terminal](https://github.com/grburst/nix-terminal)
   kit (zsh + nvim + yazi, terminal theme, OSC 52 clipboard — no display
@@ -16,7 +19,7 @@ a checkout and installs it onto an SD card.
   nmap, psmisc, tree, ncdu.
 - SSH only: port 2222, key authentication (no password auth).
 - `system.autoUpgrade` runs daily at 03:30.
-- 512 MiB zram swap (see "Client evaluation").
+- 512 MiB zram swap (see "Pi (client) configuration").
 
 ## Repo layout
 
@@ -127,7 +130,9 @@ Options: `--flake PATH` (default `$RPI_FLAKE` or `$PWD`), `--mount DIR`
 flake=...  attr=rpi  rev=<git HEAD>  dirty=clean|dirty  sys=<store path>  drv=<drv path>  built=<utc>
 ```
 
-`install` then:
+`install` first requires the FAT firmware partition to be mounted at
+`<mount>/boot/firmware` (`sudo mount /dev/disk/by-label/NIXOS_BOOT
+<mount>/boot/firmware`); it refuses otherwise. It then:
 
 1. copies the recorded system + toplevel drv into the card's store
    (`sudo nix copy --no-check-sigs --to <mount>`),
@@ -145,16 +150,33 @@ has changed since the build, `install` warns that the target may rebuild.
 > the card, and repeats in full after every re-flash. Building in the host
 > store once and copying over makes re-flashing a matter of minutes.
 
-### What the build does, in detail
+### Binary cache and pins
 
-Everything is fetched from `cache.nixos.org` **except the kernel**: nixpkgs
-no longer builds Raspberry Pi kernels ("linux-rpi series has been removed,
-please change to use nixos-hardware"), so the `nixos-hardware` `linux-rpi`
-kernel is compiled locally, under qemu user-mode emulation — expect several
-hours (observed: ~8 h on a 16-core x86_64 host; the nixos-hardware defconfig
-is very large), once per kernel pin. A `nixos-hardware` update rotates the
-pin and triggers another one-time build; until then, repeated builds are fast
-(host `/nix/store` cache).
+The vendor kernel is **not** in `cache.nixos.org`; it is in the
+`nixos-raspberrypi.cachix.org` cache of nvmd/nixos-raspberrypi, built for
+*exactly* the nixpkgs revision that flake pins. Two rules keep it a cache hit:
+
+1. `nixpkgs` **follows** `nixos-raspberrypi/nixpkgs` (flake.nix). Any other
+   nixpkgs revision changes the kernel derivation hash and silently triggers a
+   16+ hour local kernel build under qemu. Do not add `nixpkgs.url`; update
+   with `nix flake update nixos-raspberrypi` (moves the nixpkgs pin along).
+2. The cache must be enabled on the build host: `flake.nix` carries it in
+   `nixConfig`, `rpi-install` passes `--accept-flake-config` (works for
+   trusted nix users), and `rpi.buildHost.enable = true` adds it to the host's
+   `nix.conf` (`rpi.buildHost.nvmdCache`). `rpi-install` warns if it is
+   missing. The Pi itself trusts the cache via nixos-raspberrypi's
+   `trusted-nix-caches` module.
+
+Check that the kernel is a cache hit before a long build:
+
+```sh
+nix build --accept-flake-config --dry-run .#nixosConfigurations.rpi.config.system.build.toplevel 2>&1 \
+  | grep -E 'linux_rpi'   # must be listed under "will be fetched", not "will be built"
+```
+
+Everything else still builds locally under qemu if it is not in a cache
+(`nix-terminal`/nvf pieces such as `blink-cmp`, treesitter grammars, ...);
+that is minutes to an hour, not the kernel.
 
 ### Manual equivalent (for troubleshooting)
 
@@ -164,16 +186,19 @@ Run from the checkout; this is what `rpi-install all` does:
 T=.#nixosConfigurations.rpi.config.system.build.toplevel
 
 # 1. build in the host store (as your user, never root)
-nix build $T --print-build-logs 2>&1 | tee .rpi-build.log
+nix build --accept-flake-config $T --print-build-logs 2>&1 | tee .rpi-build.log
 
 # 2. copy the closure AND the toplevel drv (the drv pulls the flake sources
 #    into the target store, so the install does not re-fetch them)
-sys=$(nix build $T --print-out-paths)
-drv=$(nix eval --raw $T.drvPath)
+sys=$(nix build --accept-flake-config $T --print-out-paths)
+drv=$(nix eval --raw --accept-flake-config $T.drvPath)
 sudo nix copy --no-check-sigs --to /media/nixos "$sys" "$drv"
 
-# 3. install (nothing is built here)
-sudo nixos-install --root /media/nixos --flake .#rpi
+# 3. mount the FAT firmware partition inside the target root, then install
+#    (nothing is built here; the bootloader step fills /boot/firmware)
+sudo mkdir -p /media/nixos/boot/firmware
+sudo mount /dev/disk/by-label/NIXOS_BOOT /media/nixos/boot/firmware
+sudo nixos-install --root /media/nixos --flake .#rpi --option accept-flake-config true
 
 # 4. boot the pi, then: ssh -p 2222 pi@<pi-address>
 ```
@@ -185,14 +210,20 @@ commit once the pi boots so the commit records what is installed.
 
 Notes on the client side, evaluated and applied:
 
-- **Deprecated options fixed** (nixos-unstable 26.11):
-  `boot.cleanTmpDir` → `boot.tmp.cleanOnBoot`, `nix.maxJobs`/`nix.buildCores`
-  → `nix.settings.max-jobs`/`cores`, `nix.daemonIONiceLevel` →
-  `nix.daemonIOSchedPriority`, `services.openssh.{permitRootLogin,
-  passwordAuthentication}` → `services.openssh.settings.*`,
-  `networking.wireless.userControlled.enable` → `userControlled`,
-  `i18n.consoleKeyMap` → `console.keyMap`. The build log is now free of
-  "Obsolete option" warnings.
+- **Options follow nixos-26.05** (the nixpkgs of nixos-raspberrypi): e.g.
+  `services.journald.storage`/`extraConfig` (the newer `journald.settings`
+  is 26.11 only). No "Obsolete option" warnings.
+- **Boot layout** (nixos-raspberrypi, `uboot`): `/boot/firmware` (FAT, label
+  `NIXOS_BOOT`) holds the Pi firmware, `config.txt` (generated from
+  `hardware.raspberry-pi.config`) and `u-boot-rpi-arm64.bin`; kernel, initrd
+  and `extlinux.conf` live in `/boot` on the ext4 root `NIXOS_SD`. The
+  partition labels are unchanged, so existing cards keep their layout. The
+  firmware partition must be mounted at `<target>/boot/firmware` for the
+  install (`rpi-install install` checks and refuses otherwise).
+- **Home Manager is master**, not release-26.05: nix-terminal needs
+  `programs.devenv`, which only exists on master. `home.nix` silences the
+  release-mismatch warning and disables HM's nushell fzf integration (needs
+  fzf >= 0.73, newer than 26.05).
 - **zram swap enabled** (50 % of RAM = 512 MiB compressed, in RAM, no SD
   wear). Gives the 1 GiB pi headroom for the nightly autoUpgrade builds.
   Remove the `zramSwap` block if you prefer no swap.
@@ -208,8 +239,9 @@ Considered but not changed:
 - **mosh** (UDP 60000-61000 firewall range) — still commented out; enable in
   `configuration.nix` + router port range when needed.
 - **autoUpgrade + kernel updates**: an autoUpgrade on the pi that also bumps
-  `nixos-hardware` would try to build the kernel on the 1 GiB pi. Keep
-  hardware/kernel pins moving from the build host (or accept occasional
+  `nixos-raspberrypi` would pull a new kernel/nixpkgs (a cache hit only once
+  nvmd has rebuilt it; a miss would build on the 1 GiB pi). Keep the
+  nixos-raspberrypi pin moving from the build host (or accept occasional
   failed autoUpgrades — the pi then just runs the old system).
 - **Deploy key**: `users.users.pi.openssh.authorizedKeys.keys` is empty; add
   the host's public key to enable the remote-install follow-up below.

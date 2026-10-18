@@ -42,6 +42,8 @@ SUDO="sudo"; [[ "$EUID" -eq 0 ]] && SUDO=""
 # preflight logic is unit-testable without real qemu/binfmt setup.
 BINMFT_DIR="${RPI_BINMFT_DIR:-/proc/sys/fs/binfmt_misc}"
 BINMFT_RUN="${RPI_BINMFT_RUN:-/run/binfmt}"
+# Overridable so the firmware-partition check is unit-testable.
+MOUNTPOINT_CMD="${RPI_MOUNTPOINT_CMD:-mountpoint -q}"
 
 usage() {
   cat <<'EOF'
@@ -167,6 +169,27 @@ require_card() {
     if [[ "$DRY_RUN" -eq 1 ]]; then warn "$MOUNT does not look like a NixOS flake install"; return; fi
     die "$MOUNT does not look like a NixOS flake install (missing etc/nixos/flake.nix)"
   fi
+  # The firmware partition (fileSystems."/boot/firmware" in configuration.nix)
+  # must be mounted under the target root: the nixos-raspberrypi bootloader
+  # installer writes the Pi firmware, config.txt and U-Boot there during
+  # nixos-install. Unmounted, it would land on the root fs and the Pi would
+  # not boot.
+  if ! $MOUNTPOINT_CMD "$MOUNT/boot/firmware" >/dev/null 2>&1; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then warn "$MOUNT/boot/firmware is not a mount point"; return; fi
+    die "$MOUNT/boot/firmware is not a mount point. Mount the FAT firmware partition first, e.g.: sudo mkdir -p $MOUNT/boot/firmware && sudo mount /dev/disk/by-label/NIXOS_BOOT $MOUNT/boot/firmware"
+  fi
+}
+
+# Warn (not fatal) if the nixos-raspberrypi binary cache is not configured on
+# this host. The build passes --accept-flake-config, which makes a *trusted*
+# nix user pick it up from the flake's nixConfig; otherwise the vendor kernel
+# is compiled locally under qemu (16+ hours).
+check_cache() {
+  if nix show-config 2>/dev/null | grep -E '^(extra-)?substituters' | grep -q 'nixos-raspberrypi.cachix.org'; then
+    log "binary cache: nixos-raspberrypi.cachix.org configured"
+  else
+    warn "nixos-raspberrypi.cachix.org is not in the host's nix substituters. Builds pass --accept-flake-config, which only works for trusted nix users (nix.settings.trusted-users). Otherwise the vendor kernel is compiled locally (16+ h). Fix: rpi.buildHost.enable = true (adds the cache), or add it to nix.conf."
+  fi
 }
 
 git_head() {
@@ -190,23 +213,24 @@ do_build() {
   [[ -f "$FLAKE/flake.nix" ]] || die "no flake.nix in $FLAKE"
 
   check_emulation || die "aarch64 emulation preflight failed (see hints above)"
+  check_cache
 
   log "building $FLAKE$TOPOLEVEL (this takes a while for kernel changes)"
   mkdir -p "$STATE"
 
   local drv=""
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    printf 'dry-run: nix eval --raw %s%s.drvPath\n' "$FLAKE" "$TOPOLEVEL"
-    printf 'dry-run: nix build --print-build-logs %s%s  (log: %s)\n' "$FLAKE" "$TOPOLEVEL" "$STATE/build.log"
+    printf 'dry-run: nix eval --raw %s%s.drvPath --accept-flake-config\n' "$FLAKE" "$TOPOLEVEL"
+    printf 'dry-run: nix build --accept-flake-config --print-build-logs %s%s  (log: %s)\n' "$FLAKE" "$TOPOLEVEL" "$STATE/build.log"
   else
-    drv="$(nix eval --raw "$FLAKE$TOPOLEVEL.drvPath")"
+    drv="$(nix eval --raw --accept-flake-config "$FLAKE$TOPOLEVEL.drvPath")"
     [[ -n "$drv" ]] || die "could not evaluate the toplevel drvPath"
     log "toplevel drv: $drv"
 
     # --print-build-logs streams the build; a second call is a fast no-op that
     # just reports the output path.
     local sys
-    if ! ( cd "$FLAKE" && nix build "$TOPOLEVEL" --print-build-logs ) 2>&1 | tee "$STATE/build.log"; then
+    if ! ( cd "$FLAKE" && nix build --accept-flake-config "$TOPOLEVEL" --print-build-logs ) 2>&1 | tee "$STATE/build.log"; then
       echo "--- last 30 lines of the build log ($STATE/build.log) ---" >&2
       tail -30 "$STATE/build.log" | sed 's/^/  | /' >&2
       if grep -q "failed with exit code 255" "$STATE/build.log"; then
@@ -216,7 +240,7 @@ do_build() {
       fi
       die "build failed (full log: $STATE/build.log)"
     fi
-    sys="$(cd "$FLAKE" && nix build "$TOPOLEVEL" --print-out-paths)"
+    sys="$(cd "$FLAKE" && nix build --accept-flake-config "$TOPOLEVEL" --print-out-paths)"
     [[ -n "$sys" && -d "$sys" ]] || die "build did not produce an output"
 
     local rev dirty
@@ -309,7 +333,9 @@ do_install() {
   run $SUDO nix copy --no-check-sigs --to "$MOUNT" "$sys" "$drv"
 
   log "running nixos-install (root: $MOUNT, flake: $FLAKE#$ATTR)"
-  run $SUDO nixos-install --root "$MOUNT" --flake "$FLAKE#$ATTR"
+  # accept-flake-config: the flake's nixConfig (nvmd binary cache) is applied
+  # without an interactive prompt, as root.
+  run $SUDO nixos-install --root "$MOUNT" --flake "$FLAKE#$ATTR" --option accept-flake-config true
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
     local sysname drvname
@@ -318,7 +344,8 @@ do_install() {
     [[ -d "$MOUNT/nix/store/$sysname" && -d "$MOUNT/nix/store/$drvname" ]] \
       || die "verification failed: system or drv not found in target store"
     [[ -e "$MOUNT/etc/NIXOS" ]] || warn "missing $MOUNT/etc/NIXOS; the install may be incomplete"
-    [[ -e "$MOUNT/boot/kernel8.img" ]] || warn "no $MOUNT/boot/kernel8.img; check the boot partition before booting"
+    [[ -e "$MOUNT/boot/firmware/config.txt" ]] || warn "no $MOUNT/boot/firmware/config.txt; the firmware partition was not populated, check before booting"
+    [[ -e "$MOUNT/boot/firmware/u-boot-rpi-arm64.bin" ]] || warn "no $MOUNT/boot/firmware/u-boot-rpi-arm64.bin; U-Boot missing, the Pi will not boot"
     log "installed $sysname onto $MOUNT"
   fi
 }
