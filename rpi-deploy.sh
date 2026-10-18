@@ -56,6 +56,7 @@ LABELS_CHANGED=0
 DEV_MOUNTS=()
 PART_SCRIPT=""
 LOGIN_CONFIRMED=0
+BRIDGE_LINK=""
 FORMAT=0
 ASSUME_YES=0
 BOOT_SIZE="256MiB"
@@ -746,6 +747,94 @@ read_record() {
   printf '%s\n' "$v"
 }
 
+# --- emulation inside the card chroot -------------------------------------------
+# nixos-install runs the new system's `activate` and switch-to-configuration
+# inside a chroot of the card. Those are aarch64 binaries, run on this host via
+# qemu-user/binfmt. A binfmt handler registered WITHOUT the F (fix-binary) flag
+# is looked up lazily, at exec time, relative to the *chroot* root: the usual
+# NixOS interpreter /run/binfmt/aarch64-linux does not exist there, and chroot
+# fails with "failed to run command '.../activate': No such file or directory".
+
+# binfmt_entry: path of the registered aarch64 handler, if readable.
+binfmt_entry() {
+  local n
+  for n in aarch64-linux qemu-aarch64; do
+    if [[ -r "$BINMFT_DIR/$n" ]]; then printf '%s\n' "$BINMFT_DIR/$n"; return 0; fi
+  done
+  return 1
+}
+
+# binfmt_field ENTRY KEY: "interpreter" -> /run/binfmt/..., "flags" -> P / POCF
+binfmt_field() { sed -n "s/^$2:\\? *//p" "$1" | head -n1; }
+
+# Removes the interpreter symlink placed in the card by bridge_binfmt.
+cleanup_bridge() {
+  [[ -n "$BRIDGE_LINK" ]] || return 0
+  run $SUDO rm -f "$BRIDGE_LINK"
+  run $SUDO rmdir "$(dirname "$BRIDGE_LINK")" 2>/dev/null || true
+  BRIDGE_LINK=""
+}
+
+# Makes the qemu interpreter reachable inside the card chroot: the interpreter's
+# store path (and its closure) is copied into the card, and the registered
+# interpreter path is symlinked there. Removed again after nixos-install.
+bridge_binfmt() {
+  local interp="$1" real top
+  real="$(readlink -f "$interp" 2>/dev/null || true)"
+  if [[ "$real" != /nix/store/* ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then real="/nix/store/<interpreter>"; else
+      die "cannot bridge the binfmt interpreter: $interp does not resolve to a nix store path (got '${real:-nothing}'). Fix on the host: boot.binfmt.preferStaticEmulators = true;"
+    fi
+  fi
+  top="$(printf '%s' "$real" | sed -E 's|^(/nix/store/[^/]+).*|\1|')"
+  run $SUDO nix copy --no-check-sigs --to "$MOUNT" "$top"
+  if [[ "$interp" != /nix/store/* ]]; then
+    run $SUDO mkdir -p "$MOUNT$(dirname "$interp")"
+    run $SUDO ln -sfn "$real" "$MOUNT$interp"
+    BRIDGE_LINK="$MOUNT$interp"
+  fi
+}
+
+# Called before nixos-install (host is not aarch64 only).
+prepare_chroot_emulation() {
+  [[ "$(uname -m)" == "aarch64" && -z "${RPI_FORCE_EMULATION_CHECK:-}" ]] && return 0
+  local entry flags interp
+  if ! entry="$(binfmt_entry)"; then
+    warn "cannot read the aarch64 binfmt entry under $BINMFT_DIR; if nixos-install fails with 'chroot: failed to run command ... No such file or directory', see: rpi-deploy show"
+    return 0
+  fi
+  flags="$(binfmt_field "$entry" flags)"
+  interp="$(binfmt_field "$entry" interpreter)"
+  if [[ "$flags" == *F* ]]; then
+    log "binfmt: the aarch64 handler has the F flag; it works inside the card chroot"
+    return 0
+  fi
+  warn "the aarch64 binfmt handler (interpreter $interp, flags '${flags:-none}') has no F flag, so it is not usable inside the card chroot of nixos-install (it would fail with 'chroot: failed to run command ... No such file or directory')."
+  warn "bridging the interpreter into the card for this install. Permanent fix on the host: boot.binfmt.preferStaticEmulators = true; (the build-host module sets it)"
+  bridge_binfmt "$interp"
+}
+
+# --- sudo -------------------------------------------------------------------------
+# The card copy of a few GiB can outlast sudo's password timeout (the next sudo
+# then prompts again, and times out if you are away). Authenticate once up
+# front and keep the ticket fresh for the duration of this run.
+SUDO_KEEPALIVE_PID=""
+stop_sudo() {
+  [[ -n "$SUDO_KEEPALIVE_PID" ]] || return 0
+  kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  wait "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  SUDO_KEEPALIVE_PID=""
+}
+start_sudo() {
+  [[ -n "$SUDO" && "$DRY_RUN" -eq 0 ]] || return 0
+  log "root access is needed (card, nixos-install): asking for the sudo password once"
+  $SUDO -v || die "sudo authentication failed (sudo needs a terminal here)"
+  local parent=$$
+  ( while kill -0 "$parent" 2>/dev/null; do sleep 50; $SUDO -n -v 2>/dev/null || exit 0; done ) &
+  SUDO_KEEPALIVE_PID=$!
+  trap stop_sudo EXIT
+}
+
 # --- install checks ---------------------------------------------------------
 # Prints which card is about to be written (device, size, free space).
 card_summary() {
@@ -864,11 +953,23 @@ do_install() {
   # Paths built as a regular user are unsigned, hence --no-check-sigs; the
   # card store is root-owned, hence sudo (verified on real hardware).
   run $SUDO nix copy --no-check-sigs --to "$MOUNT" "$sys" "$drv"
+  if [[ "$DRY_RUN" -eq 0 && ! -x "$MOUNT/nix/store/$(basename "$sys")/activate" ]]; then
+    die "verification failed: the system was not copied completely ($MOUNT/nix/store/$(basename "$sys")/activate is missing). Re-run: rpi-deploy install"
+  fi
+
+  prepare_chroot_emulation
 
   log "running nixos-install (root: $MOUNT, flake: $FLAKE#$ATTR)"
   # accept-flake-config: the flake's nixConfig (nvmd binary cache) is applied
   # without an interactive prompt, as root.
-  run $SUDO nixos-install --root "$MOUNT" --flake "$FLAKE#$ATTR" --option accept-flake-config true
+  local rc=0
+  run $SUDO nixos-install --root "$MOUNT" --flake "$FLAKE#$ATTR" --option accept-flake-config true || rc=$?
+  cleanup_bridge
+  if [[ "$rc" -ne 0 ]]; then
+    warn "nixos-install failed (exit $rc). Nothing is lost: fix the cause and re-run 'rpi-deploy install'; store paths that are already on the card are skipped, nothing is rebuilt."
+    warn "'chroot: failed to run command ... No such file or directory' means the aarch64 emulator is not usable inside the card chroot. Check: cat /proc/sys/fs/binfmt_misc/aarch64-linux  (the flags line needs an F; host fix: boot.binfmt.preferStaticEmulators = true)"
+    die "nixos-install failed"
+  fi
 
   sync_config
 
@@ -895,6 +996,15 @@ do_show() {
   echo "mount   : $MOUNT"
   echo "git head: $(git_head)$(git_dirty && echo ' (dirty)')"
   check_binfmt
+  local be bflags
+  if be="$(binfmt_entry)"; then
+    bflags="$(binfmt_field "$be" flags)"
+    if [[ "$bflags" == *F* ]]; then
+      echo "chroot emu      : ok (binfmt flags '$bflags' include F)"
+    else
+      echo "chroot emu      : bridged automatically at install (binfmt flags '${bflags:-none}' lack F; host fix: boot.binfmt.preferStaticEmulators = true)"
+    fi
+  fi
   if $MOUNTPOINT_CMD "$MOUNT" >/dev/null 2>&1; then
     echo "card    : mounted at $MOUNT ($(mnt_source "$MOUNT"))"
     if $MOUNTPOINT_CMD "$MOUNT/boot/firmware" >/dev/null 2>&1; then
@@ -917,6 +1027,10 @@ do_show() {
 }
 
 # --- dispatch ----------------------------------------------------------------
+# Everything that touches the card needs root; ask for the password once, at
+# the start (for `all`: before the long build, so that you can walk away).
+case "$SUBCOMMAND" in prepare|config|eject|install|all) start_sudo ;; esac
+
 case "$SUBCOMMAND" in
   prepare) do_prepare ;;
   config)  do_config ;;

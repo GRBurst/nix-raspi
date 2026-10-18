@@ -121,11 +121,19 @@
         (lib.intersectLists [ "nix-command" "flakes" ]
         hostTestSystem.config.nix.settings.experimental-features)
         == [ "nix-command" "flakes" ];
-      sandboxPaths = lib.any
-        (p: lib.strings.hasInfix "qemu-aarch64" p || p == "/run/binfmt")
-        hostTestSystem.config.nix.settings.extra-sandbox-paths;
+      # the emulator must be usable in the nix build sandbox: either the
+      # kernel already holds it open (F flag) or the sandbox exposes it
+      sandboxPaths =
+        hostTestSystem.config.boot.binfmt.registrations.aarch64-linux.fixBinary
+        || lib.any
+          (p: lib.strings.hasInfix "qemu-aarch64" p || p == "/run/binfmt")
+          hostTestSystem.config.nix.settings.extra-sandbox-paths;
       nvmdCache = lib.elem "https://nixos-raspberrypi.cachix.org"
         hostTestSystem.config.nix.settings.extra-substituters;
+      # F flag: the qemu handler must also work inside the card chroot that
+      # nixos-install uses (see modules/build-host.nix)
+      chrootEmulation =
+        hostTestSystem.config.boot.binfmt.registrations.aarch64-linux.fixBinary;
       wrapperPkg = lib.any
         (p: p.name == "rpi-deploy-flake-wrapper")
         hostTestSystem.config.environment.systemPackages;
@@ -138,8 +146,9 @@
     (lib.assertMsg contract.binfmt "build-host contract: boot.binfmt.emulatedSystems = [ aarch64-linux ]")
     && (lib.assertMsg contract.extraPlatforms "build-host contract: nix extra-platforms includes aarch64-linux")
     && (lib.assertMsg contract.expFeatures "build-host contract: nix experimental-features include nix-command + flakes")
-    && (lib.assertMsg contract.sandboxPaths "build-host contract: nix extra-sandbox-paths expose the qemu-aarch64 handler")
+    && (lib.assertMsg contract.sandboxPaths "build-host contract: the qemu-aarch64 handler is usable in the nix sandbox (F flag or extra-sandbox-paths)")
     && (lib.assertMsg contract.nvmdCache "build-host contract: nix extra-substituters include the nixos-raspberrypi cache")
+    && (lib.assertMsg contract.chrootEmulation "build-host contract: the aarch64 binfmt handler has the F flag (works in the nixos-install chroot)")
     && (lib.assertMsg contract.wrapperPkg "build-host contract: rpi-deploy wrapper is in environment.systemPackages")
   then
   {

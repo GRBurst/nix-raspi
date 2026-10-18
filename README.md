@@ -66,6 +66,18 @@ then `nixos-rebuild switch --flake /etc/nixos`. That gives you:
   emulation; the nixpkgs binfmt module also registers the handler for the nix
   sandbox (`extra-sandbox-paths`) and adds `aarch64-linux` to
   `nix.extra-platforms`, so cross builds work out of the box;
+- `boot.binfmt.preferStaticEmulators = true` — a static qemu registered with
+  the binfmt **F flag**. This matters for `install`: `nixos-install` runs the
+  new system's `activate` and the bootloader installer *inside a chroot of the
+  SD card*. A handler without the F flag (the NixOS default) is resolved at
+  exec time relative to the chroot, where `/run/binfmt/aarch64-linux` does not
+  exist, so it fails with
+  `chroot: failed to run command '/nix/var/nix/profiles/system/activate': No such file or directory`
+  although every file is in place. (`rpi-deploy install` detects such a host
+  — `cat /proc/sys/fs/binfmt_misc/aarch64-linux` shows `flags: P` without `F` —
+  and bridges the interpreter into the card for the install, so it works
+  either way; the F flag is the clean fix.) The static qemu is a ~110 MiB
+  download from cache.nixos.org;
 - `nix` experimental features `nix-command` and `flakes`;
 - `rpi-deploy` on the PATH (in `environment.systemPackages`), optionally
   wrapped so `RPI_FLAKE` is preset.
@@ -94,6 +106,7 @@ Manual equivalent of the module (any host):
 
 ```nix
 boot.binfmt.emulatedSystems = [ "aarch64-linux" ];   # NixOS
+boot.binfmt.preferStaticEmulators = true;            # F flag, needed in the install chroot
 nix.settings.extra-platforms = [ "aarch64-linux" ];  # or set in nix.conf
 ```
 
@@ -232,6 +245,22 @@ copied into the world-readable nix store (the script warns if there is no
 The record carries the git revision; if the checkout HEAD or the working tree
 has changed since the build, `install` warns that the target may rebuild.
 
+**Resuming / re-running.** Every step of `install` is idempotent, so after any
+interruption (sudo timeout, Ctrl-C, a failed `nixos-install`) just run
+`rpi-deploy install` again: store paths that are already on the card are
+skipped by `nix copy`, nothing is rebuilt, `nixos-install` re-runs on the same
+system. Only `prepare --format` is destructive, and it always asks. To avoid the
+sudo timeout in the first place, `rpi-deploy` asks for the password **once at
+the start** (for `all`: before the long build) and keeps the sudo ticket
+refreshed while it runs.
+
+**`chroot: failed to run command ... No such file or directory`** during
+`nixos-install` is *not* a copy or path problem (the closure is complete
+in the card's store); it is the aarch64 emulator being unusable inside the
+chroot, see the F flag above. `install` prints this and how to check it when
+`nixos-install` fails, and verifies right after the copy that the system's
+`activate` is on the card.
+
 > **Why not just `nixos-install`?** It does not build in the host store: it
 > compiles the whole closure directly into the card's `/nix/store`, as root,
 > with build temp files on the SD. That is slow, wears the card, and repeats in
@@ -360,13 +389,13 @@ Three layers, all wired into `nix flake check`:
 
 ```sh
 nix flake check                                   # everything below
-nix build .#checks.x86_64-linux.rpi-deploy-unit  # 240 unit tests for rpi-deploy.sh
+nix build .#checks.x86_64-linux.rpi-deploy-unit  # 273 unit tests for rpi-deploy.sh
 nix build .#checks.x86_64-linux.rpi-host-vm       # boots a real VM (qemu), ~1-16 min
 nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module, eval-only proof
 ```
 
 1. **`rpi-deploy-syntax`** (both systems) — `bash -n` of the script.
-2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 240 unit tests
+2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 273 unit tests
    with mocked `nix`/`nixos-install`: preflight fail/success, build record
    round-trip (all fields), `show`, install verification incl. a failing
    store copy, `--from` with/without record, attr mismatch, HEAD-moved and

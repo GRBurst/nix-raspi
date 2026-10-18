@@ -86,13 +86,14 @@ case " $* " in
     esac
     ;;
   *" copy "*" --to "*)
+    echo "nix $*" >> "$MOCK_LOG"
     if [[ "${MOCK_COPY:-1}" == 1 ]]; then
       state="pre"; target=""
       for a in "$@"; do
         case "$state" in
           pre)        [[ "$a" == "--to" ]] && state="wanttarget" ;;
           wanttarget) target="$a"; state="paths" ;;
-          paths)      mkdir -p "$target/nix/store/$(basename "$a")" ;;
+          paths)      mkdir -p "$target/nix/store/$(basename "$a")"; case "$a" in *.drv) ;; *) : > "$target/nix/store/$(basename "$a")/activate"; chmod +x "$target/nix/store/$(basename "$a")/activate" ;; esac ;;
         esac
       done
     fi
@@ -104,6 +105,13 @@ MOCK
 # Mock `sudo`: runs the command unprivileged.
 cat > "$BIN/sudo" <<'MOCK'
 #!BASHPLACEHOLDER
+# sudo -v / sudo -n -v: credential refresh only; otherwise run the command
+while [[ "${1:-}" == -* ]]; do
+  case "$1" in
+    -v) echo "sudo -v" >> "$MOCK_LOG"; [[ -n "${MOCK_SUDO_FAIL:-}" ]] && exit 1; exit 0 ;;
+    *) shift ;;
+  esac
+done
 exec "$@"
 MOCK
 
@@ -111,7 +119,10 @@ MOCK
 cat > "$BIN/nixos-install" <<'MOCK'
 #!BASHPLACEHOLDER
 echo "nixos-install $*" >> "$MOCK_LOG"
-exit 0
+# record whether the (bridged) interpreter is visible under --root, like in the chroot
+root=""; prev=""; for a in "$@"; do [[ "$prev" == --root ]] && root="$a"; prev="$a"; done
+[[ -n "${MOCK_INTERP:-}" && -L "$root$MOCK_INTERP" ]] && echo "interp-visible-in-chroot" >> "$MOCK_LOG"
+exit "${MOCK_NIXOS_INSTALL_RC:-0}"
 MOCK
 sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/nix" "$BIN/nixos-install" "$BIN/sudo"
 chmod 755 "$BIN/nix" "$BIN/nixos-install" "$BIN/sudo"
@@ -199,7 +210,12 @@ export RPI_ALLOW_NONBLOCK=1      # test "devices" are not real block devices
 
 # binfmt fixtures for the emulation preflight
 mkdir -p "$T/bmf-ok" "$T/bmf-empty"
-touch "$T/bmf-ok/qemu-aarch64"
+# a registration as NixOS writes it with preferStaticEmulators (F flag: works in a chroot)
+printf 'enabled\ninterpreter /run/binfmt/aarch64-linux\nflags: POCF\noffset 0\n' > "$T/bmf-ok/qemu-aarch64"
+# ... and the default one (P only): interpreter looked up inside the chroot -> must be bridged
+mkdir -p "$T/bmf-nof" "$T/fake-run/binfmt"
+ln -s "$(readlink -f "$BASH_BIN")" "$T/fake-run/binfmt/aarch64-linux"
+printf 'enabled\ninterpreter %s/fake-run/binfmt/aarch64-linux\nflags: P\noffset 0\n' "$T" > "$T/bmf-nof/aarch64-linux"
 export RPI_BINMFT_DIR="$T/bmf-ok"
 export RPI_MOUNTPOINT_CMD=true          # card layout: pretend root and /boot/firmware are mounted
 export RPI_BINMFT_RUN="$T/bmf-run"   # does not exist: exercises the OR branch
@@ -774,6 +790,72 @@ expect_exit "unique labels: exit 0" 0
 run_cmd env MOCK_DUP_LABELS='/dev/sdx2 NIXOS_SD\n/dev/sdy2 NIXOS_SD' bash "$SCRIPT" prepare /dev/sdq --mount "$C27"
 expect_exit "duplicate labels + foreign DEVICE: exit 1" 1
 expect_grep "duplicate labels + DEVICE: hint to unplug" "unplug it"
+
+# 35. nixos-install runs `activate` inside a chroot of the card: an aarch64
+#     binfmt handler without the F flag is not found there (the real failure:
+#     "chroot: failed to run command .../activate: No such file or directory")
+C35="$(new_card t35)"; INTERP="$T/fake-run/binfmt/aarch64-linux"
+: > "$MOCK_LOG"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" MOCK_INTERP="$INTERP" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "chroot emu (F flag): exit 0" 0
+expect_grep "chroot emu (F flag): reported ok" "has the F flag"
+expect_not_grep "chroot emu (F flag): no bridging" "bridging the interpreter" 
+expect_not_grep "chroot emu (F flag): interpreter not placed in the card" "interp-visible-in-chroot" "$MOCK_LOG"
+: > "$MOCK_LOG"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" MOCK_INTERP="$INTERP" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "chroot emu (no F flag): exit 0" 0
+expect_grep "chroot emu (no F flag): explained" "has no F flag"
+expect_grep "chroot emu (no F flag): names the permanent fix" "preferStaticEmulators"
+expect_grepf "chroot emu (no F flag): interpreter closure copied into the card" "nix copy --no-check-sigs --to $C35 $(readlink -f "$BASH_BIN" | sed -E 's|^(/nix/store/[^/]+).*|\1|')" "$MOCK_LOG"
+expect_grepf "chroot emu (no F flag): interpreter visible in the chroot during nixos-install" "interp-visible-in-chroot" "$MOCK_LOG"
+expect_true "chroot emu (no F flag): bridge removed afterwards" test ! -e "$C35$INTERP" -a ! -L "$C35$INTERP"
+expect_true "chroot emu (no F flag): empty dir removed too" test ! -d "$C35$(dirname "$INTERP")"
+# the bridge goes in BEFORE nixos-install, the install runs, then it goes away
+expect_true "chroot emu: copy before nixos-install" test "$(grep -n 'nix copy.*bash' "$MOCK_LOG" | tail -1 | cut -d: -f1)" -lt "$(grep -n '^nixos-install' "$MOCK_LOG" | tail -1 | cut -d: -f1)"
+# the bridge is removed even if nixos-install fails
+: > "$MOCK_LOG"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" MOCK_INTERP="$INTERP" MOCK_NIXOS_INSTALL_RC=3 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "nixos-install failure: exit 1" 1
+expect_true "nixos-install failure: bridge still removed" test ! -L "$C35$INTERP"
+expect_grep "nixos-install failure: safe to re-run" "re-run 'rpi-deploy install'"
+expect_grep "nixos-install failure: chroot hint" "chroot: failed to run command"
+expect_grep "nixos-install failure: says what to check" "binfmt_misc/aarch64-linux"
+expect_not_grep "nixos-install failure: no success claim" "installed mock-sys"
+# dry-run shows the bridge steps without touching the card
+: > "$MOCK_LOG"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C35"
+expect_exit "chroot emu dry-run: exit 0" 0
+expect_grep "chroot emu dry-run: prints the symlink" "dry-run: sudo ln -sfn"
+expect_true "chroot emu dry-run: runs nothing" test ! -s "$MOCK_LOG"
+# an unreadable binfmt entry is not fatal
+run_cmd env RPI_BINMFT_DIR="$T/bmf-empty" RPI_BINMFT_RUN="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "chroot emu (entry unreadable): exit 0" 0
+expect_grep "chroot emu (entry unreadable): warns" "cannot read the aarch64 binfmt entry"
+# show reports it
+run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" bash "$SCRIPT" show --flake "$F9"
+expect_grep "show: chroot emulation bridged" "chroot emu .*bridged automatically"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" show --flake "$F9"
+expect_grep "show: chroot emulation ok" "chroot emu .*ok"
+
+# 36. sudo: authenticate once up front (the copy outlasts the sudo timeout)
+: > "$MOCK_LOG"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_grepf "sudo: authenticated up front" "sudo -v" "$MOCK_LOG"
+expect_true "sudo: authenticated before the card copy" test "$(grep -n '^sudo -v' "$MOCK_LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n 'nix copy' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+run_cmd env MOCK_SUDO_FAIL=1 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
+expect_exit "sudo refused: exit 1" 1
+expect_grep "sudo refused: message" "sudo authentication failed"
+: > "$MOCK_LOG"
+run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C35"
+expect_true "sudo: no password prompt in dry-run" test ! -s "$MOCK_LOG"
+: > "$MOCK_LOG"
+run_cmd env "${EMUL_OK[@]}" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" all --flake "$(new_flake t36)" --mount "$C35" --yes
+expect_true "sudo (all): password asked once, before the long build" test "$(grep -c '^sudo -v' "$MOCK_LOG")" = 1
+run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --flake "$(new_flake t36b)"
+expect_not_grep "sudo: build never asks for it" "root access is needed"
+: > "$MOCK_LOG"
+run_cmd bash "$SCRIPT" show --flake "$F9"
+expect_true "sudo: show does not ask" test ! -s "$MOCK_LOG"
 
 # 29. eject
 : > "$MOCK_LOG"

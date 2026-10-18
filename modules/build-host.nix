@@ -94,6 +94,14 @@ in
     # `nix.settings.extra-platforms`, so cross builds work out of the box.
     boot.binfmt.emulatedSystems = [ "aarch64-linux" ];
 
+    # Static qemu + the F (fix-binary) binfmt flag. nixos-install runs the
+    # new system's `activate` and the bootloader installer inside a chroot of
+    # the SD card; without the F flag the kernel looks for the interpreter
+    # (/run/binfmt/aarch64-linux) inside that chroot, does not find it, and
+    # chroot fails with "failed to run command '.../activate': No such file or
+    # directory". With F the kernel opens the interpreter at registration time.
+    boot.binfmt.preferStaticEmulators = lib.mkDefault true;
+
     nix.settings = {
       experimental-features = lib.mkDefault [ "nix-command" "flakes" ];
     } // lib.optionalAttrs cfg.nvmdCache {
