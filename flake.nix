@@ -219,7 +219,6 @@
                     imports = [ (modulesPath + "/installer/sd-card/sd-image.nix") ];
                     # same mount options as the installed `rpi` system
                     fileSystems."/boot/firmware".options = lib.mkForce [ "fmask=0077" "dmask=0077" ];
-                    fileSystems."/".options = [ "noatime" ];
                     sdImage = {
                       # keep our labels (configuration.nix mounts by label)
                       firmwarePartitionName = "NIXOS_BOOT";
