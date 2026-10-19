@@ -350,3 +350,54 @@ optional check), `rpi-deploy flash DEVICE` = stream the image to the card with
 confirmation, `rpi-deploy config` = copy `/etc/nixos` incl. secrets, keep
 `devices`/`show`/`eject`; drop `prepare --format`, the chroot probe, the binfmt
 registration and the bridge.
+
+### 10.7 Questions answered in session 2 (image flow, after flashing)
+
+**Does the card fill itself? [V in qemu]** Yes. The image is only 5.4 GiB (p2) so
+flashing is fast; `sdImage.expandOnBoot` (default true) adds the systemd unit
+`expand-root-partition`: `sfdisk -N2 ",+"` grows p2 to the end of the device,
+`partprobe`, `resize2fs` (online). It runs once: guarded by
+`ConditionPathExists=/nix-path-registration`, which `register-nix-paths` removes
+after registering the store in the nix DB on that same first boot. Measured: on an
+8 GiB qemu disk the root went from 1419800 to 2029568 blocks (5.4 -> 7.74 GiB =
+disk minus the 256 MiB firmware partition). The card must be >= ~5.7 GiB.
+
+**Differences on the running Pi vs. the `nixos-install` flow [V by eval unless noted]:**
+1. **No password anywhere (real gap).** `users.users.{root,pi}` have no password
+   option set; `wheelNeedsPassword = true`; `PermitRootLogin = no`. The
+   `nixos-install` flow prompts for a root password (that is why it asked during
+   the user's install); the image flow has none. Result: ssh as `pi` works, but
+   there is no way to become root (no `sudo`, no `su`), so no local
+   `nixos-rebuild` and no `--target-host` switch. **Needs a decision**: (a)
+   `hashedPassword` for root/pi in the repo (a hash, not a secret in plain text),
+   (b) `wheelNeedsPassword = false` (key-only login makes this defensible),
+   (c) `security.sudo.extraRules` NOPASSWD for the rebuild commands only.
+   Same applies to the current `nixos-install` flow for `pi` (root password
+   exists there, so `su -` works).
+2. **The installed system is not byte-identical to `rpi`:** the image's toplevel
+   is named `nixos-system-neptun-sd-card-...` (tag `sd-card`) and has two extra
+   units (`expand-root-partition`, `register-nix-paths`, harmless after the first
+   boot). The first `nixos-rebuild switch` to `rpi` therefore builds/switches to a
+   different toplevel (small; everything else is cached/identical). To make the
+   flashed system exactly what you later deploy, import
+   `modules/installer/sd-card/sd-image.nix` into `rpi` itself (then
+   `rpi-image` == `rpi`). Not done yet; decision pending.
+3. **Fixed IDs:** the image has fixed ext4 UUID `44444444-4444-4444-8888-888888888888`
+   and FAT volume id `2175-794E`; two cards flashed from it have identical
+   UUIDs and labels (by-label/by-uuid ambiguous when both are connected; the
+   duplicate-label guard in `rpi-deploy` already refuses to guess).
+4. **`/etc/nixos` is not in the image.** `nixos-rebuild` uses
+   `/etc/nixos/flake.nix` by default **[V in nixos-rebuild-ng source]**, and
+   `system.autoUpgrade` is enabled with `flake = null` (03:30 daily), so the
+   flake and `secrets/wireless.env` must be copied after flashing
+   (`rpi-deploy config`) - also in the `nixos-install` flow. **[?]** whether the
+   unattended `autoUpgrade` works at all with a flake-only `/etc/nixos`
+   (not tested; it may need `autoUpgrade.flake = "/etc/nixos#neptun"`).
+5. **First boot is slower** (store registration + resize); not measured on
+   hardware (qemu is 5x slower than a Pi, so the 1015-path registration is not
+   comparable).
+6. Same on both: partition layout and mount options (parity fixed: the image no
+   longer adds `noatime`; `rpi` does not have it either), bootloader (U-Boot +
+   `/boot/firmware`), ssh host keys and machine-id are generated at first boot,
+   `nixos-rebuild switch` on the Pi updates `/boot` and `/boot/firmware` the same
+   way.
