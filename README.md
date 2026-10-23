@@ -1,41 +1,62 @@
-# rpi — Raspberry Pi 3 Model B (V1.2) NixOS flake + build host
+# rpi — Raspberry Pi 3 Model B (V1.2) NixOS: build here, flash once, push updates
 
-Headless NixOS system (no graphics server) for a Raspberry Pi 3 Model B V1.2,
-plus everything needed on the x86_64 build host: a NixOS / Home Manager module
-for aarch64 emulation and the `rpi-deploy` script that builds the system from
-a checkout and installs it onto an SD card.
+Headless NixOS system (no display server) for a Raspberry Pi 3 Model B V1.2
+(hostname `neptun`, `aarch64-linux`, 1 GiB RAM, SD card, wired LAN only), plus
+everything the x86_64 NixOS build host needs: aarch64 emulation, the
+`rpi-deploy` tool and a weekly security-update job.
 
-- Hostname `neptun`, system `aarch64-linux`, NixOS 26.05 (the nixpkgs pinned
-  by nixos-raspberrypi).
-- Hardware support: [nvmd/nixos-raspberrypi](https://github.com/nvmd/nixos-raspberrypi)
-  (`raspberry-pi-3.base`): vendor kernel `linuxPackages_rpi3`, Pi firmware,
-  U-Boot and a declarative `config.txt`. The kernel comes **prebuilt from the
-  nixos-raspberrypi binary cache** — no local kernel build (see "Binary cache
-  and pins").
-- User `pi` (wheel, docker, video groups), login shell zsh.
-- User environment: the [nix-terminal](https://github.com/grburst/nix-terminal)
-  kit (zsh + nvim + yazi, terminal theme, OSC 52 clipboard — no display
-  server required) plus tools: btop, atop, wget, curl, git, tig, netcat,
-  nmap, psmisc, tree, ncdu.
-- SSH only: port 2222, key authentication (no password auth).
-- `system.autoUpgrade` runs daily at 03:30.
-- 512 MiB zram swap (see "Pi (client) configuration").
+```
+host (x86_64, binfmt aarch64, caches)                Pi 3B (aarch64)
+ flake nixos/  ──eval+build──► toplevel ──┬─ image ─► .img.zst ─flash─► SD (once)
+                                          └─ push ─► nixos-rebuild 26.05 --target-host root@neptun
+ systemd timer rpi-autoupdate (weekly): lock update ─ guard ─ build ─ boot/switch ─ reboot if kernel changed
+```
+
+- **One definition.** `nixosConfigurations.rpi` (alias `neptun`) is both the
+  flashed image (`config.system.build.sdImage`) and every later deploy.
+- **The Pi never evaluates the flake** (eval needs ~1.08 GB RSS). No
+  `/etc/nixos`, no `autoUpgrade`, no wifi secrets. Everything is built on the
+  host and pushed over SSH.
+- **No local kernel build, ever.** The vendor kernel comes prebuilt from the
+  [nvmd/nixos-raspberrypi](https://github.com/nvmd/nixos-raspberrypi) cachix;
+  `rpi-deploy` and the weekly job refuse to run when that cannot hold.
+- NixOS 26.05, user `pi` (wheel, login shell zsh from the
+  [nix-terminal](https://github.com/grburst/nix-terminal) kit), SSH on port
+  **2222**, key-only for `pi` and `root`, static IP `192.168.100.20/24`.
+- Fewer SD writes (`rpi.sdWear`: no firmware blobs, relaxed ext4 write-back,
+  volatile journal, tmpfs `/tmp`), headless `config.txt` (`rpi.headless`),
+  optional USB data disk (`rpi.storage.external`, off by default).
+- Design: `docs/superpowers/specs/2026-10-19-image-push-deploy-design.md`,
+  plan: `docs/superpowers/plans/2026-10-19-image-push-deploy.md`, status and
+  hardware checklist: `HANDOFF.md`.
 
 ## Repo layout
 
 ```
-flake.nix           pi system config + build-host outputs
-configuration.nix   the pi NixOS config
-home.nix            the pi home-manager config
-modules/
-  build-host.nix        NixOS module: aarch64 build host (rpi.buildHost)
-  build-host-home.nix   Home Manager module: rpi-deploy on the PATH
-tests/build-host.nix    x86_64 test system for the build-host module
-rpi-deploy.sh       rpi-deploy: prepare / build / install / config / eject / show / all
-secrets/            gitignored per-machine secrets (wireless.env)
+nixos/
+  flake.nix            Pi system, build-host modules, rpi-deploy package, apps, checks
+  flake.lock           pins: our nixpkgs + nvmd (develop) + home-manager + ...
+  configuration.nix    the Pi NixOS config
+  keys.nix             ssh public keys of the Pi (user, auto-update key, host address)
+  home.nix             Home Manager config of user `pi`
+  modules/
+    sd-image.nix         the SD image as a build output of the Pi system
+    sd-wear.nix          rpi.sdWear      — fewer SD writes, no firmware blobs
+    headless.nix         rpi.headless    — config.txt without display/audio/wifi/bt
+    external-storage.nix rpi.storage.external — optional USB data disk
+    build-host.nix       NixOS module (host): aarch64 emulation, rpi-deploy, rpi.buildHost.autoUpdate
+    build-host-home.nix  Home Manager module (host): rpi-deploy on the PATH only
+  rpi-deploy.sh        rpi-deploy: image / flash / deploy / status
+  rpi-autoupdate.sh    the weekly job (run by the systemd service)
+  rpi-lib.sh           guards, ssh helpers, reboot decision (shared by both)
+  tests/               unit tests, eval checks, qemu smoke tests (see "Testing")
+docs/superpowers/      spec and plan
 ```
 
-## Build host setup
+All commands below run in `nixos/` of your checkout unless noted; with
+`rpi.buildHost.flakePath` set (below) `rpi-deploy` works from anywhere.
+
+## 1. Build host setup
 
 ### A. NixOS build host (module)
 
@@ -43,9 +64,8 @@ In your host flake:
 
 ```nix
 inputs.pi = {
-  url = "git+file:///home/pallon/projects/pi/nixos";
-  flake = true;
-  inputs.nixpkgs.follows = "nixpkgs";
+  url = "git+file:///home/pallon/projects/raspberry-pi/nixos";
+  inputs.nixpkgs.follows = "nixpkgs";   # only the module is used on the host
 };
 ```
 
@@ -55,399 +75,437 @@ modules = [
   {
     rpi.buildHost.enable = true;
     # optional: pre-sets RPI_FLAKE so `rpi-deploy` needs no --flake
-    rpi.buildHost.flakePath = "/home/pallon/projects/pi/nixos";
+    rpi.buildHost.flakePath = "/home/pallon/projects/raspberry-pi/nixos";
+    # weekly security updates: see section 4
   }
 ];
 ```
 
-then `nixos-rebuild switch --flake /etc/nixos`. That gives you:
+then `nixos-rebuild switch`. That gives you:
 
-- `boot.binfmt.emulatedSystems = [ "aarch64-linux" ]` — qemu user-mode
-  emulation; the nixpkgs binfmt module also registers the handler for the nix
-  sandbox (`extra-sandbox-paths`) and adds `aarch64-linux` to
-  `nix.extra-platforms`, so cross builds work out of the box;
-- `boot.binfmt.preferStaticEmulators = true` — a static qemu registered with
-  the binfmt **F flag**. This matters for `install`: `nixos-install` runs the
-  new system's `activate` and the bootloader installer through `nixos-enter`,
-  i.e. *inside a chroot of the SD card in a fresh mount namespace*. A handler
-  without the F flag (the NixOS default) is resolved at exec time inside that
-  chroot, where `/run/binfmt/aarch64-linux` does not exist, so programs fail with
-  `cannot execute: required file not found` and
-  `chroot: failed to run command '.../sw/bin/bash': No such file or directory`
-  although every file is on the card. (`rpi-deploy install` detects such a host
-  — `cat /proc/sys/fs/binfmt_misc/aarch64-linux` shows `flags: P` without `F` —
-  and registers a *temporary* F-flag handler for the duration of the install, so
-  it works either way; the permanent F flag is the clean fix.) The static qemu
-  is a ~100 MiB download from cache.nixos.org;
-- `nix` experimental features `nix-command` and `flakes`;
-- `rpi-deploy` on the PATH (in `environment.systemPackages`), optionally
-  wrapped so `RPI_FLAKE` is preset.
+- `boot.binfmt.emulatedSystems = [ "aarch64-linux" ]` (qemu user mode). The
+  nixpkgs binfmt module also exposes the handler to the nix sandbox
+  (`extra-sandbox-paths`) and adds `aarch64-linux` to `extra-platforms`, so
+  aarch64 builds work out of the box. Nothing runs in a chroot any more, so no
+  static emulator / binfmt F flag is needed;
+- `nix` features `nix-command` and `flakes`, and the nixos-raspberrypi binary
+  cache (`rpi.buildHost.nvmdCache`);
+- `rpi-deploy` and `rpi-autoupdate` on the PATH;
+- optionally the weekly update timer (`rpi.buildHost.autoUpdate`).
 
-Verify with:
+Without aarch64 emulation every aarch64 derivation fails with
+`builder failed with exit code 255` (an emulation problem, not a configuration
+problem).
 
-```sh
-nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # module test system
-rpi-deploy show                                                                # preflight overview
-```
+### B. Non-NixOS host (Home Manager module)
 
-### B. Non-NixOS build host (Home Manager module)
-
-For the script only (e.g. a Debian/Ubuntu host where you manage binfmt
-yourself, e.g. via `binfmt-support`):
+For the script only (you manage binfmt yourself, e.g. `binfmt-support` plus
+`extra-platforms = aarch64-linux` in `nix.conf`):
 
 ```nix
 home-manager.users.alice = {
   imports = [ inputs.pi.homeModules.rpiBuildHost ];
   rpi.buildHost.enable = true;
-  rpi.buildHost.flakePath = "/home/alice/projects/pi/nixos";
+  rpi.buildHost.flakePath = "/home/alice/projects/raspberry-pi/nixos";
 };
 ```
 
-Manual equivalent of the module (any host):
+The weekly job is a NixOS-module feature (systemd system units).
 
-```nix
-boot.binfmt.emulatedSystems = [ "aarch64-linux" ];   # NixOS
-boot.binfmt.preferStaticEmulators = true;            # F flag, needed in the install chroot
-nix.settings.extra-platforms = [ "aarch64-linux" ];  # or set in nix.conf
+### C. ssh access to the Pi
+
+The tools address the Pi as `root@neptun`, port 2222. Add to `~/.ssh/config`
+on the host:
+
+```
+Host neptun
+  HostName 192.168.100.20
+  Port 2222
 ```
 
-Without aarch64 emulation every aarch64 derivation fails with
-`builder failed with exit code 255` (that is an emulation problem, not a
-configuration or graphics problem). `rpi-deploy build` refuses to start in
-that case.
+(`rpi-deploy` also passes `-p 2222` itself, `--port` changes it; the weekly
+job runs as your user and reads the same file to resolve `neptun`. If you
+would rather not rely on it, set `rpi.buildHost.autoUpdate.target =
+"root@192.168.100.20"`.)
 
-## Building and installing
+Your own key (`user` in `nixos/keys.nix`) logs in as `pi` and as `root`.
 
-### The SD card
+## 2. First install: image, flash, boot
 
-Two partitions on an MBR (dos) partition table, found by their **labels**
-(`configuration.nix` mounts by label, so the order/device name do not matter):
+```sh
+nix run .#rpi-deploy -- image --out ~/rpi-images   # or: rpi-deploy image
+rpi-deploy flash ~/rpi-images/result-rpi-image/sd-image/neptun-rpi3.img.zst /dev/sdX
+```
+
+**`image [--out DIR] [--flake DIR] [--attr NAME] [--max-builds N]`** builds
+`config.system.build.sdImage` of the Pi system and prints the image path and
+size. Before building it runs the guards (kernel and kernel modules are in
+nvmd's cachix; the dry run lists no kernel, linux-config, gcc/llvm/rustc/ghc/
+nodejs build and at most `--max-builds`, default 500, local builds). A failed
+guard exits non-zero before anything is built. The first build takes ~35 min
+(measured: 379 local builds, mostly cheap; `blink-cmp` compiles under qemu),
+an image after a small change ~10 min. `~/rpi-images/result-rpi-image` is a GC
+root.
+
+The image: two partitions on an MBR, found by **label**, disk id `0x2175794e`.
 
 | partition | size    | fs    | label        | mounted at       | holds                                   |
 |-----------|---------|-------|--------------|------------------|-----------------------------------------|
 | p1        | 256 MiB | FAT32 | `NIXOS_BOOT` | `/boot/firmware` | Pi firmware, `config.txt`, U-Boot, DTBs |
-| p2        | rest    | ext4  | `NIXOS_SD`   | `/`              | system, `/boot` (kernel, initrd, extlinux), `/etc/nixos` |
+| p2        | rest    | ext4  | `NIXOS_SD`   | `/`              | system, `/boot` (kernel, initrd, extlinux) |
 
-**Why 256 MiB is enough.** With the U-Boot bootloader used here the FAT
-partition only holds the Pi firmware (at most ~80 MB for all boards), `config.txt`
-and `u-boot.bin` (<1 MB). Kernels and initrds (~60 MB per generation) are
-copied to `/boot` on the *ext4 root*, so the number of generations never fills
-p1. The older advice to use 512 MiB (or 1 GiB) comes from layouts where the FAT
-partition is `/boot` and holds a kernel + initrd per generation; nixos-raspberrypi
-only needs that with `boot.loader.raspberry-pi.bootloader = "kernel"` (its image
-uses 1024 MiB there). If you switch to that, use `--boot-size 1GiB`.
+Kernels and initrds live on the ext4 root (U-Boot reads them there), so the
+number of generations never fills the 256 MiB firmware partition. The first
+boot expands p2 to the card (needs ≥ 5 GiB).
 
-**Labels instead of fixed UUIDs.** Image builders pin UUIDs/partition IDs so a
-reproducible image can reference its partitions before any card exists. Here the
-card is made on the host, so there is nothing to pin: `configuration.nix`
-mounts by label, which is stable, readable, and survives re-flashing a card (a
-fixed UUID would need to be written by `prepare` anyway). Labels have one
-weakness — two cards with the same label are ambiguous — so `rpi-deploy`
-refuses to guess when it sees duplicates and asks you to unplug the other card
-or name the device. The Pi firmware itself boots by partition order, not by ID.
+**`flash IMAGE DEVICE`** writes the image with
+`zstdcat | sudo dd bs=4M conv=fsync oflag=direct status=progress` and reads it
+back (`sudo head -c LEN DEVICE | sha256sum` against the image). It refuses:
+anything that is not a block device, a partition instead of a whole disk, a
+non-removable disk (an `mmcblkN` reader counts as removable: Linux never sets
+the flag on MMC), the disk that holds the host's `/`, a device with mounted
+partitions, and a missing or wrong confirmation: you must type the device name
+(`type the device name (sdX):`). Writing is the only privileged step (plus the
+read-back); the image is 1.3 GiB compressed, 4.2 GiB raw, ~4 min each way at
+20 MB/s.
 
-There is no third partition. The Pi's ROM reads p1, which starts U-Boot; U-Boot
-reads `extlinux.conf` + kernel + initrd from `/boot` on p2.
-`rpi-deploy prepare` creates this layout and mounts it as
-`/media/nixos` + `/media/nixos/boot/firmware` (what `nixos-install` needs).
-
-### The flow
-
-The SD card is only needed from `prepare` on. `build` runs entirely from a local
-checkout, so the pi can keep running (card not inserted) while it builds.
+**First boot.** Insert the card, power the Pi (network cable in):
 
 ```sh
-rpi-deploy build                      # 1. build in the host store, record the result
-# ... insert the card ...
-rpi-deploy prepare /dev/sdX --format  # 2a. NEW/foreign card: partition + format + mount
-                                      #     (DESTROYS /dev/sdX; asks you to type the device)
-rpi-deploy prepare /dev/sdX           # 2b. existing NixOS-style card: fix labels if needed, mount
-rpi-deploy prepare                    # 2c. card already labelled: just mount it (by label)
-rpi-deploy install                    # 3. copy system, nixos-install, copy config to etc/nixos
-rpi-deploy eject                      # 4. sync + unmount; boot the pi: ssh -p 2222 pi@<address>
+ssh -p 2222 pi@neptun        # or root@neptun: both with your key, no password
 ```
 
-`install` also mounts a card that carries the labels but is not mounted yet, so
-after inserting an already-prepared card a plain `rpi-deploy install` is enough.
+Expect about a minute or two (first-boot expansion, host key generation; unmeasured on hardware, ~100 s under qemu, which is ~5x slower). After a
+re-flash the host key changes: `ssh-keygen -R '[192.168.100.20]:2222'` (and see
+section 4 for the weekly job's `known_hosts`).
 
-Everything else: `rpi-deploy config` re-copies only the configuration to
-`/etc/nixos` (no reinstall), `rpi-deploy devices` lists the removable/MMC disks (the candidates for
-`prepare DEVICE`) and whether a labelled card is present, `rpi-deploy show`
-prints the last build and the card/firmware mount state, `rpi-deploy all` is `build` + `install`.
-
-`prepare --format` sets the labels while creating the file systems
-(`mkfs.vfat -n NIXOS_BOOT`, `mkfs.ext4 -L NIXOS_SD`), the partition types
-(`c` FAT32 LBA, `83` Linux) and the boot flag on p1, then checks that
-`/dev/disk/by-label` resolves to the right partitions. `prepare /dev/sdX`
-without `--format` is non-destructive: if p1 is FAT and p2 is ext4 but their
-labels are missing or wrong (e.g. a card laid out by hand), it relabels them
-with `fatlabel`/`e2label` and refreshes udev; a partition with any other file
-system, or one that is mounted, is refused, never touched.
-
-Find the device with `lsblk` (the card shows up as `/dev/sdX` in a USB reader or
-`/dev/mmcblk0` in a built-in one). `prepare --format` refuses a disk the host
-runs from (`/`, `/boot`, `/nix`, `/home`, ...), a partition instead of a whole
-disk, and a device that is mounted elsewhere; without `--yes` it makes you
-type the device path first. `--format` also unmounts whatever of that device is mounted (e.g. a desktop
-automount) after your confirmation, takes an exclusive `flock` while writing
-the partition table (udev probes a freshly wiped disk and would otherwise make
-`sfdisk` fail with "disk is currently in use"), retries briefly if the device
-is still busy and waits for the partition nodes. `--dry-run` prints every command without running
-it.
-
-Before copying, `install` prints the target card with its size and free space,
-stops if the system closure cannot fit on the card at all (and warns if it
-exceeds the free space), and asks `Continue without any way to log in? [y/N]`
-if no normal user in the config has an ssh key or password — the pi is headless
-and password ssh is off, so it would be unreachable. That question is asked
-already at `build` (not after hours of building), once per run; without a
-terminal it aborts unless you pass `--yes`. Build and install report their duration and the next step;
-colours are only used on a terminal (`NO_COLOR` disables them).
-
-Usage: `rpi-deploy prepare [DEVICE] [--format] [-y|--yes] [--boot-size SIZE]` and
-`rpi-deploy [build|install|config|eject|all|show] [TARGET] [OPTIONS]`. `TARGET`
-is the root of the target NixOS system (default `/media/nixos`; same as
-`--mount`). Options: `--flake PATH` (default `$RPI_FLAKE` or `$PWD`),
-`--mount DIR`, `--attr NAME` (default `rpi`), `--from STOREPATH` (install a
-specific system), `--boot-size` (default `256MiB`), `--dry-run`.
-
-`build` writes a record to `<checkout>/.rpi-build/last` (gitignored):
-
-```
-flake=...  attr=rpi  rev=<git HEAD>  dirty=clean|dirty  sys=<store path>  drv=<drv path>  built=<utc>
-```
-
-`install` requires the card root to be a real mount point and the FAT partition
-to be mounted at `<mount>/boot/firmware` (`prepare` does both); it refuses
-otherwise. It then:
-
-1. copies the recorded system + toplevel drv into the card's store
-   (`sudo nix copy --no-check-sigs --to <mount>`),
-2. runs `sudo nixos-install --root <mount> --flake <checkout>#rpi` — pointed at
-   the **host checkout**, so the evaluation matches the recorded build
-   bit-for-bit and **nothing is rebuilt**. The bootloader step fills
-   `/boot/firmware`,
-3. copies the configuration checkout to `<mount>/etc/nixos` (see below),
-4. verifies the paths exist in the target store and that `etc/NIXOS`,
-   `boot/firmware/config.txt`, `boot/firmware/u-boot-rpi-arm64.bin` and
-   `etc/nixos/flake.nix` are present.
-
-**Configuration on the card.** `nixos-install --flake` does *not* put the
-configuration on the target, but the pi needs it at `/etc/nixos`: the wifi
-password file lives at `/etc/nixos/secrets/wireless.env`, and that is where you
-edit and `nixos-rebuild` on the pi. `install` (and `config`) therefore mirror
-the checkout there — as root, **including `.git` and `secrets/`**, excluding
-`.rpi-build*`, `result*`, `.nixcache`, `.direnv`; files on the card that are not
-in the checkout are removed. Keep `.git` in the copy: with it nix treats the
-directory as a git flake, in which the untracked `secrets/wireless.env` is not
-copied into the world-readable nix store (the script warns if there is no
-`.git`, or no `secrets/wireless.env`).
-
-The record carries the git revision; if the checkout HEAD or the working tree
-has changed since the build, `install` warns that the target may rebuild.
-
-**Resuming / re-running.** Every step of `install` is idempotent, so after any
-interruption (sudo timeout, Ctrl-C, a failed `nixos-install`) just run
-`rpi-deploy install` again: store paths that are already on the card are
-skipped by `nix copy`, nothing is rebuilt, `nixos-install` re-runs on the same
-system. Only `prepare --format` is destructive, and it always asks. To avoid the
-sudo timeout in the first place, `rpi-deploy` asks for the password **once at
-the start** (for `all`: before the long build) and keeps the sudo ticket
-refreshed while it runs.
-
-**`chroot: failed to run command ... No such file or directory`** during
-`nixos-install` is *not* a copy or path problem (the closure is complete
-in the card's store); it is the aarch64 emulator being unusable inside the
-chroot, see the F flag above. `install` therefore **tests the chroot before it
-starts `nixos-install`**: right after the copy it verifies that the system's
-`activate` is on the card and runs the system's own `bash` inside a chroot of
-the card, *and a program started from that emulated bash* (a handler that only
-starts the first program is not enough). If that fails it registers a temporary
-binfmt handler with the F flag (`/proc/sys/fs/binfmt_misc/register`, the static
-qemu from the flake package `.#rpi-binfmt`, the newest registration wins) and
-tests again. The handler is removed when the script ends, whether it succeeded,
-failed or was interrupted. If the test still fails, `install` stops *before*
-installing and prints the facts (binfmt entries and flags, the chroot's error)
-instead of running a doomed `nixos-install`.
-
-Before copying, a real `install` also checks that the checkout still evaluates to
-the recorded system (the derivation, not git revisions). If it does not, the
-difference would be rebuilt inside the card's store; it asks
-`Install anyway (slow)?` (`--yes` answers yes) and otherwise tells you to run
-`rpi-deploy build` first.
-
-**Clean install.** Nothing on the card needs to be removed for a re-run (see
-above). For a strictly clean card: `rpi-deploy prepare /dev/sdX --format`, then
-`rpi-deploy install`.
-
-> **Why not just `nixos-install`?** It does not build in the host store: it
-> compiles the whole closure directly into the card's `/nix/store`, as root,
-> with build temp files on the SD. That is slow, wears the card, and repeats in
-> full after every re-flash. Building in the host store once and copying over
-> makes re-flashing a matter of minutes.
-
-### Binary cache and pins
-
-The vendor kernel is **not** in `cache.nixos.org`; it is in the
-`nixos-raspberrypi.cachix.org` cache of nvmd/nixos-raspberrypi, built for
-*exactly* the nixpkgs revision that flake pins. Two rules keep it a cache hit:
-
-1. `nixpkgs` **follows** `nixos-raspberrypi/nixpkgs` (flake.nix). Any other
-   nixpkgs revision changes the kernel derivation hash and silently triggers a
-   16+ hour local kernel build under qemu. Do not add `nixpkgs.url`; update
-   with `nix flake update nixos-raspberrypi` (moves the nixpkgs pin along).
-2. The cache must be enabled on the build host: `flake.nix` carries it in
-   `nixConfig`, `rpi-deploy` passes `--accept-flake-config` (works for
-   trusted nix users), and `rpi.buildHost.enable = true` adds it to the host's
-   `nix.conf` (`rpi.buildHost.nvmdCache`). The Pi itself trusts the cache via
-   nixos-raspberrypi's `trusted-nix-caches` module.
-
-`rpi-deploy build` checks this for you before the long build: it reports how the
-cache is enabled (host-wide, or through the flake because you are a trusted nix
-user — or tells you to add yourself to `nix.settings.trusted-users`), and then
-asks nix for the build plan (`nix build --dry-run`, builds nothing). If the
-vendor kernel would be *compiled* instead of fetched, it lists it and asks
-`Compile the kernel locally anyway? [y/N]` (`--yes` answers yes; without a
-terminal it aborts). The same check by hand:
+## 3. Deploying changes and `status`
 
 ```sh
-nix build --accept-flake-config --dry-run .#nixosConfigurations.rpi.config.system.build.toplevel 2>&1 \
-  | grep -E 'linux_rpi'   # must be listed under "will be fetched", not "will be built"
+rpi-deploy deploy [switch|boot|test] [--target USER@HOST] [--port N] [--flake DIR] [--attr NAME] [--max-builds N] [--force]
+rpi-deploy status [--target USER@HOST] [--port N]
 ```
 
-Everything else still builds locally under qemu if it is not in a cache
-(`nix-terminal`/nvf pieces such as `blink-cmp`, treesitter grammars, ...);
-that is minutes to an hour, not the kernel.
+`deploy` runs the guards, then the flake's **pinned** `nixos-rebuild`
+(`apps.x86_64-linux.nixos-rebuild`, nixos-rebuild-ng from our 26.05 nixpkgs:
+`nix run .#nixos-rebuild -- …`) with `--no-reexec --flake .#rpi --target-host
+root@neptun`. Never the host's own `nixos-rebuild`: a newer one half-applies
+on the Pi (it passes a `systemd-run` flag the Pi's systemd lacks; E3).
 
-### Manual equivalent (for troubleshooting)
+| action   | effect |
+|----------|--------|
+| `switch` (default) | build, copy, make it the boot default and activate now; prints `status` afterwards |
+| `boot`   | make it the boot default, activate at the next reboot (use for kernel changes) |
+| `test`   | activate now, boot default unchanged (gone after a reboot) |
 
-Run from the checkout; this is what `rpi-deploy all` does:
+A deploy takes a few minutes: measured in qemu (TCG, ~5x slower than a Pi 3)
+276 s = guards 23 s, local build + copy 43 s, firmware copy to the FAT partition
+137 s (every switch rewrites all firmware files), extlinux 6 s, activation
+56 s. Expect clearly less on the real Pi [?].
+
+**Downgrade protection.** If branch `auto-update` has commits that your
+checked-out `HEAD` lacks, `deploy` refuses with `would downgrade` (the weekly
+job already pushed newer pins). Merge it (`git merge auto-update`) or override
+with `--force`.
+
+**`status`** prints:
+
+```
+current: /nix/store/…-nixos-system-neptun-…
+booted: /nix/store/…-nixos-system-neptun-…
+reboot pending: no
+```
+
+`reboot pending: yes` means the running kernel, initrd or kernel modules differ
+from the current generation's (a kernel change needs a reboot).
+
+Exit codes (all subcommands): 2 usage, 10 kernel not cached, 11 forbidden local
+build, 12 too many local builds, 13 build/eval failed, 14 deploy failed,
+15 would downgrade, 16 device refused, 17 verify failed. There is no
+override for the guards (plain `nix build` stays possible if you really want a
+local kernel build; expect 16+ h under qemu).
+
+Environment: `RPI_FLAKE` (default flake dir), `RPI_SSH_OPTS` (extra ssh
+options), `RPI_NIXOS_REBUILD` (use this `nixos-rebuild` instead of the pinned
+one), `RPI_CACHE_URL`.
+
+## 4. Automatic security updates (the weekly job)
+
+Every Sunday 03:00 (`Persistent=true`, up to 30 min random delay) the host runs
+`rpi-autoupdate`:
+
+1. clone/reset a **dedicated work clone** in `workDir` to branch `main` of
+   your repo (your checkout is never touched), `nix flake update nixpkgs
+   nixos-raspberrypi`;
+2. cache guard: the new kernel must be in nvmd's cachix, otherwise restore the
+   lock and update `nixpkgs` only, check again; still failing → exit, the Pi
+   is untouched;
+3. build guard (no kernel/toolchain build, at most `maxBuilds`), build the
+   toplevel (4 h limit), GC-rooted in `workDir`;
+4. equal to what the Pi runs → nothing to deploy;
+5. `nixos-rebuild boot` to the Pi, then: kernel/initrd/modules unchanged →
+   `switch`; changed → `shutdown -r 04:30` on the Pi;
+6. commit `flake.lock` (`auto-update: flake.lock <date>`, unsigned, identity
+   `rpi-autoupdate`) and **force-push it to branch `auto-update`** of your repo.
+
+Every guard or build failure exits before the Pi is contacted; a failed run
+leaves the Pi on its previous generation and nothing is pushed. There is no
+automatic fallback after a bad kernel (section 5).
+
+> **What the job deploys.** The job deploys **`main` + an updated lock**, not
+> your working branch. Anything you deployed manually from an unmerged branch
+> **is replaced by the next weekly run** (the job builds `main`'s config).
+> Merge your work into `main` before the run you want it to survive.
+
+### Setup (once)
+
+1. **Key** (dedicated, passphrase-less, only usable from the host):
+
+   ```sh
+   ssh-keygen -t ed25519 -N '' -C rpi-autoupdate@andromeda -f ~/.ssh/rpi-autoupdate
+   ```
+
+2. **Public key into the Pi config.** Paste the content of
+   `~/.ssh/rpi-autoupdate.pub` into `nixos/keys.nix` as `autoUpdate`:
+
+   ```nix
+   autoUpdate = "ssh-ed25519 AAAA… rpi-autoupdate@andromeda";
+   hostAddress = "192.168.100.115";   # the host's LAN address, as the Pi sees it
+   ```
+
+   It lands in `root`'s authorized keys with `from="<hostAddress>"`, so the
+   key only works from the host. Commit it to `main`, then install it on the
+   Pi with a manual `rpi-deploy deploy switch` (or put it in before you build
+   the first image). If the host's address changes, update `hostAddress` and
+   deploy again.
+3. **The `Host neptun` ssh_config entry** (section 1.C).
+4. **The timer**, in the host's NixOS config:
+
+   ```nix
+   rpi.buildHost.autoUpdate = {
+     enable = true;
+     user = "pallon";
+     repoPath = "/home/pallon/projects/raspberry-pi";
+     sshKey = "/home/pallon/.ssh/rpi-autoupdate";   # a string: never copied into the store
+     # defaults: workDir /var/lib/rpi-autoupdate, target root@neptun, sshPort 2222,
+     #           onCalendar "Sun 03:00", maxBuilds 500, rebootTime "04:30"
+   };
+   ```
+
+   The service needs `nix`, `git`, `ssh` (provided by the unit) and a `main`
+   branch in `repoPath`.
+
+### Operating it
+
+| what | how |
+|------|-----|
+| run now | `sudo systemctl start rpi-autoupdate` (the unit runs as your user) |
+| logs | `journalctl -u rpi-autoupdate` (a run takes minutes to an hour) |
+| timer | `systemctl list-timers rpi-autoupdate` |
+| dry run | `rpi-autoupdate --repo PATH --work-dir DIR --no-deploy` (updates the lock, guards, builds, pushes `auto-update`, never contacts the Pi) |
+| after re-flashing the Pi | `rm <workDir>/known_hosts` (the job pins the Pi's host key on first contact, `StrictHostKeyChecking=accept-new`) |
+
+**Merging the result.** The new pins arrive as one commit on branch
+`auto-update` (main + lock):
 
 ```sh
-T=.#nixosConfigurations.rpi.config.system.build.toplevel
-
-# 1. build in the host store (as your user, never root)
-nix build --accept-flake-config $T --print-build-logs 2>&1 | tee .rpi-build.log
-
-# 2. copy the closure AND the toplevel drv (the drv pulls the flake sources
-#    into the target store, so the install does not re-fetch them)
-sys=$(nix build --accept-flake-config $T --print-out-paths)
-drv=$(nix eval --raw --accept-flake-config $T.drvPath)
-sudo nix copy --no-check-sigs --to /media/nixos "$sys" "$drv"
-
-# 3. card (new card: mkfs as in "The SD card"), mounted as root + firmware
-sudo mkdir -p /media/nixos && sudo mount /dev/disk/by-label/NIXOS_SD /media/nixos
-sudo mkdir -p /media/nixos/boot/firmware
-sudo mount /dev/disk/by-label/NIXOS_BOOT /media/nixos/boot/firmware
-
-# 4. install (nothing is built here; the bootloader step fills /boot/firmware)
-sudo nixos-install --root /media/nixos --flake .#rpi --option accept-flake-config true
-
-# 5. configuration onto the card (incl. .git and secrets/)
-sudo mkdir -p /media/nixos/etc/nixos
-tar -C . --exclude=./.rpi-build --exclude=./result --exclude=./.nixcache -cf - . | sudo tar -C /media/nixos/etc/nixos -xpf -
-
-# 6. sync, umount -R /media/nixos; boot the pi, then: ssh -p 2222 pi@<pi-address>
+git log -1 auto-update        # auto-update: flake.lock 2026-…
+git merge auto-update         # or cherry-pick / fast-forward main
 ```
 
-`nixos-install --flake` builds from the **working tree**, not the commit;
-commit once the pi boots so the commit records what is installed.
+The branch is force-pushed every run (`main` + one lock commit), so it is
+rewritten whenever you have not merged it. If you squash-merge it, the next
+run simply starts again from `main`. `rpi-deploy deploy` refuses to deploy a
+`HEAD` that lacks `auto-update` commits (see section 3).
 
-## Pi (client) configuration
+## 5. Recovery and rollback
 
-Notes on the client side, evaluated and applied:
-
-- **Options follow nixos-26.05** (the nixpkgs of nixos-raspberrypi): e.g.
-  `services.journald.storage`/`extraConfig` (the newer `journald.settings`
-  is 26.11 only). No "Obsolete option" warnings.
-- **Boot layout** (nixos-raspberrypi, `uboot`): `/boot/firmware` (FAT, label
-  `NIXOS_BOOT`) holds the Pi firmware, `config.txt` (generated from
-  `hardware.raspberry-pi.config`) and `u-boot-rpi-arm64.bin`; kernel, initrd
-  and `extlinux.conf` live in `/boot` on the ext4 root `NIXOS_SD`. The
-  partition labels are unchanged, so existing cards keep their layout. The
-  firmware partition must be mounted at `<target>/boot/firmware` for the
-  install (`rpi-deploy install` checks and refuses otherwise).
-- **Home Manager is master**, not release-26.05: nix-terminal needs
-  `programs.devenv`, which only exists on master. `home.nix` silences the
-  release-mismatch warning and disables HM's nushell fzf integration (needs
-  fzf >= 0.73, newer than 26.05).
-- **zram swap enabled** (50 % of RAM = 512 MiB compressed, in RAM, no SD
-  wear). Gives the 1 GiB pi headroom for the nightly autoUpgrade builds.
-  Remove the `zramSwap` block if you prefer no swap.
-- **Secrets**: `secrets/wireless.env` (gitignored, mode 0600) holds
-  `MY_WIFI_PASSWORD=...`. It is referenced via
-  `networking.wireless.secretsFile` and the `@MY_WIFI_PASSWORD@` placeholder,
-  so the password never enters the flake source. `nixos-install` copies the
-  checkout (including untracked files) into `/etc/nixos` on the card, which
-  is how the secret lands there.
-
-Considered but not changed:
-
-- **mosh** (UDP 60000-61000 firewall range) — still commented out; enable in
-  `configuration.nix` + router port range when needed.
-- **autoUpgrade + kernel updates**: an autoUpgrade on the pi that also bumps
-  `nixos-raspberrypi` would pull a new kernel/nixpkgs (a cache hit only once
-  nvmd has rebuilt it; a miss would build on the 1 GiB pi). Keep the
-  nixos-raspberrypi pin moving from the build host (or accept occasional
-  failed autoUpgrades — the pi then just runs the old system).
-- **Deploy key**: `users.users.pi.openssh.authorizedKeys.keys` is empty; add
-  the host's public key to enable the remote-install follow-up below.
-
-## Follow-up: remote install (no card mount)
-
-Possible once a deploy key is in place: run
-`nixos-rebuild build --flake <host-checkout>#rpi` on the host and push the
-result to the pi over SSH (`nix copy --to` + `nixos-rebuild switch --flake`
-with the store pre-populated, or `devenv`/`deploy-rs`). Not implemented here;
-the current `rpi-deploy install` flow is the card-based baseline that it
-replaces.
-
-## Testing
-
-Three layers, all wired into `nix flake check`:
+**Userspace regression** (the system boots, something is wrong): roll back one
+generation from the host:
 
 ```sh
-nix flake check                                   # everything below
-nix build .#checks.x86_64-linux.rpi-deploy-unit  # 287 unit tests for rpi-deploy.sh
-nix build .#checks.x86_64-linux.rpi-host-vm       # boots a real VM (qemu), ~1-16 min
-nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel  # host module, eval-only proof
+NIX_SSHOPTS='-p 2222' nix run .#nixos-rebuild -- switch --rollback --no-reexec --target-host root@neptun
 ```
 
-1. **`rpi-deploy-syntax`** (both systems) — `bash -n` of the script.
-2. **`rpi-deploy-unit`** (`tests/deploy-unit.sh`, x86_64) — 287 unit tests
-   with mocked `nix`/`nixos-install`: preflight fail/success, build record
-   round-trip (all fields), `show`, install verification incl. a failing
-   store copy, `--from` with/without record, attr mismatch, HEAD-moved and
-   dirty-tree warnings. binfmt locations are injectable via
-   `RPI_BINMFT_DIR`/`RPI_BINMFT_RUN`.
-3. **`rpi-host-vm`** (`checks.x86_64-linux.rpi-host-vm`) — boots an x86_64
-   NixOS VM with the build-host module enabled and asserts the observable
-   reality: `nix` accepts flakes (experimental features from the module),
-   the `aarch64-linux` binfmt handler is registered in
-   `/proc/sys/fs/binfmt_misc`, an **aarch64 binary actually executes**
-   under emulation, the installed `rpi-deploy` is the `RPI_FLAKE` wrapper
-   pointing at `rpi.buildHost.flakePath`, and the script's own dry-run
-   flows (including its emulation preflight) pass inside the VM.
+**Unbootable new kernel or initrd.** There is no boot counting and no
+automatic fallback: U-Boot's extlinux simply boots the default entry. Two ways
+back to an older generation (the last five are kept, `configurationLimit = 5`):
 
-   Note: the VM test needs `rpi.buildHost.enable = true` set by itself —
-   the exported `nixosModules.rpiBuildHost` deliberately only wires the
-   module in (opt-in design).
+- *Serial console* (3.3 V USB-UART on GPIO 14/15 = pins 8/10, 115200 8N1; with
+  `disable-bt` the PL011 UART is on the header): press a key in U-Boot's
+  autoboot countdown, pick `NixOS - Configuration N-default (…)` from the
+  extlinux menu. Once it is up, make it permanent:
+  `nix-env -p /nix/var/nix/profiles/system --switch-generation N` then
+  `/nix/var/nix/profiles/system/bin/switch-to-configuration boot`.
+- *From the host*: put the card in the host and edit the default entry on the
+  root partition:
 
-In addition, flake evaluation enforces **contract asserts** on the host
-module config (binfmt list, extra-platforms, experimental features,
-sandbox paths, wrapper package present) — any drift fails every flake
-operation fast.
+  ```sh
+  sudo mount /dev/disk/by-label/NIXOS_SD /mnt
+  grep -E '^(DEFAULT|LABEL)' /mnt/boot/extlinux/extlinux.conf      # labels nixos-default, nixos-N-default
+  sudo sed -i 's/^DEFAULT .*/DEFAULT nixos-N-default/' /mnt/boot/extlinux/extlinux.conf
+  sudo umount /mnt
+  ```
+
+  (The file is regenerated by the next successful switch.)
+
+Both recoveries rely on U-Boot's extlinux handling and are not exercised on hardware yet
+(the labels are as generated in the qemu-tested image; HANDOFF lists the check).
+
+**Dead card or re-flash**: section 7. State on the Pi is disposable by design.
+
+## 6. External storage (USB data disk)
+
+`rpi.storage.external` (default off) puts `/nix`, `/var` and `/home` on a USB
+disk while the SD card stays the boot device (`/`, `/boot`, `/boot/firmware`).
+Options: `enable`, `label = "PI_DATA"`, `fsType = "ext4"`,
+`bind = [ "/nix" "/var" "/home" ]`, `swapSize = null` (MiB, swapfile
+`/external/swapfile`). The disk is mounted at `/external` with
+`neededForBoot` and **never `nofail`**: a missing disk stops the boot in the
+emergency shell instead of booting a half system (serial console, or pick an
+older generation, section 5).
+
+Migration (manual; the order matters, the new generation's closure must be
+on the disk before the first boot with it):
+
+1. Format the disk **on the Pi or the host**: `mkfs.ext4 -L PI_DATA /dev/sdX1`
+   (DESTROYS it). Plug it into the Pi.
+2. Set `rpi.storage.external.enable = true;` in `configuration.nix`, commit,
+   `rpi-deploy deploy boot` (activates nothing yet).
+3. On the Pi, copy the data (services that write to `/var` should be quiet;
+   repeat the `rsync` right before the reboot):
+
+   ```sh
+   ssh -p 2222 root@neptun
+   RSYNC=$(nix build --no-link --print-out-paths nixpkgs#rsync)/bin/rsync   # fetch it before the store goes quiet
+   mkdir -p /mnt/data && mount /dev/disk/by-label/PI_DATA /mnt/data
+   systemctl stop nix-daemon.socket nix-daemon.service
+   for d in nix var home; do mkdir -p /mnt/data/$d; $RSYNC -aHAXx --numeric-ids /$d/ /mnt/data/$d/; done
+   sync; umount /mnt/data
+   ```
+
+   For a fully consistent copy, power the Pi off and run the same `rsync`
+   from the host with the card's `NIXOS_SD` and the disk mounted.
+4. `ssh -p 2222 root@neptun reboot`; afterwards `findmnt /external /nix`.
+
+The old copies of `/nix`, `/var` and `/home` stay on the SD underneath the bind
+mounts (unused while the disk is attached; reclaim the space from the host if
+you need it).
+
+## 7. Re-flash the current Pi (migration from the old install)
+
+The Pi that runs today was installed with the old `nixos-install` flow: `pi`
+only, no root key, `pi` needs a sudo password, no `trusted-users`, so a push
+deploy to it is impossible. Re-flash it (its state is disposable):
+
+1. Put the auto-update key into `keys.nix` first if you already have it
+   (section 4, optional: you can add it with a deploy later).
+2. `rpi-deploy image`, `rpi-deploy flash … /dev/sdX`, boot (section 2).
+3. `ssh-keygen -R '[192.168.100.20]:2222'`, then `ssh -p 2222 root@neptun true`
+   and `ssh -p 2222 pi@neptun true`.
+4. Walk through the hardware checklist in `HANDOFF.md`.
+5. If the weekly job is enabled: `rm /var/lib/rpi-autoupdate/known_hosts`.
+
+Wifi is gone for good (wired LAN only); the old `secrets/wireless.env` is not
+used and not in the repo.
+
+## 8. Binary cache and pins ("hybrid" inputs)
+
+`nixos-raspberrypi` is on branch `develop` and **keeps its own nixpkgs pin**,
+so the vendor kernel/firmware derivations hash exactly like nvmd's cachix
+builds. Our `nixpkgs` (`nixos-26.05`) is a separate input that drives all
+userspace (security fixes track the release branch). `rpi` is built with
+`nixos-raspberrypi.lib.nixosSystem { inherit nixpkgs; … }`. Rules (enforced by
+`checks.x86_64-linux.eval-kernel`):
+
+1. Never add `follows` between `nixpkgs` and `nixos-raspberrypi/nixpkgs`.
+   `config.boot.kernelPackages.kernel` must equal nvmd's own `linuxPackages_rpi3`
+   kernel (same store path), otherwise the kernel compiles locally (16+ h).
+   Out-of-tree kernel modules only from `config.boot.kernelPackages`.
+2. The cache must be enabled on the host: `flake.nix` carries it in
+   `nixConfig` (`--accept-flake-config`, which `rpi-deploy` passes, works for
+   trusted nix users) and `rpi.buildHost.enable = true` adds it to `nix.conf`.
+   The Pi trusts it via nixos-raspberrypi's module.
+3. `nix flake update nixos-raspberrypi` can land on a `develop` HEAD whose
+   kernel is not cached yet (the cadence is weekly). The guards catch that;
+   the weekly job then falls back to updating `nixpkgs` only.
+
+Check by hand:
 
 ```sh
-nix build .#packages.x86_64-linux.rpi-deploy     # the script as a package
+nix build --accept-flake-config --dry-run .#nixosConfigurations.rpi.config.system.build.sdImage 2>&1 \
+  | sed -n '/will be built/,/will be fetched/p' \
+  | grep -E -- '/[0-9a-z]{32}-(linux_rpi-[^ ]*[0-9]|linux-config-[^ ]*)\.drv$'   # must print nothing
 ```
+
+Home Manager is `master`, not release-26.05 (nix-terminal needs
+`programs.devenv`); `home.nix` silences the release-mismatch warning.
+
+## 9. Pi configuration notes
+
+- `rpi.sdWear` (default on): `hardware.enableRedistributableFirmware = false`
+  and `hardware.firmware = []` (−770 MiB, wired LAN needs no blobs), `/` with
+  `noatime,lazytime,commit=60`, `/tmp` as 256M tmpfs, journald `Storage=volatile`
+  (16M, level info), no coredumps, `keep-derivations = false`, monthly fstrim,
+  zram swap 50 % with `vm.swappiness = 100`, `vm.page-cluster = 0`. Rejected on
+  purpose: `fsync-metadata = false`, `auto-optimise-store`, the `discard`
+  option, f2fs/btrfs.
+- `rpi.headless` (default on): `gpu_mem=16`, `dtoverlay=disable-wifi`,
+  `dtoverlay=disable-bt`, no `vc4-kms-v3d`, no audio, no camera/display
+  auto-detect, no `cma=32M`. There is no HDMI console any more; the serial
+  console is the UART on the GPIO header.
+- Nix: `nix.gc` weekly, `--delete-older-than 21d`; extlinux keeps 5
+  generations; `nix.channel.enable = false`, the flake registry and `NIX_PATH`
+  point at the system's own nixpkgs, so `nix shell nixpkgs#…` on the Pi hits the
+  store and the caches.
+- Access: `PermitRootLogin = prohibit-password`, `PasswordAuthentication = no`,
+  `security.sudo.wheelNeedsPassword = false` (`pi` has no password, the login is
+  key-only; same trust as the root key). Root's keys: your key, and the
+  auto-update key restricted with `from=`.
+- Options follow nixos-26.05 (e.g. `services.journald.extraConfig`; the newer
+  `settings` is 26.11 only).
+
+## 10. Testing
+
+```sh
+nix flake check --accept-flake-config        # all checks incl. the VM test, ~1–5 min warm
+nix build .#checks.x86_64-linux.eval-kernel  # one check
+```
+
+| layer | check | cost |
+|-------|-------|------|
+| eval checks (option values and their effects: kernel identity, image, access, GC/extlinux, sd-wear, headless, external storage, tools, build host) | `eval-<name>` from `tests/eval/<name>.nix` | seconds |
+| unit tests, mocked nix/ssh/sudo/lsblk/dd/nixos-rebuild, real git/zstd | `rpi-deploy-unit`, `autoupdate-unit` | ~10–30 s |
+| bash syntax + shellcheck | `rpi-deploy-syntax` | seconds |
+| NixOS VM test of the build-host module (binfmt, aarch64 `hello`, timer) | `rpi-host-vm` | 1–16 min |
+| qemu `raspi3b` boot of the real image + SSH banner over usb-net | `tests/boot-smoke.sh IMAGE.img.zst` | ~4–6 min |
+| qemu deploy: boot the image, `rpi-deploy deploy switch`, verify | `tests/deploy-smoke.sh` | ~20–30 min (image build ~10 min of it, cached on re-runs) |
+
+The smoke tests are not part of `nix flake check` (qemu TCG, minutes). Both
+need `qemu-system-aarch64` with `-M raspi3b` (`nix shell nixpkgs#qemu`),
+`zstd`, `sfdisk`, `debugfs` and `mcopy`, no root:
+
+```sh
+tests/boot-smoke.sh ~/rpi-images/result-rpi-image/sd-image/neptun-rpi3.img.zst
+tests/deploy-smoke.sh            # builds a throwaway-key image itself
+```
+
+What qemu cannot cover: U-Boot reading `extlinux.conf`, the GPU firmware
+applying `config.txt`, a real card, the LAN, the reboot timer. That is the
+manual hardware checklist in `HANDOFF.md`.
+
+The build-host module is also evaluated on every flake operation by contract
+asserts (binfmt, extra-platforms, features, sandbox paths, cache, wrapper).
 
 ## Notes
 
-- Scratch files used while building (`.nixcache/`, `result`,
-  `.rpi-build.log`, `.rpi-build/`) are gitignored and safe to delete; they
-  only speed up re-evaluation.
+- Scratch files (`.nixcache/`, `result*`, `.scratch/`) are gitignored and safe
+  to delete. `.rpi-build/` and `.rpi-build.log` are leftovers of the old
+  install flow: delete them, then drop their two lines from `.gitignore`.
 - The kit is headless by design: `clipboard = "osc52"` copies through the
-  terminal's OSC 52 sequence, so nothing X/Wayland-related is installed.
+  terminal's OSC 52 sequence, nothing X/Wayland-related is installed.
 - The Pi has 1 GB RAM; the kit's optional heavy dev set is disabled
   (`packages.dev.enable = false`).
+- Sandbox gotcha (E3): the host's system `ssh_config` may include files that
+  plain `ssh` rejects with `Bad owner or permissions`; use `ssh -F /dev/null`
+  or your own config (the smoke tests do).

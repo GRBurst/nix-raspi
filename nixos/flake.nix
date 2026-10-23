@@ -198,9 +198,10 @@
                 ];
               };
 
-              # Alias under the pi's hostname: on the pi, `nixos-rebuild --flake
-              # /etc/nixos` (and autoUpgrade) default to `#<hostname>`. Same
-              # derivation as `rpi`, so the installed system does not change.
+              # Alias under the Pi's hostname (`.#neptun`). Same derivation as
+              # `rpi`; the image and every push deploy (rpi-deploy, default
+              # --attr rpi) use `rpi`. The Pi has no /etc/nixos and never
+              # evaluates the flake, so nothing on it needs this name.
               neptun = self.nixosConfigurations.rpi;
 
               # x86_64 test configuration for the build-host module:
