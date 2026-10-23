@@ -26,7 +26,8 @@ cache at --cache-url and its narHash matches the pointer.
 
 exit: 0 applied, up to date, already current or no pointer published yet
       1 state dir not writable   2 usage   30 fetch
-      31 pointer invalid or older   32 untrusted   37 busy   38 cache unavailable
+      31 pointer invalid or older   32 untrusted   33 realise   34 narHash mismatch
+      37 busy   38 cache unavailable
 EOF
 }
 
@@ -127,6 +128,19 @@ rp_verify_sig() {
     esac
 }
 
+# rp_realise: P_PATH's closure from the substituters, then P_PATH's narHash
+# (SRI, D5) must equal the pointer's -- the binding between pointer and
+# content, since the realise trusts every configured key.
+rp_realise() {
+    local hash sri
+    nix-store --realise "$P_PATH" --option max-substitution-jobs 2 >/dev/null ||
+        die 33 "cannot realise $P_PATH"
+    hash=$(nix-store --query --hash "$P_PATH") &&
+        sri=$(nix --extra-experimental-features nix-command hash convert --to sri "$hash") ||
+        die 34 "narHash mismatch: cannot read the narHash of $P_PATH"
+    [[ "$sri" == "$P_NAR" ]] || die 34 "narHash mismatch: $P_PATH is $sri, pointer says $P_NAR"
+}
+
 # rp_record: the applied pointer -> $STATE/store-path, $STATE/seq (each
 # written to a temp file and renamed; seq last, so a crash re-applies)
 rp_record() {
@@ -158,6 +172,7 @@ main() {
         log "already current: $P_PATH (seq $P_SEQ recorded)"
         exit 0
     fi
+    rp_realise
     die 1 "not implemented"
 }
 

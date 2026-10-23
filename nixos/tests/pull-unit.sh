@@ -376,6 +376,33 @@ MOCK_SIGNER=other rp p11-untrusted
 expect_exit "p11 already current but untrusted -> 32 (verify first)" 32
 expect_eq "p11 untrusted: nothing recorded" none "$(cat "$STATE/seq" 2>/dev/null || echo none)"
 
+# --- 5.4 realise + narHash -----------------------------------------------------
+
+fresh
+MOCK_REALISE_RC=1 rp p12
+expect_exit "p12 realise fails -> 33" 33
+untouched "p12 realise fails"
+expect_grepf "p12 realises with 2 substitution jobs" \
+    "nix-store --realise $NEXT --option max-substitution-jobs 2" "$MOCK_LOG"
+expect_true "p12 verify precedes the realise" \
+    test "$(first_line ' store verify ')" -lt "$(first_line '^nix-store --realise ')"
+
+fresh
+MOCK_NAR="sha256-${GOOD_NAR:8}" rp p13
+expect_exit "p13 narHash mismatch -> exit 34" 34
+expect_grepf "p13 says narHash mismatch" "narHash mismatch" "$ERR"
+untouched "p13 narHash mismatch"
+expect_grepf "p13 converts the store's narHash to SRI" \
+    "nix --extra-experimental-features nix-command hash convert --to sri sha256:1b8m03r63zqhnjf7l5wnldhh7c134ap5vpj0850ymkq1iyzicy5s" \
+    "$MOCK_LOG"
+expect_true "p13 hash read after the realise" \
+    test "$(first_line '^nix-store --realise ')" -lt "$(first_line "^nix-store --query --hash $NEXT\$")"
+
+fresh
+MOCK_QHASH_RC=1 rp p13-query
+expect_exit "p13 narHash unreadable -> 34" 34
+untouched "p13 narHash unreadable"
+
 # --- lock ------------------------------------------------------------------------
 
 fresh
