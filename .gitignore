@@ -1,6 +1,9 @@
 .nixcache/
 .cache-nix/
-.rpi-build.log
 result
+# `rpi-deploy image` / deploy-smoke output links (result-rpi-image)
+result-*
+# legacy artifacts of the old rpi-deploy install flow (safe to delete; then drop these two lines)
+.rpi-build.log
 .rpi-build/
 .scratch/

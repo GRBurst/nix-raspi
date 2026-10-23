@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --wait) WAIT="$2"; shift ;;
     --keep) KEEP=1 ;;
-    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^$/p' "$0"; exit 0 ;;
     -*) echo "error: unknown argument: $1" >&2; exit 2 ;;
     *) IMG_ZST="$1" ;;
   esac
