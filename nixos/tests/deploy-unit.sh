@@ -23,6 +23,10 @@ FIXTURES="${FIXTURES:-$HERE/fixtures}"
 # shellcheck source=tests/harness.sh
 source "$HERE/harness.sh"
 
+# The caller's environment must not leak into the tests.
+unset RPI_FLAKE RPI_SSH_OPTS RPI_NIXOS_REBUILD RPI_CACHE_URL RPI_ALLOW_NONBLOCK \
+    RL_FLAKE RL_ATTR RL_TARGET RL_SSH_PORT RL_SSH_OPTS RL_CACHE_URL NIX_SSHOPTS
+
 # lib FUNC ARGS...: call a rpi-lib.sh function in a fresh subshell, so the
 # globals pick up the environment of the call site.
 lib() { (
@@ -421,5 +425,176 @@ reset_log
 MOCK_RM=0 MOCK_ROOTSRC=/dev/mmcblk0p2 MOCK_PKNAME=mmcblk0 run_cmd f11 -- rd flash "$IMG" "$MMC" <<<"mmcblk0"
 expect_exit "f11 an mmcblk holding / is still refused" 16
 unset RPI_ALLOW_NONBLOCK
+
+# =============================================================================
+# T5.7 deploy
+# =============================================================================
+# nr-mock: the nixos-rebuild under test (RPI_NIXOS_REBUILD); logs argv + env.
+mock nr-mock <<'EOF'
+printf 'NIX_SSHOPTS=%s\n' "${NIX_SSHOPTS-unset}" >>"$MOCK_LOG"
+exit "${MOCK_NR_RC:-0}"
+EOF
+# The host's nixos-rebuild (newer release) must never run.
+mock nixos-rebuild <<'EOF'
+echo POISON >>"$MOCK_LOG"
+exit 1
+EOF
+# ssh: the Pi's current/booted system and their kernel triplets.
+mock ssh <<'EOF'
+if [[ -n "${MOCK_SSH_FAIL:-}" ]]; then
+    echo "ssh: connect to host neptun port 2222: Connection refused" >&2
+    exit 255
+fi
+case " $* " in
+*" readlink /run/current-system /run/booted-system "*)
+    printf '%s\n%s\n' "${MOCK_CUR-/nix/store/cccc-nixos-system-neptun-2}" \
+        "${MOCK_BOOTED-/nix/store/bbbb-nixos-system-neptun-1}" ;;
+*" readlink -f /run/current-system/kernel "*)
+    printf '%s\n' ${MOCK_CUR_TRIPLET-/nix/store/k1/Image /nix/store/i1/initrd /nix/store/m1} ;;
+*" readlink -f /run/booted-system/kernel "*)
+    printf '%s\n' ${MOCK_BOOTED_TRIPLET-/nix/store/k1/Image /nix/store/i1/initrd /nix/store/m1} ;;
+*) echo "ssh mock: unexpected command: $*" >&2; exit 1 ;;
+esac
+EOF
+
+# the flake: subdir nixos/ of a git repo (like the real checkout)
+REPO="$T/repo" FL="$T/repo/nixos"
+mkdir -p "$FL"
+echo '{ }' >"$FL/flake.nix"
+git -C "$REPO" init -q -b main
+git -C "$REPO" add -A
+git -C "$REPO" commit -qm init
+# set_auto_update AHEAD: branch auto-update = HEAD (+ one lock commit if AHEAD=1)
+set_auto_update() {
+    local c
+    c="$(git -C "$REPO" rev-parse HEAD)"
+    [[ "$1" == 1 ]] && c="$(git -C "$REPO" commit-tree -p HEAD -m "auto-update: lock" 'HEAD^{tree}')"
+    git -C "$REPO" branch -f auto-update "$c"
+}
+
+dep() { RPI_NIXOS_REBUILD="$BIN/nr-mock" rd deploy --flake "$FL" "$@"; }
+no_poison() { expect_eq "$1: d8 host nixos-rebuild never used" 0 "$(log_count POISON)"; }
+
+reset_log
+run_cmd d1 -- dep
+expect_exit "d1 deploy succeeds" 0
+expect_eq "d1 default action switch, pinned argv" 1 \
+    "$(log_count "^nr-mock switch --no-reexec --flake $FL#rpi --target-host root@neptun\$")"
+expect_true "d1 guards before nixos-rebuild" test "$(first_line ' --dry-run ')" -lt "$(first_line '^nr-mock ')"
+no_poison d1
+
+for action in boot test; do
+    reset_log
+    run_cmd d2 -- dep "$action" --attr neptun
+    expect_exit "d2 deploy $action succeeds" 0
+    expect_eq "d2 $action passed through" 1 \
+        "$(log_count "^nr-mock $action --no-reexec --flake $FL#neptun --target-host root@neptun\$")"
+    no_poison "d2 $action"
+done
+
+reset_log
+run_cmd d3 -- dep dry-activate
+expect_exit "d3 dry-activate -> exit 2" 2
+expect_eq "d3 no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
+
+reset_log
+run_cmd d4 -- dep
+expect_grep "d4 NIX_SSHOPTS starts with -p 2222" "^NIX_SSHOPTS=-p 2222( |$)" "$MOCK_LOG"
+reset_log
+RPI_SSH_OPTS="-F cfg" run_cmd d4 -- dep --port 22 --target root@h
+expect_grep "d4 --port and RPI_SSH_OPTS reach NIX_SSHOPTS" "^NIX_SSHOPTS=-p 22 -F cfg$" "$MOCK_LOG"
+expect_grep "d4 --target honoured" "^nr-mock switch .*--target-host root@h$" "$MOCK_LOG"
+expect_grep "d4 status uses --port/--target" "^ssh -p 22 -F cfg root@h " "$MOCK_LOG"
+no_poison d4
+
+for fail in "MOCK_CACHED=" "MOCK_DRY=$KER" "MOCK_DRY_RC=1" "MOCK_EVAL_RC=1"; do
+    reset_log
+    run_cmd d5 -- env "$fail" RPI_NIXOS_REBUILD="$BIN/nr-mock" bash "$RPI_DEPLOY_SRC" deploy --flake "$FL"
+    expect_true "d5 guard failure ($fail) -> non-zero" test "$RC" -ne 0
+    expect_eq "d5 guard failure ($fail) -> Pi untouched (no nixos-rebuild, no ssh)" 0 "$(log_count '^(nr-mock|ssh) ')"
+    no_poison "d5 $fail"
+done
+reset_log
+MOCK_DRY="$HYB" run_cmd d5 -- dep --max-builds 100
+expect_exit "d5 --max-builds honoured -> RL_E_TOO_MANY" 12
+
+reset_log
+set_auto_update 1
+run_cmd d6 -- dep
+expect_exit "d6 auto-update ahead -> RL_E_DOWNGRADE" 15
+expect_grepf "d6 says would downgrade" "would downgrade" "$ERR"
+expect_eq "d6 no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
+expect_eq "d6 checked before the guards" 0 "$(log_count '^nix ')"
+no_poison d6
+
+reset_log
+run_cmd d7 -- dep --force
+expect_exit "d7 --force deploys anyway" 0
+expect_eq "d7 --force -> nixos-rebuild ran" 1 "$(log_count '^nr-mock switch ')"
+expect_grepf "d7 still warns" "auto-update" "$ERR"
+no_poison d7
+
+reset_log
+set_auto_update 0
+run_cmd d11 -- dep
+expect_exit "d11 auto-update merged into HEAD -> deploys" 0
+
+reset_log
+NOGIT="$T/nogit"
+mkdir -p "$NOGIT"
+RPI_NIXOS_REBUILD="$BIN/nr-mock" run_cmd d12 -- rd deploy --flake "$NOGIT"
+expect_exit "d12 flake outside git -> no downgrade check, deploys" 0
+
+reset_log
+RPI_FLAKE="$FL" run_cmd d9 -- rd deploy
+expect_exit "d9 deploy with the flake's pinned tool succeeds" 0
+expect_grep "d9 runs the flake's nixos-rebuild" \
+    "^nix run --accept-flake-config $FL#nixos-rebuild -- switch --no-reexec --flake $FL#rpi --target-host root@neptun$" "$MOCK_LOG"
+no_poison d9
+
+reset_log
+MOCK_NR_RC=1 run_cmd d10 -- dep
+expect_exit "d10 nixos-rebuild failure -> RL_E_DEPLOY" 14
+expect_eq "d10 no status after a failed deploy" 0 "$(log_count '^ssh ')"
+
+reset_log
+run_cmd d13 -- dep
+expect_grep "d13 switch prints the status" "^reboot pending: (yes|no)$" "$OUT"
+expect_true "d13 status after the switch" test "$(first_line '^nr-mock ')" -lt "$(first_line '^ssh ')"
+reset_log
+run_cmd d13 -- dep boot
+expect_eq "d13 boot: no status query" 0 "$(log_count '^ssh ')"
+reset_log
+MOCK_SSH_FAIL=1 run_cmd d13 -- dep
+expect_exit "d13 status failing after a good switch -> still 0" 0
+
+# =============================================================================
+# T5.8 status
+# =============================================================================
+reset_log
+MOCK_CUR=/nix/store/c-sys MOCK_BOOTED=/nix/store/b-sys run_cmd s1 -- rd status
+expect_exit "s1 status succeeds" 0
+expect_grep "s1 current line" "^current: /nix/store/c-sys$" "$OUT"
+expect_grep "s1 booted line" "^booted: /nix/store/b-sys$" "$OUT"
+expect_grep "s1 default target and port" "^ssh -p 2222 root@neptun " "$MOCK_LOG"
+
+run_cmd s2 -- rd status
+expect_grep "s2 equal triplets -> reboot pending: no" "^reboot pending: no$" "$OUT"
+
+for diff in "/nix/store/k2/Image /nix/store/i1/initrd /nix/store/m1" \
+    "/nix/store/k1/Image /nix/store/i2/initrd /nix/store/m1" \
+    "/nix/store/k1/Image /nix/store/i1/initrd /nix/store/m2"; do
+    MOCK_CUR_TRIPLET="$diff" run_cmd s3 -- rd status
+    expect_grep "s3 current ($diff) != booted -> reboot pending: yes" "^reboot pending: yes$" "$OUT"
+done
+
+reset_log
+RPI_SSH_OPTS="-F cfg" run_cmd s3 -- rd status --target pi@x --port 22
+expect_grep "s3 --target/--port/RPI_SSH_OPTS honoured" "^ssh -p 22 -F cfg pi@x " "$MOCK_LOG"
+
+MOCK_SSH_FAIL=1 run_cmd s4 -- rd status
+expect_true "s4 ssh failure -> non-zero" test "$RC" -ne 0
+expect_grepf "s4 cannot reach root@neptun" "cannot reach root@neptun" "$ERR"
+expect_not_grep "s4 no half status" "reboot pending" "$OUT"
 
 summary

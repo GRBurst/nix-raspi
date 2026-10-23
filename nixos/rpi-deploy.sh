@@ -160,8 +160,55 @@ do_flash() {
     flash_verify "$img" "$dev"
     echo "done: the card can be removed"
 }
-do_deploy() { die "not implemented"; }
-do_status() { die "not implemented"; }
+# check_downgrade: refuse (unless --force) when branch auto-update of the
+# flake's git repo has commits HEAD lacks: deploying would roll the Pi back
+# from what the weekly job already pushed. Skipped outside git.
+check_downgrade() {
+    local n
+    git -C "$RL_FLAKE" rev-parse --git-dir >/dev/null 2>&1 || return 0
+    git -C "$RL_FLAKE" rev-parse -q --verify refs/heads/auto-update >/dev/null || return 0
+    n="$(git -C "$RL_FLAKE" rev-list --count HEAD..refs/heads/auto-update)" || return 0
+    [[ "$n" -gt 0 ]] || return 0
+    if [[ "$FORCE" -eq 1 ]]; then
+        warn "branch auto-update has $n commit(s) not in HEAD; deploying anyway (--force)"
+        return 0
+    fi
+    die_rc "$RL_E_DOWNGRADE" "would downgrade: branch auto-update has $n commit(s) not in HEAD" \
+        "(merge it: git merge auto-update), or deploy anyway with --force"
+}
+
+# deploy [switch|boot|test]: downgrade check, guards, pinned nixos-rebuild.
+do_deploy() {
+    check_downgrade
+    log "guards: $(rl_conf_ref) (toplevel, at most $MAX_BUILDS local builds)"
+    rl_guard toplevel "$MAX_BUILDS" || die_rc $? "guard failed; the Pi was not touched"
+    log "nixos-rebuild $ACTION --target-host $RL_TARGET (port $RL_SSH_PORT)"
+    rl_nixos_rebuild "$ACTION" --no-reexec --flake "$RL_FLAKE#$RL_ATTR" --target-host "$RL_TARGET" ||
+        die_rc "$RL_E_DEPLOY" "nixos-rebuild $ACTION failed"
+    case "$ACTION" in
+    switch) (do_status) || warn "deployed, but the status query failed" ;;
+    boot) log "the new generation becomes active after the next reboot" ;;
+    test) log "activated until the next reboot (boot default unchanged)" ;;
+    esac
+}
+
+# status: current/booted generation and whether a reboot is pending.
+do_status() {
+    local systems current booted
+    systems="$(rl_ssh readlink /run/current-system /run/booted-system)" &&
+        current="$(rl_triplet_remote current)" &&
+        booted="$(rl_triplet_remote booted)" ||
+        die "cannot reach $RL_TARGET (port $RL_SSH_PORT)"
+    local -a s
+    mapfile -t s <<<"$systems"
+    echo "current: ${s[0]:-?}"
+    echo "booted: ${s[1]:-?}"
+    if rl_needs_reboot "$current" "$booted"; then
+        echo "reboot pending: yes"
+    else
+        echo "reboot pending: no"
+    fi
+}
 
 # --- argument parsing --------------------------------------------------------
 SUBCOMMAND=""
