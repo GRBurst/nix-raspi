@@ -28,8 +28,9 @@ Usage:
   deploy   push the system to the Pi with the flake's pinned nixos-rebuild
            (default action: switch; boot = activate on next reboot; test =
            activate without making it the boot default), then sync on
-           the Pi; refuses to deploy a checkout behind branch auto-update
-           unless --force
+           the Pi; refuses when branch auto-update's flake.lock pins a
+           newer nixpkgs or nixos-raspberrypi than the working tree's
+           (or a lock is unreadable) unless --force
   status   current, booted and boot-default generation on the Pi, and whether
            a reboot is pending (the boot default is not running, or its
            kernel, initrd, modules, dtbs, kernel-params or NIXOS_BOOT
@@ -169,21 +170,56 @@ do_flash() {
     echo "done: the card can be removed"
 }
 
+# Root inputs whose lock decides whether a checkout is behind auto-update.
+DOWNGRADE_INPUTS=(nixpkgs nixos-raspberrypi)
+
+# lock_last_modified INPUT < flake.lock: locked.lastModified of root input
+# INPUT ('' when the lock has no such input); non-zero when unparsable.
+lock_last_modified() {
+    local v
+    v="$(jq -r --arg i "$1" \
+        '(.nodes[.root].inputs[$i] // empty) as $k | .nodes[$k].locked.lastModified // empty' 2>/dev/null)" ||
+        return 1
+    [[ -z "$v" || "$v" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$v"
+}
+
 # check_downgrade: refuse (unless --force) when branch auto-update of the
-# flake's git repo has commits HEAD lacks: deploying would roll the Pi back
-# from what the weekly job already pushed. Skipped outside git.
+# flake's git repo locks a newer nixpkgs or nixos-raspberrypi (by
+# locked.lastModified) than the working tree's flake.lock: deploying would
+# roll the Pi back from what the weekly job already pushed. Compares lock
+# content, not ancestry, so squash/cherry-pick merges and a `nix flake
+# update` on main count. Fails closed when a lock cannot be read. Skipped
+# outside git, without the branch or without a lock for this flake on it.
 check_downgrade() {
-    local n
+    local au_lock wt_lock input au wt newer=() problem=""
     git -C "$RL_FLAKE" rev-parse --git-dir >/dev/null 2>&1 || return 0
     git -C "$RL_FLAKE" rev-parse -q --verify refs/heads/auto-update >/dev/null || return 0
-    n="$(git -C "$RL_FLAKE" rev-list --count HEAD..refs/heads/auto-update)" || return 0
-    [[ "$n" -gt 0 ]] || return 0
+    au_lock="$(git -C "$RL_FLAKE" show refs/heads/auto-update:./flake.lock 2>/dev/null)" || return 0
+    if ! wt_lock="$(cat "$RL_FLAKE/flake.lock" 2>/dev/null)"; then
+        problem="cannot compare: $RL_FLAKE/flake.lock is missing"
+    else
+        for input in "${DOWNGRADE_INPUTS[@]}"; do
+            if ! au="$(lock_last_modified "$input" <<<"$au_lock")"; then
+                problem="cannot compare: the flake.lock of branch auto-update is unreadable"
+                break
+            fi
+            if ! wt="$(lock_last_modified "$input" <<<"$wt_lock")"; then
+                problem="cannot compare: $RL_FLAKE/flake.lock is unreadable"
+                break
+            fi
+            [[ -n "$au" && -n "$wt" ]] && ((au > wt)) &&
+                newer+=("$input ($(date -u -d "@$au" +%F) > $(date -u -d "@$wt" +%F))")
+        done
+        [[ ${#newer[@]} -eq 0 ]] || problem="branch auto-update locks a newer ${newer[*]}"
+    fi
+    [[ -n "$problem" ]] || return 0
     if [[ "$FORCE" -eq 1 ]]; then
-        warn "branch auto-update has $n commit(s) not in HEAD; deploying anyway (--force)"
+        warn "$problem (vs branch auto-update); deploying anyway (--force)"
         return 0
     fi
-    die_rc "$RL_E_DOWNGRADE" "would downgrade: branch auto-update has $n commit(s) not in HEAD" \
-        "(merge it: git merge auto-update), or deploy anyway with --force"
+    die_rc "$RL_E_DOWNGRADE" "would downgrade: $problem;" \
+        "merge branch auto-update (git merge auto-update), or deploy anyway with --force"
 }
 
 # deploy [switch|boot|test]: downgrade check, guards, pinned nixos-rebuild.

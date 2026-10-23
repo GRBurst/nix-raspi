@@ -8,6 +8,8 @@ let
   nr = nixpkgs.legacyPackages.x86_64-linux.nixos-rebuild-ng;
   app = (apps.x86_64-linux or { }).nixos-rebuild or { };
   pkgs = packages.x86_64-linux;
+  x86 = nixpkgs.legacyPackages.x86_64-linux;
+  binDir = p: builtins.unsafeDiscardStringContext "${lib.getBin p}/bin";
   install = pkgs.rpi-deploy.installPhase or "";
 in
 {
@@ -24,4 +26,10 @@ in
 
   "rpi-deploy wrapper points RPI_LIB at the packaged lib" =
     lib.hasInfix "--set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh" install;
+
+  # check_downgrade reads flake.lock with jq (review S4); rpi-autoupdate
+  # takes its lock with flock (util-linux)
+  "rpi-deploy wrapper PATH has jq and util-linux" =
+    lib.hasInfix (binDir x86.jq) install
+    && lib.hasInfix (binDir x86.util-linux) install;
 }

@@ -540,16 +540,48 @@ pi_state sysA2 sysA sysA2
 REPO="$T/repo" FL="$T/repo/nixos"
 mkdir -p "$FL"
 echo '{ }' >"$FL/flake.nix"
+# lock_json NIXPKGS RPI [OTHER]: a flake.lock whose root inputs nixpkgs
+# (node nixpkgs_2, like the real lock's nixpkgs_4) and nixos-raspberrypi
+# have these locked.lastModified; OTHER is a non-root node (default 1)
+lock_json() {
+    cat <<EOF
+{ "nodes": {
+    "nixpkgs_2": { "locked": { "lastModified": $1, "type": "github" } },
+    "nixos-raspberrypi": { "locked": { "lastModified": $2, "type": "github" } },
+    "nixpkgs": { "locked": { "lastModified": ${3:-1}, "type": "github" } },
+    "root": { "inputs": { "nixpkgs": "nixpkgs_2", "nixos-raspberrypi": "nixos-raspberrypi" } } },
+  "root": "root", "version": 7 }
+EOF
+}
+write_lock() { local f="$1"; shift; lock_json "$@" >"$f"; }
+# commit_lock NIXPKGS RPI: commit that lock on main (the checkout)
+commit_lock() {
+    write_lock "$FL/flake.lock" "$@"
+    git -C "$REPO" add -A
+    git -C "$REPO" commit -q --allow-empty -m "lock $*"
+}
+write_lock "$FL/flake.lock" 100 200
 git -C "$REPO" init -q -b main
 git -C "$REPO" add -A
 git -C "$REPO" commit -qm init
-# set_auto_update AHEAD: branch auto-update = HEAD (+ one lock commit if AHEAD=1)
-set_auto_update() {
-    local c
-    c="$(git -C "$REPO" rev-parse HEAD)"
-    [[ "$1" == 1 ]] && c="$(git -C "$REPO" commit-tree -p HEAD -m "auto-update: lock" 'HEAD^{tree}')"
+# set_auto_update_raw TEXT: branch auto-update = main + one commit whose
+# nixos/flake.lock is TEXT ('' = the commit deletes it); main is untouched
+set_auto_update_raw() {
+    local idx="$T/au-index" blob tree c
+    rm -f "$idx"
+    GIT_INDEX_FILE="$idx" git -C "$REPO" read-tree main
+    if [[ -n "$1" ]]; then
+        blob="$(printf '%s\n' "$1" | git -C "$REPO" hash-object -w --stdin)"
+        GIT_INDEX_FILE="$idx" git -C "$REPO" update-index --add --cacheinfo "100644,$blob,nixos/flake.lock"
+    else
+        GIT_INDEX_FILE="$idx" git -C "$REPO" update-index --force-remove nixos/flake.lock
+    fi
+    tree="$(GIT_INDEX_FILE="$idx" git -C "$REPO" write-tree)"
+    c="$(git -C "$REPO" commit-tree -p main -m "auto-update: lock" "$tree")"
     git -C "$REPO" branch -f auto-update "$c"
 }
+# set_auto_update NIXPKGS RPI [OTHER]: the weekly job pushed this lock
+set_auto_update() { set_auto_update_raw "$(lock_json "$@")"; }
 
 dep() { RPI_NIXOS_REBUILD="$BIN/nr-mock" rd deploy --flake "$FL" "$@"; }
 no_poison() { expect_eq "$1: d8 host nixos-rebuild never used" 0 "$(log_count POISON)"; }
@@ -601,13 +633,21 @@ MOCK_DRY="$HYB" run_cmd d5 -- dep --max-builds 100
 expect_exit "d5 --max-builds honoured -> RL_E_TOO_MANY" 12
 
 reset_log
-set_auto_update 1
+set_auto_update 150 200
 run_cmd d6 -- dep
-expect_exit "d6 auto-update ahead -> RL_E_DOWNGRADE" 15
+expect_exit "d6 auto-update locks a newer nixpkgs -> RL_E_DOWNGRADE" 15
 expect_grepf "d6 says would downgrade" "would downgrade" "$ERR"
+expect_grepf "d6 names the newer input" "nixpkgs" "$ERR"
 expect_eq "d6 no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
 expect_eq "d6 checked before the guards" 0 "$(log_count '^nix ')"
 no_poison d6
+
+reset_log
+set_auto_update 100 300
+run_cmd d6 -- dep
+expect_exit "d6 auto-update locks a newer nixos-raspberrypi -> RL_E_DOWNGRADE" 15
+expect_grepf "d6 names nixos-raspberrypi" "nixos-raspberrypi" "$ERR"
+expect_eq "d6 (rpi) no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
 
 reset_log
 run_cmd d7 -- dep --force
@@ -617,9 +657,67 @@ expect_grepf "d7 still warns" "auto-update" "$ERR"
 no_poison d7
 
 reset_log
-set_auto_update 0
+git -C "$REPO" branch -f auto-update main
 run_cmd d11 -- dep
 expect_exit "d11 auto-update merged into HEAD -> deploys" 0
+
+# S4: squash/cherry-pick: auto-update keeps a commit HEAD lacks, but the
+# checkout already locks the same revisions -> no refusal
+reset_log
+set_auto_update 150 300
+commit_lock 150 300
+run_cmd d11 -- dep
+expect_exit "d11 squash-merged (same lock, commit not in HEAD) -> deploys" 0
+expect_eq "d11 squash -> nixos-rebuild ran" 1 "$(log_count '^nr-mock switch ')"
+expect_not_grep "d11 squash -> no downgrade warning" "auto-update" "$ERR"
+
+# the user ran `nix flake update` on main: the checkout is newer
+reset_log
+set_auto_update 150 300
+commit_lock 160 400
+run_cmd d11 -- dep
+expect_exit "d11 checkout lock newer than auto-update's -> deploys" 0
+
+# an uncommitted lock update counts (the working tree is what is deployed)
+reset_log
+commit_lock 100 200
+set_auto_update 150 300
+write_lock "$FL/flake.lock" 150 300
+run_cmd d11 -- dep
+expect_exit "d11 uncommitted newer lock in the working tree -> deploys" 0
+git -C "$REPO" checkout -q -- .
+
+# only the root inputs nixpkgs and nixos-raspberrypi count (the real lock
+# maps nixpkgs to a node like nixpkgs_4; other nodes may be newer)
+reset_log
+set_auto_update 100 200 999
+run_cmd d11 -- dep
+expect_exit "d11 only other lock nodes newer -> deploys" 0
+
+# fail closed: an unreadable lock cannot be compared
+reset_log
+set_auto_update_raw 'not json'
+run_cmd d16 -- dep
+expect_exit "d16 auto-update lock unparsable -> RL_E_DOWNGRADE" 15
+expect_grepf "d16 says it cannot compare" "cannot compare" "$ERR"
+expect_eq "d16 no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
+reset_log
+run_cmd d16 -- dep --force
+expect_exit "d16 --force deploys anyway" 0
+
+reset_log
+set_auto_update 150 300
+rm "$FL/flake.lock"
+run_cmd d16 -- dep
+expect_exit "d16 no flake.lock in the checkout -> RL_E_DOWNGRADE" 15
+git -C "$REPO" checkout -q -- .
+
+# auto-update has no lock for this flake (another flake dir): nothing to compare
+reset_log
+set_auto_update_raw ''
+run_cmd d17 -- dep
+expect_exit "d17 auto-update without this flake's lock -> deploys" 0
+git -C "$REPO" branch -f auto-update main
 
 reset_log
 NOGIT="$T/nogit"

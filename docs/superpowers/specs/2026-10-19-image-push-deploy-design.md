@@ -136,8 +136,10 @@ External disk (`modules/external-storage.nix`, disabled by default)
   pinned `nixos-rebuild` (flake app `nixos-rebuild`, from our nixpkgs) with
   `--no-reexec --flake .#rpi --target-host`, then `sync` on the Pi (the
   vfat NIXOS_BOOT is rewritten; switch-to-configuration only syncs the
-  store). Warns and refuses if branch `auto-update` has commits not in HEAD
-  (would downgrade), unless `--force`.
+  store). Refuses (would downgrade) when branch `auto-update`'s flake.lock
+  pins a newer nixpkgs or nixos-raspberrypi (`locked.lastModified`) than the
+  working tree's, or a lock is unreadable, unless `--force`. Lock content,
+  not ancestry: squash/cherry-pick merges must not trigger it.
 - `status`: current/booted/boot-default generation on the Pi, and whether a
   reboot is pending: the boot default is not running, or its boot
   fingerprint differs from the booted system's (see §3.4 step 6).
