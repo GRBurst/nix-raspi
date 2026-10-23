@@ -27,7 +27,9 @@ A pointer built more than --max-age-days ago means CI has stalled: exit 39
 (after the run has otherwise succeeded).
 
   --host NAME         system name in the store path (default neptun)
-  --state-dir DIR     applied seq/store-path and the lock (default /var/lib/rpi-pull)
+  --state-dir DIR     the lock, the applied seq and store-path, and last-run
+                      ("time=<UTC> exit=<code> result=<word>", every run that
+                      got the lock) (default /var/lib/rpi-pull)
   --reboot-time HH:MM when to reboot into a new boot configuration (default 04:30)
   --max-age-days N    the pointer's maximum age, 1-9999 (default 21)
 
@@ -107,7 +109,7 @@ rp_fetch() {
         die 30 "cannot fetch $POINTER_URL (curl exit $?)"
     case "$code" in
     200) ;;
-    404) log "no pointer published yet ($POINTER_URL)"; exit 0 ;;
+    404) log "no pointer published yet ($POINTER_URL)"; RESULT=no-pointer; exit 0 ;;
     *) die 30 "cannot fetch $POINTER_URL (HTTP $code)" ;;
     esac
 }
@@ -199,6 +201,36 @@ rp_check_age() {
     ((age <= MAX_AGE_DAYS * 86400)) || die 39 "pointer is $((age / 86400)) days old (CI stalled?)"
 }
 
+# rp_result RC: the last-run result for exit code RC (RESULT names the
+# successful outcome)
+rp_result() {
+    case "$1" in
+    0) echo "${RESULT:-ok}" ;;
+    1) echo state-error ;;
+    30) echo fetch-failed ;;
+    31) echo pointer-invalid ;;
+    32) echo untrusted ;;
+    33) echo realise-failed ;;
+    34) echo narhash-mismatch ;;
+    35) echo profile-failed ;;
+    36) echo activation-failed ;;
+    38) echo cache-unavailable ;;
+    39) echo stale ;;
+    *) echo error ;;
+    esac
+}
+
+# rp_finish: on exit once the lock is held -- drop the pointer temp file and
+# write $STATE/last-run "time=<UTC> exit=<rc> result=<word>" (tmp + mv; A6).
+# The exit code stays the run's.
+rp_finish() {
+    local rc=$?
+    [[ -z "${TMP:-}" ]] || rm -f "$TMP"
+    { printf 'time=%s exit=%s result=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "$(rp_result "$rc")" \
+        >"$STATE/last-run.tmp" && mv -f "$STATE/last-run.tmp" "$STATE/last-run"; } 2>/dev/null ||
+        log "cannot write $STATE/last-run"
+}
+
 # rp_record: the applied pointer -> $STATE/store-path, $STATE/seq (each
 # written to a temp file and renamed; seq last, so a crash re-applies)
 rp_record() {
@@ -214,9 +246,9 @@ rp_record() {
 main() {
     rp_parse_args "$@"
     rp_lock
+    trap rp_finish EXIT
     rp_last_seq
     TMP=$(mktemp "$STATE/pointer.XXXXXX") || die 1 "cannot create a temp file in $STATE"
-    trap 'rm -f "$TMP"' EXIT
     rp_fetch "$TMP"
     rp_parse "$TMP"
     rp_update
@@ -227,6 +259,7 @@ main() {
 rp_update() {
     if ((P_SEQ == LAST)); then
         log "up to date (seq $P_SEQ)"
+        RESULT=up-to-date
         return 0
     fi
     ((P_SEQ > LAST)) || die 31 "pointer seq $P_SEQ is older than applied seq $LAST"
@@ -234,12 +267,14 @@ rp_update() {
     if [[ "$(readlink -f "${RPI_PULL_ROOT:-}/run/current-system")" == "$P_PATH" ]]; then
         rp_record
         log "already current: $P_PATH (seq $P_SEQ recorded)"
+        RESULT=already-current
         return 0
     fi
     rp_realise
     rp_activation
     rp_apply
     rp_record
+    RESULT=applied
     if [[ "$ACTION" == boot ]]; then
         log "applied seq $P_SEQ (boot, reboot at $REBOOT_TIME)"
     else

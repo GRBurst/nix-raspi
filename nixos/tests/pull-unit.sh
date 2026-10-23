@@ -624,6 +624,72 @@ built_ago $((22 * DAY))
 MOCK_STC_RC=1 rp a5-failed
 expect_exit "a5 stale pointer, activation fails -> 36 (the failure wins)" 36
 
+# --- A6 last-run ------------------------------------------------------------------
+
+# last_run NAME EXIT RESULT: $STATE/last-run is the one line
+# "time=<UTC> exit=EXIT result=RESULT"
+last_run() {
+    expect_eq "$1: last-run is one line" 1 "$(wc -l <"$STATE/last-run" 2>/dev/null || echo 0)"
+    expect_grep "$1: last-run exit=$2 result=$3" \
+        "^time=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z exit=$2 result=$3\$" "$STATE/last-run"
+}
+
+fresh
+rp l1
+last_run "l1 applied" 0 applied
+lr_time=$(sed -n 's/^time=\([^ ]*\) .*/\1/p' "$STATE/last-run" 2>/dev/null)
+lr_age=$(($(date -u +%s) - $(date -u -d "${lr_time:-1970-01-01T00:00:00Z}" +%s)))
+expect_true "l1 last-run time is now (${lr_age}s ago)" test "$lr_age" -ge 0 -a "$lr_age" -lt 300
+expect_eq "l1 no temp files left in the state dir" "lock seq store-path" "$(state_files)"
+
+fresh
+state 1
+rp l2
+last_run "l2 up to date" 0 up-to-date
+
+fresh
+pi "$NEXT" "$A" "$NEXT"
+rp l3
+last_run "l3 already current" 0 already-current
+
+fresh
+MOCK_HTTP=404 rp l4
+last_run "l4 no pointer" 0 no-pointer
+
+# l5 CASE EXIT RESULT: one failing run per exit code (the knob is set by the caller)
+l5() {
+    rp "l5 $1"
+    expect_exit "l5 $1 -> $2" "$2"
+    last_run "l5 $1" "$2" "$3"
+}
+fresh; MOCK_CURL_RC=6 l5 fetch 30 fetch-failed
+fresh; printf 'not json\n' >"$MOCK_BODY"; l5 invalid 31 pointer-invalid
+fresh; state 5; pointer 4 "$NEXT"; l5 older 31 pointer-invalid
+fresh; state abc; l5 state-seq 31 pointer-invalid
+fresh; MOCK_SIGNER=other l5 untrusted 32 untrusted
+fresh; MOCK_REALISE_RC=1 l5 realise 33 realise-failed
+fresh; MOCK_NAR="sha256-${GOOD_NAR:8}" l5 nar 34 narhash-mismatch
+fresh; MOCK_NIXENV_RC=1 l5 profile 35 profile-failed
+fresh; MOCK_STC_RC=1 l5 activation 36 activation-failed
+fresh; MOCK_VERIFY_RC=1 l5 cache 38 cache-unavailable
+fresh; built_ago $((22 * DAY)); l5 stale 39 stale
+
+fresh
+mkdir -p "$STATE"
+echo 'time=2026-01-01T00:00:00Z exit=0 result=applied' >"$STATE/last-run"
+exec 8>"$STATE/lock"
+flock -n 8
+rp l6
+exec 8>&-
+expect_exit "l6 busy -> 37" 37
+expect_eq "l6 busy: last-run untouched" 'time=2026-01-01T00:00:00Z exit=0 result=applied' \
+    "$(cat "$STATE/last-run")"
+
+fresh
+rp l7 --host a/b
+expect_exit "l7 usage error -> 2" 2
+expect_true "l7 usage error (before the lock): no last-run" test ! -e "$STATE/last-run"
+
 # --- lock ------------------------------------------------------------------------
 
 fresh
