@@ -381,4 +381,116 @@ expect_exit "w10 missing TOP -> usage" 2
 run_cmd w10h -- pointer --help
 expect_exit "w10 --help" 0
 
+# =============================================================================
+# T7.4 ci/commit-push.sh (real git, bare origin)
+# =============================================================================
+BOT='github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>'
+MSG='neptun: build 7 (push)'
+origin_main() { git -C "$T/origin.git" rev-parse main; }
+# cpush REPO ARGS...: run commit-push.sh in REPO/nixos like the workflow does
+cpush() { local r="$1"; shift; (cd "$T/$r/nixos" && bash "$CI_DIR/commit-push.sh" "$@"); }
+# change REPO: a lock update and a new pointer in REPO's work tree
+change() {
+    printf 'update %s\n' "$1" >>"$T/$1/nixos/flake.lock"
+    put_pointer "$T/$1/nixos/deploy/neptun.json" 7 "$TOP"
+}
+# other NAME FILE: another clone pushes a commit changing FILE first
+other() {
+    clone "$1"
+    printf 'other %s\n' "$1" >>"$T/$1/$2"
+    git -C "$T/$1" commit -q -am "other $1"
+    git -C "$T/$1" push -q origin main
+}
+export GITHUB_REF=refs/heads/main
+
+clone g1
+before="$(origin_main)"
+run_cmd g1 -- cpush g1 --message "$MSG" flake.lock deploy/neptun.json
+expect_exit "g1 nothing changed" 0
+expect_eq "g1 stdout is pushed=false" "pushed=false" "$(cat "$OUT")"
+expect_eq "g1 origin main unchanged" "$before" "$(origin_main)"
+
+clone g2
+before="$(origin_main)"
+change g2
+printf 'stray\n' >"$T/g2/nixos/stray.txt"
+run_cmd g2 -- cpush g2 --message "$MSG" flake.lock deploy/neptun.json nope.json
+expect_exit "g2 lock + pointer changed" 0
+expect_eq "g2 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
+expect_eq "g2 one new commit on origin main" "$before" "$(git -C "$T/origin.git" rev-parse main^)"
+expect_eq "g2 the commit touches exactly lock + pointer" \
+    "nixos/deploy/neptun.json nixos/flake.lock" \
+    "$(git -C "$T/origin.git" diff-tree --no-commit-id --name-only -r main | sort | xargs)"
+expect_eq "g2 author is github-actions[bot]" "$BOT" "$(git -C "$T/origin.git" log -1 --format='%an <%ae>' main)"
+expect_eq "g2 committer is github-actions[bot]" "$BOT" "$(git -C "$T/origin.git" log -1 --format='%cn <%ce>' main)"
+expect_eq "g2 message" "$MSG" "$(git -C "$T/origin.git" log -1 --format=%s main)"
+expect_eq "g2 the work tree pointer is what origin has" "$(cat "$T/g2/nixos/deploy/neptun.json")" \
+    "$(git -C "$T/origin.git" show main:nixos/deploy/neptun.json)"
+
+clone g3
+change g3
+other g3o README.md
+upstream="$(origin_main)"
+run_cmd g3 -- cpush g3 --message "$MSG" flake.lock deploy/neptun.json
+expect_exit "g3 non-fast-forward -> rebase once, pushed" 0
+expect_eq "g3 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
+expect_eq "g3 origin main's parent is the other commit" "$upstream" "$(git -C "$T/origin.git" rev-parse main^)"
+expect_eq "g3 linear history (no merges)" "" "$(git -C "$T/origin.git" rev-list --merges main)"
+expect_eq "g3 the pointer reached origin" 7 \
+    "$(git -C "$T/origin.git" show main:nixos/deploy/neptun.json | jq -r .seq)"
+
+clone g4
+change g4
+other g4o nixos/flake.lock
+upstream="$(origin_main)"
+run_cmd g4 -- cpush g4 --message "$MSG" flake.lock deploy/neptun.json
+expect_true "g4 conflicting lock -> non-zero" test "$RC" -ne 0
+expect_eq "g4 stdout empty" "" "$(cat "$OUT")"
+expect_eq "g4 origin main = the other commit" "$upstream" "$(origin_main)"
+expect_eq "g4 work tree clean" "" "$(git -C "$T/g4" status --porcelain)"
+expect_true "g4 no rebase in progress" \
+    test ! -d "$T/g4/.git/rebase-merge" -a ! -d "$T/g4/.git/rebase-apply"
+
+clone g5
+git -C "$T/g5" config commit.gpgsign true
+change g5
+other g5o README.md
+run_cmd g5 -- cpush g5 --message "$MSG" flake.lock deploy/neptun.json
+expect_exit "g5 commit.gpgsign=true in the repo -> still commits and rebases (unsigned)" 0
+expect_eq "g5 pushed" "pushed=true" "$(cat "$OUT")"
+
+clone g6
+change g6
+before="$(origin_main)" head="$(git -C "$T/g6" rev-parse HEAD)"
+for ref in refs/heads/feature refs/tags/v1 ''; do
+    GITHUB_REF="$ref" run_cmd g6 -- cpush g6 --message "$MSG" flake.lock deploy/neptun.json
+    expect_exit "g6 GITHUB_REF='$ref' -> refused" 1
+    expect_grepf "g6 GITHUB_REF='$ref': names refs/heads/main" "refs/heads/main" "$ERR"
+done
+(unset GITHUB_REF; run_cmd g6u -- cpush g6 --message "$MSG" flake.lock; exit "$RC")
+RC=$?
+expect_exit "g6 GITHUB_REF unset -> refused" 1
+expect_eq "g6 origin main unchanged" "$before" "$(origin_main)"
+expect_eq "g6 no local commit" "$head" "$(git -C "$T/g6" rev-parse HEAD)"
+
+# g7 (A11): no inherited identity and git may not guess one: commit and the
+# rebase of `pull --rebase` both use the bot identity.
+clone g7
+git -C "$T/g7" config user.useConfigOnly true
+change g7
+other g7o README.md
+run_cmd g7 -- env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME \
+    -u GIT_COMMITTER_EMAIL -u EMAIL bash -c 'cd "$1/nixos" && bash "$2/commit-push.sh" "${@:3}"' _ \
+    "$T/g7" "$CI_DIR" --message "$MSG" flake.lock deploy/neptun.json
+expect_exit "g7 no inherited git identity -> commit + rebase still work" 0
+expect_eq "g7 rebased commit's committer is github-actions[bot]" "$BOT" \
+    "$(git -C "$T/origin.git" log -1 --format='%cn <%ce>' main)"
+
+run_cmd g8 -- cpush g1 flake.lock
+expect_exit "g8 missing --message -> usage" 2
+run_cmd g8b -- cpush g1 --message "$MSG"
+expect_exit "g8 no PATH -> usage" 2
+run_cmd g8h -- cpush g1 --help
+expect_exit "g8 --help" 0
+
 summary
