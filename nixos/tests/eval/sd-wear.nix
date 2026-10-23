@@ -45,6 +45,10 @@ in
 
   "keep-derivations off" = (cfg.nix.settings.keep-derivations or true) == false;
 
+  # S3 (review): store paths are fsynced before they are registered, so a
+  # power cut right after a deploy cannot leave a registered, empty path.
+  "fsync-store-paths on" = (cfg.nix.settings.fsync-store-paths or false) == true;
+
   "zram 50% with swappiness 100, page-cluster 0" =
     cfg.zramSwap.enable && cfg.zramSwap.memoryPercent == 50
     && sysctl "vm.swappiness" == "100"

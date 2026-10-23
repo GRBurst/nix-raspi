@@ -58,6 +58,12 @@ in
     systemd.coredump.enable = false;
     # Do not keep .drv files of built paths around (never built on the Pi).
     nix.settings.keep-derivations = false;
+    # Deploys copy closures and switch right away; fsync every store path
+    # before it is registered so a power cut cannot leave a registered but
+    # empty/partial path (review S3). Exists in the pinned nix 2.34
+    # (`nix config show fsync-store-paths`); nix.checkConfig validates
+    # nix.conf when the system is built.
+    nix.settings.fsync-store-paths = true;
 
     # zram swap itself (50 %) is enabled in configuration.nix; with
     # compressed RAM as swap, prefer it over dropping page cache and do not
