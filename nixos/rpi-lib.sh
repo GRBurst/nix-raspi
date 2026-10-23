@@ -163,5 +163,10 @@ rl_nixos_rebuild() {
     else
         tool=(nix run --accept-flake-config "$RL_FLAKE#nixos-rebuild" --)
     fi
-    NIX_SSHOPTS="$(rl_sshopts)" "${tool[@]}" "$@"
+    # accept-flake-config: nixos-rebuild's own `nix build` of the flake must
+    # use its nixConfig (nvmd cachix) without an interactive prompt.
+    NIX_SSHOPTS="$(rl_sshopts)" \
+        NIX_CONFIG="${NIX_CONFIG:+$NIX_CONFIG
+}accept-flake-config = true" \
+        "${tool[@]}" "$@"
 }
