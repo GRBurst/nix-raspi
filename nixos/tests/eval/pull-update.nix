@@ -15,11 +15,10 @@ let
   # Nothing set: no cache in keys.nix, no pointer URL.
   off = extend [ { _module.args.rpiKeys = keys // { cache = null; }; rpi.pull.pointerUrl = lib.mkForce null; } ];
 
-  # Everything set: the test cache, a pointer URL (overrides configuration.nix).
+  # Everything set: the test cache in keys.nix, a pointer URL (overrides
+  # configuration.nix's).
   onWith = pointerUrl: extend [ {
     _module.args.rpiKeys = keys // { cache = testCache; };
-    rpi.pull.cacheUrl = "https://neptun-test.cachix.org";
-    rpi.pull.cachePublicKey = testCache.publicKey;
     rpi.pull.pointerUrl = lib.mkForce pointerUrl;
   } ];
   on = onWith "https://raw.githubusercontent.com/o/r/main/nixos/deploy/neptun.json";
@@ -169,4 +168,17 @@ in
     && !cacheOnly.config.rpi.pull.enable && warns cacheOnly "rpi.pull";
 
   "nothing set: no rpi.pull warning" = !warns off "rpi.pull";
+
+  # --- Task 6.3: keys.cache -> rpi.pull ---
+  "cacheUrl and key come from keys.nix cache" =
+    o.cacheUrl == "https://neptun-test.cachix.org" && o.cachePublicKey == testCache.publicKey;
+
+  # Spec §6: the user fills keys.nix `cache`; null until then (pull off).
+  "keys.nix has a cache entry: null or { name; publicKey; }" =
+    keys ? cache
+    && (keys.cache == null || (lib.isString keys.cache.name && lib.isString keys.cache.publicKey));
+
+  # Plan §17 "Remote": the production pointer (raw GitHub, HTTPS).
+  "configuration.nix sets the production pointer URL" =
+    p.pointerUrl == "https://raw.githubusercontent.com/GRBurst/nix-raspi/main/nixos/deploy/neptun.json";
 }

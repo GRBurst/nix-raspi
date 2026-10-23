@@ -58,6 +58,20 @@ in {
     # No channels: the Pi never evaluates its own config (pushed from the host).
     channel.enable = false;
   };
+
+  # Pull updates (modules/pull-update.nix): CI builds this system weekly and
+  # commits the pointer; rpi-pull applies it. On once keys.nix has `cache`
+  # (the cache also becomes a substituter with its key).
+  rpi.pull = lib.mkMerge [
+    {
+      pointerUrl = "https://raw.githubusercontent.com/GRBurst/nix-raspi/main/nixos/deploy/neptun.json";
+    }
+    # `or null`: test overrides of rpiKeys may lack the attribute
+    (lib.mkIf ((keys.cache or null) != null) {
+      cacheUrl = "https://${keys.cache.name}.cachix.org";
+      cachePublicKey = keys.cache.publicKey;
+    })
+  ];
   # `nix shell nixpkgs#…` / <nixpkgs> on the Pi use the system's own nixpkgs
   # (already in the store, cache hits).
   nixpkgs.flake = {
