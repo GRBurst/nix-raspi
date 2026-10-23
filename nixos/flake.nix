@@ -267,18 +267,28 @@
                 aarch64Pkgs = pkgsFor "aarch64-linux";
               in {
                 x86_64-linux = {
-                  # Unit tests for the rpi-deploy script: runs the real
-                  # script against mocked `nix`/`nixos-install`, so no real
-                  # builds and no aarch64 emulation are needed. Covers the
-                  # emulation preflight, build record round-trip, show,
-                  # install verification, --from, attr mismatches,
-                  # divergence warnings.
+                  # Unit tests for rpi-deploy.sh + rpi-lib.sh: the real
+                  # scripts against mocked nix/ssh/sudo/lsblk/findmnt/dd/
+                  # nixos-rebuild (real git, zstd, coreutils), plus guard
+                  # parsing on real `nix build --dry-run` fixtures. No real
+                  # builds, no network, no devices (flash writes to temp
+                  # files only). util-linux is deliberately absent: lsblk
+                  # and findmnt must be the mocks.
                   rpi-deploy-unit = x86Pkgs.runCommand "rpi-deploy-unit-check" {
-                    scriptSrc = ./rpi-deploy.sh;
-                    unitSrc = ./tests/deploy-unit.sh;
-                    nativeBuildInputs = [ x86Pkgs.git ];
+                    src = lib.fileset.toSource {
+                      root = ./.;
+                      fileset = lib.fileset.unions [
+                        ./rpi-deploy.sh
+                        ./rpi-lib.sh
+                        ./tests/harness.sh
+                        ./tests/deploy-unit.sh
+                        ./tests/fixtures
+                      ];
+                    };
+                    nativeBuildInputs = with x86Pkgs; [ git zstd gnugrep gnused gawk ];
                   } ''
-                    RPI_DEPLOY_SRC=$scriptSrc ${x86Pkgs.bash}/bin/bash $unitSrc
+                    RPI_DEPLOY_SRC=$src/rpi-deploy.sh RPI_LIB=$src/rpi-lib.sh FIXTURES=$src/tests/fixtures \
+                      ${x86Pkgs.bash}/bin/bash $src/tests/deploy-unit.sh
                     touch $out
                   '';
 
