@@ -3,7 +3,9 @@
   pkgs,
   lib,
   ...
-}: {
+}: let
+  keys = import ./keys.nix;
+in {
   # Bootloader: provided by nixos-raspberrypi (nvmd), pulled in through
   # `nixosModules.raspberry-pi-3.base` in flake.nix. For the Pi 3 it is U-Boot
   # (default): the firmware partition (/boot/firmware: Pi firmware, config.txt,
@@ -101,7 +103,8 @@
   security = {
     sudo = {
       enable = true;
-      wheelNeedsPassword = true;
+      # pi has no password (key-only login, same trust as the root key)
+      wheelNeedsPassword = false;
     };
   };
   nixpkgs.config.allowUnfree = true;
@@ -113,7 +116,8 @@
       ports = [2222];
       settings = {
         PasswordAuthentication = false;
-        PermitRootLogin = "no";
+        # root: key-only; used by `rpi-deploy deploy` and rpi-autoupdate
+        PermitRootLogin = "prohibit-password";
       };
       #  usePAM = false;
       # gatewayPorts = "clientspecified"; # bind ssh reverse tunnel to public interface https://superuser.com/a/591963
@@ -209,10 +213,15 @@
     extraGroups = ["wheel" "docker" "video"];
     # zsh is provided by the nix-terminal kit (home-manager); make it the login shell
     shell = pkgs.zsh;
-    openssh.authorizedKeys.keys = [
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKxv8UiT62T7r81Z3h/L/7qhZZqVhF5ogXXthjhdAJVe pallon@andromeda->pi3 on 2026-10-18"
-    ];
+    openssh.authorizedKeys.keys = [keys.user];
   };
+
+  # Push deploys log in as root (no sudo, no trusted-users needed). The
+  # auto-update key may only log in from the build host.
+  users.users.root.openssh.authorizedKeys.keys =
+    [keys.user]
+    ++ lib.optional (keys.autoUpdate != null)
+    ''from="${keys.hostAddress}" ${keys.autoUpdate}'';
 
   # NixOS requires the login shell to be an enabled shell program (see the
   # users.users.<name>.shell assertion); the actual zsh configuration comes
