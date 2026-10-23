@@ -97,9 +97,6 @@ in {
     daemonIOSchedPriority = 7;
   };
 
-  system.autoUpgrade.enable = true;
-  system.autoUpgrade.dates = "03:30";
-
   security = {
     sudo = {
       enable = true;
@@ -136,8 +133,6 @@ in {
     };
   };
 
-  # https://github.com/NixOS/nixpkgs/issues/82462#issuecomment-604634627
-  systemd.services.iwd.serviceConfig.Restart = "always";
   systemd.network.networks."10-lan-static" = {
     matchConfig = {
       Type = "ether"; # Matches ANY physical wired ethernet interface
@@ -147,28 +142,11 @@ in {
       Gateway = "192.168.100.1";
     };
   };
-  hardware.enableRedistributableFirmware = true;
-  hardware.firmware = [pkgs.wireless-regdb];
-  boot = {
-    extraModprobeConfig = ''
-      options cf680211 ieee80211_regdom="DE"
-    '';
-  };
 
   networking = {
     hostName = "neptun";
     useNetworkd = true;
     # networking.firewall.allowedUDPPortRanges = [ { from = 60000; to = 61000; } ]; # for mosh
-    wireless = {
-      enable = false;
-      userControlled = true;
-      secretsFile = "/etc/nixos/secrets/wireless.env";
-      networks = {
-        "Pfefferoni" = {
-          psk = "@MY_WIFI_PASSWORD@";
-        };
-      };
-    };
   };
 
   i18n = {
