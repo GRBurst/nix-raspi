@@ -508,6 +508,23 @@ expect_exit "a21 relative paths: exits 0" 0
 expect_grep "a21 the flake is the absolute work clone" "^nix flake update .*--flake $W/repo/nixos " "$MOCK_LOG"
 expect_eq "a21 lock pushed" "$(git -C "$W/repo" rev-parse HEAD)" "$(ref_of auto-update)"
 
+# a22 one run at a time (N5): a manual run while the timer's run holds
+# $W/lock (they share the work clone) stops before touching anything.
+new_case a22
+mkdir -p "$W"
+exec 8>"$W/lock"
+flock 8
+run_cmd a22 -- au_std
+exec 8>&-
+expect_exit "a22 another run holds the lock -> AU_E_BUSY" 21
+expect_grepf "a22 says another run is active" "another rpi-autoupdate run" "$ERR"
+expect_eq "a22 nothing ran (no nix, git clone, ssh)" 0 "$(log_count .)"
+expect_true "a22 no work clone" test ! -e "$W/repo"
+untouched a22 none
+reset_log
+run_cmd a22 -- au_std
+expect_exit "a22 after the other run ends the lock is free" 0
+
 expect_eq "the host's nixos-rebuild is never used" "" "$(cat "$POISON_LOG")"
 
 summary

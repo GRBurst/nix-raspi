@@ -319,7 +319,7 @@
                         ./tests/fixtures
                       ];
                     };
-                    nativeBuildInputs = with x86Pkgs; [ git gnugrep gnused gawk findutils ];
+                    nativeBuildInputs = with x86Pkgs; [ git gnugrep gnused gawk findutils util-linux ];
                   } ''
                     RPI_AUTOUPDATE_SRC=$src/rpi-autoupdate.sh RPI_LIB=$src/rpi-lib.sh FIXTURES=$src/tests/fixtures \
                       ${x86Pkgs.bash}/bin/bash $src/tests/autoupdate-unit.sh
