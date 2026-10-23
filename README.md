@@ -164,8 +164,8 @@ back (`sudo head -c LEN DEVICE | sha256sum` against the image). It refuses:
 anything that is not a block device, a partition instead of a whole disk, a
 non-removable disk (an SD card in a built-in `mmcblkN` reader counts as
 removable, since Linux never sets the flag on MMC, but only if
-`/sys/block/mmcblkN/device/type` is `SD`: eMMC is refused), the disk that holds the host's `/`, a device with mounted
-partitions, and a missing or wrong confirmation: you must type the device name
+`/sys/block/mmcblkN/device/type` is `SD`: eMMC is refused), the disk that
+holds the host's `/`, a device with mounted partitions, and a missing or wrong confirmation: you must type the device name
 (`type the device name (sdX):`). Writing is the only privileged step (plus the
 read-back); the image is 1.3 GiB compressed, 4.2 GiB raw, ~4 min each way at
 20 MB/s.
@@ -274,9 +274,14 @@ Every Sunday 03:00 (`Persistent=true`, up to 30 min random delay) the host runs
 6. commit `flake.lock` (`auto-update: flake.lock <date>`, unsigned, identity
    `rpi-autoupdate`) and **force-push it to branch `auto-update`** of your repo.
 
-Every guard or build failure exits before the Pi is contacted; a failed run
-leaves the Pi on its previous generation and nothing is pushed. There is no
-automatic fallback after a bad kernel (section 5).
+Every guard or build failure exits before the Pi is contacted, and nothing is
+pushed unless the whole run succeeded. A failure *after* the Pi was contacted
+is different: if the log says `installing … as the boot default`, the
+`nixos-rebuild boot` may have succeeded before the run failed (sync or
+scheduling the reboot), so the Pi activates the new system at its next
+reboot although the lock was not pushed. Check with `rpi-deploy status`
+(`reboot pending: yes`) and either reboot it or deploy your checkout. There
+is no automatic fallback after a bad kernel (section 5).
 
 > **What the job deploys.** The job deploys **`main` + an updated lock**, not
 > your working branch. Anything you deployed manually from an unmerged branch
@@ -299,8 +304,8 @@ automatic fallback after a bad kernel (section 5).
    hostAddress = "192.168.100.115";   # the host's LAN address, as the Pi sees it
    ```
 
-   It lands in `root`'s authorized keys with `from="<hostAddress>"`, so the
-   key only works from the host. Commit it to `main`, then install it on the
+   It lands in `root`'s authorized keys as `from="<hostAddress>",restrict`,
+   so the key only works from the host (and without forwarding or a pty). Commit it to `main`, then install it on the
    Pi with a manual `rpi-deploy deploy switch` (or put it in before you build
    the first image). If the host's address changes, update `hostAddress` and
    deploy again.
@@ -356,7 +361,9 @@ NIX_SSHOPTS='-p 2222' nix run .#nixos-rebuild -- switch --rollback --no-reexec -
 
 **Unbootable new kernel or initrd.** There is no boot counting and no
 automatic fallback: U-Boot's extlinux simply boots the default entry. Two ways
-back to an older generation (the last five are kept, `configurationLimit = 5`):
+back to an older generation (the last five, younger than 21 days, are kept:
+`configurationLimit = 5`, weekly `nix.gc` deletes older generations; their
+extlinux entries stay until the next install but no longer boot):
 
 - *Serial console* (3.3 V USB-UART on GPIO 14/15 = pins 8/10, 115200 8N1; with
   `disable-bt` the PL011 UART is on the header): press a key in U-Boot's
