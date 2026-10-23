@@ -7,6 +7,9 @@
 # Checked by checks.x86_64-linux.eval-image.
 { config, lib, modulesPath, ... }: {
   imports = [ (modulesPath + "/installer/sd-card/sd-image.nix") ];
+  # nixpkgs sd-image.nix adds the `sd-card` tag; the pulled toplevel must be
+  # nixos-system-neptun-<version> (addendum §3.5, rpi-pull name regex).
+  system.nixos.tags = lib.mkForce [ ];
   # same mount options as the installed `rpi` system
   fileSystems."/boot/firmware".options = lib.mkForce [ "fmask=0077" "dmask=0077" ];
   sdImage = {

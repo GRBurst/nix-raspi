@@ -35,6 +35,14 @@ in
     lib.elem "fmask=0077" firmwareOpts && lib.elem "dmask=0077" firmwareOpts
     && !(lib.elem "noauto" firmwareOpts);
 
+  # P9: the pulled toplevel must be nixos-system-neptun-<version> (addendum
+  # §3.5); nixpkgs sd-image.nix would add the `sd-card` tag.
+  "no sd-card tag: toplevel is nixos-system-neptun-<version>" =
+    cfg.system.nixos.tags == [ ]
+    && cfg.system.nixos.label == cfg.system.nixos.version
+    && cfg.system.name == "neptun"
+    && builtins.match "nixos-system-neptun-[^/]*" "nixos-system-${cfg.system.name}-${cfg.system.nixos.label}" != null;
+
   "no separate rpi-image outputs" =
     !(nixosConfigurations ? rpi-image) && !(nixosConfigurations ? rpi-image-nvmd);
 }
