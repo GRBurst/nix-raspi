@@ -79,7 +79,87 @@ do_image() {
     echo "size:  $(du -h --apparent-size "${imgs[0]}" | cut -f1) (zstd)"
     echo "next:  rpi-deploy flash ${imgs[0]} /dev/sdX"
 }
-do_flash() { die "not implemented"; }
+# blk PROP DEV: one lsblk property of DEV itself (not its partitions), trimmed.
+blk() {
+    local v
+    v="$(lsblk -dno "$1" -- "$2" 2>/dev/null)" || v=""
+    v="${v#"${v%%[![:space:]]*}"}"
+    printf '%s\n' "${v%"${v##*[![:space:]]}"}"
+}
+
+# flash_check_device DEV: refuse anything but an unmounted, removable whole
+# disk that does not hold the host's /.
+flash_check_device() {
+    local dev="$1" name type rm root mounts
+    if [[ ! -b "$dev" ]] && ! [[ "${RPI_ALLOW_NONBLOCK:-0}" == 1 && -f "$dev" ]]; then
+        die_rc "$RL_E_DEVICE" "$dev is not a block device"
+    fi
+    name="$(basename "$dev")"
+    type="$(blk TYPE "$dev")"
+    [[ "$type" == disk ]] ||
+        die_rc "$RL_E_DEVICE" "$dev is a '${type:-unknown}', not a whole disk (give e.g. /dev/sdb, not /dev/sdb1)"
+    # MMC/SD block devices never carry the removable flag (linux
+    # drivers/mmc/core/block.c: the medium is removable, not the device), so
+    # a card in a built-in reader (mmcblkN, RM=0) counts as removable.
+    rm="$(blk RM "$dev")"
+    if [[ "$rm" != 1 && ! "$name" =~ ^mmcblk[0-9]+$ ]]; then
+        die_rc "$RL_E_DEVICE" "$dev is not removable (RM=${rm:-?}); refusing to overwrite it"
+    fi
+    root="$(findmnt -nro SOURCE --mountpoint / 2>/dev/null)" || root=""
+    root="${root%%\[*}" # btrfs subvolume suffix: /dev/sda2[/@]
+    if [[ -n "$root" ]] && lsblk -nlso NAME -- "$root" 2>/dev/null | grep -qxF -- "$name"; then
+        die_rc "$RL_E_DEVICE" "$dev holds the host's / ($root); refusing"
+    fi
+    mounts="$(lsblk -nlo MOUNTPOINTS -- "$dev" 2>/dev/null | grep -v '^[[:space:]]*$' | tr '\n' ' ')" || mounts=""
+    [[ -z "$mounts" ]] ||
+        die_rc "$RL_E_DEVICE" "$dev has mounted partitions (${mounts% }); unmount them first"
+}
+
+# flash_confirm DEV [AS_GIVEN]: show the device and read the typed name.
+flash_confirm() {
+    local dev="$1" given="${2:-$1}" name answer model
+    name="$(basename "$dev")"
+    model="$(blk MODEL "$dev")"
+    echo "device: $dev"
+    echo "model:  ${model:-unknown}"
+    echo "size:   $(blk SIZE "$dev")"
+    echo "ALL DATA ON $dev WILL BE LOST."
+    printf 'To write the image, type the device name (%s): ' "$name"
+    IFS= read -r answer || answer=""
+    echo
+    [[ -n "$answer" && ( "$answer" == "$name" || "$answer" == "$dev" || "$answer" == "$given" ) ]] ||
+        die_rc "$RL_E_DEVICE" "confirmation '$answer' does not match '$name'; nothing written"
+}
+
+# flash_write IMG DEV: the only privileged write.
+flash_write() {
+    zstdcat "$1" | sudo dd of="$2" bs=4M conv=fsync oflag=direct status=progress iflag=fullblock
+}
+
+# flash_verify IMG DEV: read back the written length, compare sha256.
+flash_verify() {
+    local img="$1" dev="$2" len want got
+    len="$(zstdcat "$img" | wc -c)"
+    want="$(zstdcat "$img" | sha256sum | cut -d' ' -f1)"
+    got="$(sudo head -c "$len" "$dev" | sha256sum | cut -d' ' -f1)"
+    [[ "$want" == "$got" ]] ||
+        die_rc "$RL_E_VERIFY" "verify failed: the first $len bytes of $dev differ from the image (sha256 $got, want $want)"
+    echo "verified: $len bytes, sha256 $want"
+}
+
+# flash IMAGE DEVICE
+do_flash() {
+    local img="$1" dev
+    [[ -f "$img" ]] || usage_error "flash: no such image file: $img"
+    dev="$(readlink -f -- "$2")" || dev="$2"
+    flash_check_device "$dev"
+    flash_confirm "$dev" "$2"
+    log "writing $img to $dev (sudo dd)"
+    flash_write "$img" "$dev" || die "writing $dev failed"
+    log "reading $dev back (sudo)"
+    flash_verify "$img" "$dev"
+    echo "done: the card can be removed"
+}
 do_deploy() { die "not implemented"; }
 do_status() { die "not implemented"; }
 

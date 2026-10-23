@@ -279,4 +279,147 @@ expect_grep "i4 out-link in --out DIR, --flake/--attr honoured" \
     "^nix build .*--out-link $T/imgout/result-rpi-image .*/other#nixosConfigurations\.neptun\.config\.system\.build\.sdImage" "$MOCK_LOG"
 expect_grepf "i4 prints the image under --out" "$T/imgout/result-rpi-image/sd-image/neptun-rpi3.img.zst" "$OUT"
 
+# =============================================================================
+# T5.6 flash (devices are regular files under $T; lsblk/findmnt/sudo/dd mocked)
+# =============================================================================
+REAL_DD="$(PATH="${PATH#"$BIN:"}" command -v dd)"
+export REAL_DD MOCK_ROOT="$T"
+
+# lsblk: one property per call (-dno PROP DEV), the mount points of DEV and
+# its partitions (-nlo MOUNTPOINTS), and the inverse chain of the root
+# source (-nlso NAME SRC: SRC's name, then $MOCK_PKNAME).
+mock lsblk <<'EOF'
+dev="${!#}"
+case " $* " in
+*" -nlso NAME "*) printf '%s\n%s\n' "$(basename "$dev")" "${MOCK_PKNAME:-nvme0n1}" ;;
+*" MOUNTPOINTS "*) printf '\n%s\n\n' "${MOCK_MOUNTS:-}" ;;
+*" RM "*) echo "  ${MOCK_RM-1}" ;;
+*" TYPE "*) echo "${MOCK_TYPE-disk}" ;;
+*" MODEL "*) echo "${MOCK_MODEL-Generic STORAGE DEVICE}   " ;;
+*" SIZE "*) echo " ${MOCK_SIZE-29.7G}" ;;
+*) echo "lsblk mock: unexpected call: $*" >&2; exit 1 ;;
+esac
+EOF
+
+mock findmnt <<'EOF'
+echo "${MOCK_ROOTSRC-/dev/nvme0n1p2}"
+EOF
+
+mock sudo <<'EOF'
+exec "$@"
+EOF
+
+# dd: never writes outside the test dir; drops oflag=direct (no O_DIRECT on
+# tmpfs); MOCK_DD_CORRUPT=1 flips one byte after writing.
+mock dd <<'EOF'
+args=() of=""
+for a in "$@"; do
+    case "$a" in
+    oflag=direct) continue ;;
+    of=*) of="${a#of=}" ;;
+    esac
+    args+=("$a")
+done
+case "$of" in
+"$MOCK_ROOT"/*) ;;
+*) echo "dd mock: refusing to write outside the test dir: '$of'" >&2; exit 99 ;;
+esac
+"$REAL_DD" "${args[@]}" || exit
+if [[ "${MOCK_DD_CORRUPT:-}" == 1 ]]; then
+    printf 'X' | "$REAL_DD" of="$of" bs=1 seek=100 conv=notrunc status=none
+fi
+EOF
+
+IMG="$T/neptun-rpi3.img.zst"
+printf 'NIXIMG%.0s' {1..1000} | zstd -q >"$IMG"
+mkdir -p "$T/dev"
+DEV="$T/dev/sdz"
+new_dev() { head -c 65536 /dev/zero >"$DEV"; }
+dev_sum() { sha256sum <"$DEV" | cut -d' ' -f1; }
+new_dev
+ZERO_SUM="$(dev_sum)"
+export RPI_ALLOW_NONBLOCK=1
+
+refused() {  # NAME: exit RL_E_DEVICE, nothing written, no sudo
+    expect_exit "$1 -> RL_E_DEVICE" 16
+    expect_eq "$1: device unchanged" "$ZERO_SUM" "$(dev_sum)"
+    expect_eq "$1: no sudo" 0 "$(log_count '^sudo ')"
+}
+
+reset_log; new_dev
+MOCK_RM=0 run_cmd f1 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f1 flash refuses non-removable disk"
+expect_grepf "f1 says not removable" "not removable" "$ERR"
+
+reset_log; new_dev
+MOCK_MOUNTS=/run/media/x run_cmd f2 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f2 flash refuses a disk with a mounted partition"
+expect_grepf "f2 names the mount point" "/run/media/x" "$ERR"
+
+reset_log; new_dev
+MOCK_ROOTSRC=/dev/sdz2 MOCK_PKNAME=sdz run_cmd f3 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f3 flash refuses the disk holding /"
+expect_grepf "f3 names the root source" "/dev/sdz2" "$ERR"
+
+reset_log; new_dev
+RPI_ALLOW_NONBLOCK=0 run_cmd f4 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f4 flash refuses a non-block device"
+expect_grepf "f4 says not a block device" "not a block device" "$ERR"
+
+reset_log; new_dev
+MOCK_TYPE=part run_cmd f12 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f12 flash refuses a partition"
+
+reset_log; new_dev
+run_cmd f5 -- rd flash "$IMG" "$DEV" <<<"sdx"
+refused "f5 confirmation typo"
+expect_eq "f5 confirmation typo: no dd" 0 "$(log_count '^dd ')"
+reset_log; new_dev
+run_cmd f5 -- rd flash "$IMG" "$DEV"
+refused "f5 no confirmation (EOF)"
+
+reset_log; new_dev
+run_cmd f6 -- rd flash "$IMG" "$DEV" <<<"sdz"
+expect_exit "f6 flash succeeds" 0
+expect_grepf "f6 shows the model" "Generic STORAGE DEVICE" "$OUT"
+expect_grepf "f6 shows the size" "29.7G" "$OUT"
+expect_grepf "f6 asks to type the device name" "type the device name" "$OUT"
+for flag in bs=4M conv=fsync oflag=direct status=progress "of=$DEV"; do
+    expect_grep "f6 dd has $flag" "^dd (.* )?$flag( |$)" "$MOCK_LOG"
+done
+expect_grep "f6 dd runs under sudo" "^sudo dd " "$MOCK_LOG"
+expect_grepf "f7 verified" "verified" "$OUT"
+expect_true "f7 the device starts with the image" \
+    cmp -s -n "$(zstdcat "$IMG" | wc -c)" <(zstdcat "$IMG") "$DEV"
+expect_eq "f10 sudo only for the write and the read-back" 2 "$(log_count '^sudo ')"
+expect_eq "f10 sudo dd once" 1 "$(log_count '^sudo dd ')"
+expect_eq "f10 sudo read-back once" 1 "$(log_count "^sudo head -c [0-9]+ $DEV\$")"
+
+reset_log; new_dev
+MOCK_DD_CORRUPT=1 run_cmd f8 -- rd flash "$IMG" "$DEV" <<<"sdz"
+expect_exit "f8 corrupt write -> RL_E_VERIFY" 17
+expect_grepf "f8 says verify failed" "verify failed" "$ERR"
+
+reset_log
+run_cmd f9 -- rd flash "$T/missing.img.zst" "$DEV" <<<"sdz"
+expect_exit "f9 missing IMAGE -> exit 2" 2
+expect_eq "f9 no device query" 0 "$(log_count '^(lsblk|sudo|dd) ')"
+
+reset_log; new_dev
+run_cmd f13 -- rd flash "$IMG" "$DEV" <<<"$DEV"
+expect_exit "f13 typing the full device path also confirms" 0
+
+# MMC/SD block devices never carry the kernel's removable flag (see
+# flash_check_device), so a card in a built-in reader is mmcblkN with RM=0.
+reset_log
+MMC="$T/dev/mmcblk0"
+head -c 65536 /dev/zero >"$MMC"
+MOCK_RM=0 run_cmd f11 -- rd flash "$IMG" "$MMC" <<<"mmcblk0"
+expect_exit "f11 an SD card in a built-in reader (mmcblk0, RM=0) is accepted" 0
+expect_grepf "f11 verified" "verified" "$OUT"
+reset_log
+MOCK_RM=0 MOCK_ROOTSRC=/dev/mmcblk0p2 MOCK_PKNAME=mmcblk0 run_cmd f11 -- rd flash "$IMG" "$MMC" <<<"mmcblk0"
+expect_exit "f11 an mmcblk holding / is still refused" 16
+unset RPI_ALLOW_NONBLOCK
+
 summary
