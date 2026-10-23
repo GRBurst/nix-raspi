@@ -97,7 +97,7 @@ done
 [[ -n "$REPO" && -n "$WORK" ]] || usage_die "--repo and --work-dir are required"
 [[ "$PORT" =~ ^[0-9]+$ ]] || usage_die "--port must be a number"
 [[ "$MAX" =~ ^[1-9][0-9]*$ ]] || usage_die "--max-builds must be a positive number"
-[[ "$REBOOT_TIME" =~ ^[0-2][0-9]:[0-5][0-9]$ ]] || usage_die "--reboot-time must be HH:MM"
+[[ "$REBOOT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || usage_die "--reboot-time must be HH:MM (00:00-23:59)"
 if ((!NO_DEPLOY)); then
     [[ -n "$KEY" ]] || usage_die "--ssh-key is required unless --no-deploy"
     [[ -r "$KEY" ]] || usage_die "ssh key not readable: $KEY"
