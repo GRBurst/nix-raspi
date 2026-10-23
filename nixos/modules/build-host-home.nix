@@ -2,8 +2,10 @@
 #
 # Use this when the build host is not NixOS-managed (or when you only want
 # the script). On a NixOS host prefer `./build-host.nix`, which also enables
-# aarch64 emulation. On non-NixOS hosts you must set up qemu/binfmt manually
-# (e.g. `binfmt-support` on Debian/Ubuntu), otherwise cross builds fail.
+# aarch64 emulation and offers the weekly auto-update timer
+# (rpi.buildHost.autoUpdate; a system service, so not available here). On
+# non-NixOS hosts you must set up qemu/binfmt manually (e.g.
+# `binfmt-support` on Debian/Ubuntu), otherwise aarch64 builds fail.
 #
 # Import via the flake output (preferred — provides the rpi-deploy script):
 #
@@ -52,8 +54,8 @@ in
       example = "/home/alice/projects/pi/nixos";
       description = ''
         If set, the installed `rpi-deploy` wrapper pre-sets `RPI_FLAKE` to
-        this path, so `rpi-deploy build` / `rpi-deploy install` work without
-        `--flake`.
+        this path, so `rpi-deploy image` / `rpi-deploy deploy` work without
+        `--flake` from any directory.
       '';
     };
 
