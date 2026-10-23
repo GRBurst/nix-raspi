@@ -80,7 +80,7 @@
           wrapProgram $out/bin/$tool \
             --set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh \
             --suffix PATH : ${lib.makeBinPath (with pkgs; [
-              util-linux coreutils zstd gnugrep gnused gawk git openssh
+              util-linux coreutils zstd gnugrep gnused gawk git openssh jq
             ])}
         done
       '';
@@ -294,7 +294,7 @@
                         ./tests/fixtures
                       ];
                     };
-                    nativeBuildInputs = with x86Pkgs; [ git zstd gnugrep gnused gawk ];
+                    nativeBuildInputs = with x86Pkgs; [ git zstd gnugrep gnused gawk jq ];
                   } ''
                     RPI_DEPLOY_SRC=$src/rpi-deploy.sh RPI_LIB=$src/rpi-lib.sh FIXTURES=$src/tests/fixtures \
                       ${x86Pkgs.bash}/bin/bash $src/tests/deploy-unit.sh

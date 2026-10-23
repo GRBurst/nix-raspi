@@ -208,10 +208,15 @@ A deploy takes a few minutes: measured in qemu (TCG, ~5x slower than a Pi 3)
 137 s (every switch rewrites all firmware files), extlinux 6 s, activation
 56 s. Expect clearly less on the real Pi [?].
 
-**Downgrade protection.** If branch `auto-update` has commits that your
-checked-out `HEAD` lacks, `deploy` refuses with `would downgrade` (the weekly
-job already pushed newer pins). Merge it (`git merge auto-update`) or override
-with `--force`.
+**Downgrade protection.** If the `flake.lock` on branch `auto-update` pins a
+newer `nixpkgs` or `nixos-raspberrypi` (its `locked.lastModified`) than the
+`flake.lock` in your working tree, `deploy` refuses with `would downgrade`
+(the weekly job already deployed newer pins). It compares lock content, not
+commits: after a squash-merge, cherry-pick or your own `nix flake update` the
+lock is current and `deploy` proceeds, even though `auto-update` still has a
+commit `HEAD` lacks. If a lock cannot be read it refuses too (`cannot
+compare`). Merge the branch (`git merge auto-update`) or override with
+`--force`.
 
 **`status`** prints:
 
@@ -334,9 +339,10 @@ git merge auto-update         # or cherry-pick / fast-forward main
 ```
 
 The branch is force-pushed every run (`main` + one lock commit), so it is
-rewritten whenever you have not merged it. If you squash-merge it, the next
-run simply starts again from `main`. `rpi-deploy deploy` refuses to deploy a
-`HEAD` that lacks `auto-update` commits (see section 3).
+rewritten whenever you have not merged it. If you squash-merge or cherry-pick
+it, the next run simply starts again from `main`. `rpi-deploy deploy` refuses
+to deploy a working tree whose `flake.lock` pins an older `nixpkgs` or
+`nixos-raspberrypi` than `auto-update`'s (see section 3).
 
 ## 5. Recovery and rollback
 
