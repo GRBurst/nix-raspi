@@ -591,10 +591,11 @@ write_lock "$FL/flake.lock" 100 200
 git -C "$REPO" init -q -b main
 git -C "$REPO" add -A
 git -C "$REPO" commit -qm init
-# set_auto_update_raw TEXT: branch auto-update = main + one commit whose
-# nixos/flake.lock is TEXT ('' = the commit deletes it); main is untouched
-set_auto_update_raw() {
-    local idx="$T/au-index" blob tree c
+git -C "$REPO" remote add origin "$T/origin.git" # never fetched: the URL need not exist
+# set_ref_lock REF TEXT: REF = main + one commit whose nixos/flake.lock is
+# TEXT ('' = the commit deletes it); main is untouched
+set_ref_lock() {
+    local ref="$1" idx="$T/om-index" blob tree c; shift
     rm -f "$idx"
     GIT_INDEX_FILE="$idx" git -C "$REPO" read-tree main
     if [[ -n "$1" ]]; then
@@ -604,11 +605,12 @@ set_auto_update_raw() {
         GIT_INDEX_FILE="$idx" git -C "$REPO" update-index --force-remove nixos/flake.lock
     fi
     tree="$(GIT_INDEX_FILE="$idx" git -C "$REPO" write-tree)"
-    c="$(git -C "$REPO" commit-tree -p main -m "auto-update: lock" "$tree")"
-    git -C "$REPO" branch -f auto-update "$c"
+    c="$(git -C "$REPO" commit-tree -p main -m "ci: lock" "$tree")"
+    git -C "$REPO" update-ref "$ref" "$c"
 }
-# set_auto_update NIXPKGS RPI [OTHER]: the weekly job pushed this lock
-set_auto_update() { set_auto_update_raw "$(lock_json "$@")"; }
+# set_origin_main NIXPKGS RPI [OTHER]: CI committed this lock to origin/main
+set_origin_main_raw() { set_ref_lock refs/remotes/origin/main "$1"; }
+set_origin_main() { set_origin_main_raw "$(lock_json "$@")"; }
 
 dep() { RPI_NIXOS_REBUILD="$BIN/nr-mock" rd deploy --flake "$FL" "$@"; }
 no_poison() { expect_eq "$1: d8 host nixos-rebuild never used" 0 "$(log_count POISON)"; }
@@ -660,19 +662,20 @@ MOCK_DRY="$HYB" run_cmd d5 -- dep --max-builds 100
 expect_exit "d5 --max-builds honoured -> RL_E_TOO_MANY" 12
 
 reset_log
-set_auto_update 150 200
+set_origin_main 150 200
 run_cmd d6 -- dep
-expect_exit "d6 auto-update locks a newer nixpkgs -> RL_E_DOWNGRADE" 15
+expect_exit "d6 origin/main locks a newer nixpkgs -> RL_E_DOWNGRADE" 15
 expect_grepf "d6 says would downgrade" "would downgrade" "$ERR"
 expect_grepf "d6 names the newer input" "nixpkgs" "$ERR"
+expect_grepf "d6 tells the user to git pull" "git pull" "$ERR"
 expect_eq "d6 no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
 expect_eq "d6 checked before the guards" 0 "$(log_count '^nix ')"
 no_poison d6
 
 reset_log
-set_auto_update 100 300
+set_origin_main 100 300
 run_cmd d6 -- dep
-expect_exit "d6 auto-update locks a newer nixos-raspberrypi -> RL_E_DOWNGRADE" 15
+expect_exit "d6 origin/main locks a newer nixos-raspberrypi -> RL_E_DOWNGRADE" 15
 expect_grepf "d6 names nixos-raspberrypi" "nixos-raspberrypi" "$ERR"
 expect_eq "d6 (rpi) no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
 
@@ -680,35 +683,35 @@ reset_log
 run_cmd d7 -- dep --force
 expect_exit "d7 --force deploys anyway" 0
 expect_eq "d7 --force -> nixos-rebuild ran" 1 "$(log_count '^nr-mock switch ')"
-expect_grepf "d7 still warns" "auto-update" "$ERR"
+expect_grepf "d7 still warns" "origin/main" "$ERR"
 no_poison d7
 
 reset_log
-git -C "$REPO" branch -f auto-update main
+git -C "$REPO" update-ref refs/remotes/origin/main main
 run_cmd d11 -- dep
-expect_exit "d11 auto-update merged into HEAD -> deploys" 0
+expect_exit "d11 origin/main merged into HEAD -> deploys" 0
 
-# S4: squash/cherry-pick: auto-update keeps a commit HEAD lacks, but the
+# S4: squash/cherry-pick: origin/main keeps a commit HEAD lacks, but the
 # checkout already locks the same revisions -> no refusal
 reset_log
-set_auto_update 150 300
+set_origin_main 150 300
 commit_lock 150 300
 run_cmd d11 -- dep
 expect_exit "d11 squash-merged (same lock, commit not in HEAD) -> deploys" 0
 expect_eq "d11 squash -> nixos-rebuild ran" 1 "$(log_count '^nr-mock switch ')"
-expect_not_grep "d11 squash -> no downgrade warning" "auto-update" "$ERR"
+expect_not_grep "d11 squash -> no downgrade warning" "origin/main" "$ERR"
 
 # the user ran `nix flake update` on main: the checkout is newer
 reset_log
-set_auto_update 150 300
+set_origin_main 150 300
 commit_lock 160 400
 run_cmd d11 -- dep
-expect_exit "d11 checkout lock newer than auto-update's -> deploys" 0
+expect_exit "d11 checkout lock newer than origin/main's -> deploys" 0
 
 # an uncommitted lock update counts (the working tree is what is deployed)
 reset_log
 commit_lock 100 200
-set_auto_update 150 300
+set_origin_main 150 300
 write_lock "$FL/flake.lock" 150 300
 run_cmd d11 -- dep
 expect_exit "d11 uncommitted newer lock in the working tree -> deploys" 0
@@ -717,15 +720,15 @@ git -C "$REPO" checkout -q -- .
 # only the root inputs nixpkgs and nixos-raspberrypi count (the real lock
 # maps nixpkgs to a node like nixpkgs_4; other nodes may be newer)
 reset_log
-set_auto_update 100 200 999
+set_origin_main 100 200 999
 run_cmd d11 -- dep
 expect_exit "d11 only other lock nodes newer -> deploys" 0
 
 # fail closed: an unreadable lock cannot be compared
 reset_log
-set_auto_update_raw 'not json'
+set_origin_main_raw 'not json'
 run_cmd d16 -- dep
-expect_exit "d16 auto-update lock unparsable -> RL_E_DOWNGRADE" 15
+expect_exit "d16 origin/main lock unparsable -> RL_E_DOWNGRADE" 15
 expect_grepf "d16 says it cannot compare" "cannot compare" "$ERR"
 expect_eq "d16 no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
 reset_log
@@ -733,18 +736,42 @@ run_cmd d16 -- dep --force
 expect_exit "d16 --force deploys anyway" 0
 
 reset_log
-set_auto_update 150 300
+set_origin_main 150 300
 rm "$FL/flake.lock"
 run_cmd d16 -- dep
 expect_exit "d16 no flake.lock in the checkout -> RL_E_DOWNGRADE" 15
 git -C "$REPO" checkout -q -- .
 
-# auto-update has no lock for this flake (another flake dir): nothing to compare
+# origin/main has no lock for this flake (another flake dir): nothing to compare
 reset_log
-set_auto_update_raw ''
+set_origin_main_raw ''
 run_cmd d17 -- dep
-expect_exit "d17 auto-update without this flake's lock -> deploys" 0
-git -C "$REPO" branch -f auto-update main
+expect_exit "d17 origin/main without this flake's lock -> deploys" 0
+git -C "$REPO" update-ref refs/remotes/origin/main main
+
+# d18 no origin remote (a leftover ref is not consulted): deploys
+reset_log
+git -C "$REPO" remote remove origin
+set_origin_main 150 300
+run_cmd d18 -- dep
+expect_exit "d18 no origin remote -> no downgrade check, deploys" 0
+expect_eq "d18 nixos-rebuild ran" 1 "$(log_count '^nr-mock switch ')"
+
+# d19 origin remote without refs/remotes/origin/main: nothing to compare
+git -C "$REPO" remote add origin "$T/origin.git"
+git -C "$REPO" update-ref -d refs/remotes/origin/main
+reset_log
+run_cmd d19 -- dep
+expect_exit "d19 origin without origin/main -> deploys" 0
+
+# d20 a local branch auto-update (newer lock) is no longer consulted
+git -C "$REPO" update-ref refs/remotes/origin/main main
+set_ref_lock refs/heads/auto-update "$(lock_json 150 300)"
+reset_log
+run_cmd d20 -- dep
+expect_exit "d20 local branch auto-update ignored -> deploys" 0
+git -C "$REPO" update-ref -d refs/heads/auto-update
+
 
 reset_log
 NOGIT="$T/nogit"
