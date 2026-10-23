@@ -9,73 +9,24 @@ in {
   # Bootloader: provided by nixos-raspberrypi (nvmd), pulled in through
   # `nixosModules.raspberry-pi-3.base` in flake.nix. For the Pi 3 it is U-Boot
   # (default): the firmware partition (/boot/firmware: Pi firmware, config.txt,
-  # u-boot-rpi-arm64.bin, DTBs) is populated by the bootloader installer at
-  # nixos-install / switch time; kernel, initrd and extlinux.conf live in
-  # /boot on the root filesystem. GRUB / generic-extlinux are not enabled here.
+  # u-boot-rpi-arm64.bin, DTBs) is populated by the image build
+  # (modules/sd-image.nix) and by the bootloader installer on every switch;
+  # kernel, initrd and extlinux.conf live in /boot on the root filesystem.
+  # No GRUB; nvmd enables generic-extlinux-compatible for extlinux.conf.
+  # File systems (labels NIXOS_SD / NIXOS_BOOT) come from modules/sd-image.nix,
+  # an optional USB data disk from modules/external-storage.nix.
   # config.txt is generated from `hardware.raspberry-pi.config`, e.g.:
   #   hardware.raspberry-pi.config.all.dt-params.audio = { enable = true; value = "on"; };
-
-  # !!! Needed for the virtual console to work on the RPi 3, as the default of 16M doesn't seem to be enough.
-  # If X.org behaves weirdly (I only saw the cursor) then try increasing this to 256M.
-  boot.kernelParams = ["cma=32M"];
 
   boot.kernel.sysctl = {
     "fs.inotify.max_user_watches" = "409600";
   };
 
-  # boot.kernelPackages = pkgs.linuxPackages_latest;
-  # boot.kernelPackages = pkgs.linuxPackages_4_14;  # fix wifi regression?
-  # File systems configuration for using the installer's partition layout
-  fileSystems = {
-    "/" = {
-      device = "/dev/disk/by-label/NIXOS_SD";
-      fsType = "ext4";
-    };
-    # FAT firmware partition (label kept from the previous layout, so existing
-    # cards need no re-partitioning). `rpi-deploy prepare` creates/mounts it at
-    # <target>/boot/firmware during install.
-    "/boot/firmware" = {
-      device = "/dev/disk/by-label/NIXOS_BOOT";
-      fsType = "vfat";
-      options = ["fmask=0077" "dmask=0077"];
-    };
+  # Kernel: nvmd's linuxPackages_rpi3 (cached in nixos-raspberrypi.cachix.org).
+  # Do not override boot.kernelPackages (checks.x86_64-linux.eval-kernel).
 
-    # "/external" = {
-    #   device = "/dev/disk/by-uuid/e118cff8-0b67-4a3e-956e-d5a98744654e";
-    #   fsType = "ext4";
-    #   neededForBoot = true;
-    # };
-    # "/nix" = {
-    #   device = "/external/nix";
-    #   fsType = "none";
-    #   options = ["bind"];
-    # };
-    # "/var" = {
-    #   device = "/external/var";
-    #   fsType = "none";
-    #   options = ["bind"];
-    # };
-    # "/tmp" = {
-    #   device = "/external/tmp";
-    #   fsType = "none";
-    #   options = ["bind"];
-    # };
-    # "/home" = {
-    #   device = "/external/home";
-    #   fsType = "none";
-    #   options = ["bind"];
-    # };
-  };
-
-  # swapDevices = [
-  #   {
-  #     device = "/external/swap";
-  #     size = 10240;
-  #   }
-  # ];
-
-  # Compressed in-RAM swap (512 MiB on the 1 GiB RPi 3). Gives autoUpgrade
-  # builds and the nix daemon headroom without any SD-card writes.
+  # Compressed in-RAM swap (512 MiB on the 1 GiB RPi 3). Gives the nix
+  # daemon (receiving deploys) and dev tooling headroom without SD writes.
   # Remove this block if you prefer no swap at all.
   zramSwap = {
     enable = true;
@@ -134,17 +85,7 @@ in {
       # gatewayPorts = "clientspecified"; # bind ssh reverse tunnel to public interface https://superuser.com/a/591963
     };
     # sshd.usePAM = false;
-
-    journald = {
-      # nixos-26.05 (the nixpkgs pinned by nixos-raspberrypi) has no
-      # journald.settings yet; that arrives in 26.11.
-      storage = "volatile";
-      extraConfig = ''
-        Compress=yes
-        SystemMaxUse=128M
-        RuntimeMaxUse=8M
-      '';
-    };
+    # journald (volatile, size limits): modules/sd-wear.nix (rpi.sdWear)
   };
 
   systemd.network.networks."10-lan-static" = {
