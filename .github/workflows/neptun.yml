@@ -1,0 +1,74 @@
+name: neptun
+on:
+  schedule:
+    - cron: "17 0 * * 0"            # Sun 00:17 UTC: lock update + build
+  push:
+    branches: [main]
+    paths: ["nixos/**", "!nixos/deploy/**"]
+  workflow_dispatch:
+    inputs:
+      update-lock:
+        description: "Update flake.lock (nixpkgs, nixos-raspberrypi) before building"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: neptun
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    defaults:
+      run:
+        working-directory: nixos
+    steps:
+      # Always build main, whatever ref triggered the run.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://nixos-raspberrypi.cachix.org
+            extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+      - id: cache
+        run: ci/cache-name.sh >> "$GITHUB_OUTPUT"
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ steps.cache.outputs.name }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          signingKey: ${{ secrets.CACHIX_SIGNING_KEY }}
+          skipPush: true
+      - id: build
+        env:
+          UPDATE_LOCK: ${{ inputs.update-lock }}
+        run: |
+          set -- --event "$GITHUB_EVENT_NAME"
+          if [ "$UPDATE_LOCK" = true ]; then set -- "$@" --update-lock; fi
+          ci/build.sh "$@" >> "$GITHUB_OUTPUT"
+      - name: push closure and pin
+        env:
+          CACHE: ${{ steps.cache.outputs.name }}
+          TOP: ${{ steps.build.outputs.top }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_SIGNING_KEY: ${{ secrets.CACHIX_SIGNING_KEY }}
+        run: ci/publish.sh "$CACHE" "$TOP"
+      # Only a run on main may move the pointer.
+      - id: pointer
+        if: github.ref == 'refs/heads/main'
+        env:
+          TOP: ${{ steps.build.outputs.top }}
+          SEQ: ${{ github.run_number }}
+        run: |
+          git fetch origin +refs/heads/main:refs/remotes/origin/main >&2
+          ci/pointer.sh --seq "$SEQ" --rev "$(git rev-parse HEAD)" --file deploy/neptun.json "$TOP" >> "$GITHUB_OUTPUT"
+      - name: commit lock and pointer
+        if: github.ref == 'refs/heads/main'
+        env:
+          SEQ: ${{ github.run_number }}
+        run: |
+          ci/commit-push.sh --message "neptun: build $SEQ ($GITHUB_EVENT_NAME)" flake.lock deploy/neptun.json

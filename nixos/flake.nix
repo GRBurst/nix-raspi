@@ -355,6 +355,19 @@
                       host.fail("rpi-deploy install")
                     '';
                   };
+                  # actionlint (+ shellcheck on run: blocks) on the CI workflow, and the
+                  # order invariant: the pointer is written only after push + pin.
+                  actionlint = x86Pkgs.runCommand "actionlint-check" {
+                    src = lib.fileset.toSource { root = ../.; fileset = ../.github/workflows; };
+                    nativeBuildInputs = [ x86Pkgs.actionlint x86Pkgs.shellcheck ];
+                  } ''
+                    cd $src
+                    actionlint -no-color .github/workflows/neptun.yml
+                    l() { grep -n -m1 -F -- "$1" .github/workflows/neptun.yml | cut -d: -f1; }
+                    [ "$(l ci/publish.sh)" -lt "$(l ci/pointer.sh)" ] && [ "$(l ci/pointer.sh)" -lt "$(l ci/commit-push.sh)" ] \
+                      || { echo "FAIL: pointer is written after push + pin"; exit 1; }
+                    touch $out
+                  '';
                 }
                 // unitChecks
                 # Eval-level checks: one check `eval-<name>` per
