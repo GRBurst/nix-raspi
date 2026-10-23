@@ -52,8 +52,7 @@
     pkgsFor = system: nixpkgs.legacyPackages.${system};
     forSystem = systems: lib.genAttrs systems;
 
-    # The host tool (image/flash/deploy/status) and the weekly job
-    # (rpi-autoupdate, run by rpi.buildHost.autoUpdate) as a package: pure
+    # The host tool (image/flash/deploy/status) as a package: pure
     # shell, so it is usable on any build host. Explicit mkDerivation: the
     # writeShellScript* helpers' store-path shape varies between nixpkgs
     # versions, but $out/bin/<name> is what environment.systemPackages
@@ -73,16 +72,13 @@
       installPhase = ''
         mkdir -p $out/bin $out/libexec/rpi-deploy
         cp ${./rpi-deploy.sh} $out/bin/rpi-deploy
-        cp ${./rpi-autoupdate.sh} $out/bin/rpi-autoupdate
         cp ${./rpi-lib.sh} $out/libexec/rpi-deploy/rpi-lib.sh
-        for tool in rpi-deploy rpi-autoupdate; do
-          chmod 755 $out/bin/$tool
-          wrapProgram $out/bin/$tool \
-            --set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh \
-            --suffix PATH : ${lib.makeBinPath (with pkgs; [
-              util-linux coreutils zstd gnugrep gnused gawk git openssh jq
-            ])}
-        done
+        chmod 755 $out/bin/rpi-deploy
+        wrapProgram $out/bin/rpi-deploy \
+          --set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh \
+          --suffix PATH : ${lib.makeBinPath (with pkgs; [
+            util-linux coreutils zstd gnugrep gnused gawk git openssh jq
+          ])}
       '';
       meta.mainProgram = "rpi-deploy";
     };
@@ -256,15 +252,15 @@
               rpi-deploy-syntax = (pkgsFor system).runCommand "rpi-deploy-syntax-check" {
                 src = lib.fileset.toSource {
                   root = ./.;
-                  fileset = lib.fileset.unions [ ./rpi-deploy.sh ./rpi-autoupdate.sh ./rpi-lib.sh ];
+                  fileset = lib.fileset.unions [ ./rpi-deploy.sh ./rpi-lib.sh ];
                 };
                 nativeBuildInputs = [ (pkgsFor system).shellcheck ];
               } ''
                 cd $src
-                for f in rpi-deploy.sh rpi-autoupdate.sh rpi-lib.sh; do
+                for f in rpi-deploy.sh rpi-lib.sh; do
                   ${(pkgsFor system).bash}/bin/bash -n $f
                 done
-                shellcheck -x -S warning rpi-deploy.sh rpi-autoupdate.sh rpi-lib.sh
+                shellcheck -x -S warning rpi-deploy.sh rpi-lib.sh
                 touch $out
               '';
             }))
@@ -301,31 +297,6 @@
                     touch $out
                   '';
 
-                  # Unit tests for rpi-autoupdate.sh (the weekly job): the
-                  # real script + lib against mocked nix/ssh/timeout/
-                  # nixos-rebuild and real git on throwaway repositories
-                  # (lock flow, cache fallback, guards, boot -> switch or
-                  # scheduled reboot, push to auto-update, the user's
-                  # checkout left alone). No network, no real Pi.
-                  autoupdate-unit = x86Pkgs.runCommand "autoupdate-unit-check" {
-                    src = lib.fileset.toSource {
-                      root = ./.;
-                      fileset = lib.fileset.unions [
-                        ./rpi-autoupdate.sh
-                        ./rpi-lib.sh
-                        ./tests/harness.sh
-                        ./tests/make-sys.sh
-                        ./tests/autoupdate-unit.sh
-                        ./tests/fixtures
-                      ];
-                    };
-                    nativeBuildInputs = with x86Pkgs; [ git gnugrep gnused gawk findutils util-linux ];
-                  } ''
-                    RPI_AUTOUPDATE_SRC=$src/rpi-autoupdate.sh RPI_LIB=$src/rpi-lib.sh FIXTURES=$src/tests/fixtures \
-                      ${x86Pkgs.bash}/bin/bash $src/tests/autoupdate-unit.sh
-                    touch $out
-                  '';
-
                   # Boots the build-host test system in a VM and verifies
                   # the module end-to-end: binfmt registration, nix aarch64
                   # support, the rpi-deploy wrapper, and that a real
@@ -346,15 +317,6 @@
                       rpi.buildHost.enable = true;
                       # exercises the RPI_FLAKE wrapper (mirrors live-host use)
                       rpi.buildHost.flakePath = "/tmp/rpi-nixos";
-                      # the weekly auto-update units are wired (never run:
-                      # the VM has no repo, key or Pi)
-                      users.users.alice.isNormalUser = true;
-                      rpi.buildHost.autoUpdate = {
-                        enable = true;
-                        user = "alice";
-                        repoPath = "/tmp/repo";
-                        sshKey = "/tmp/key";
-                      };
                       environment.systemPackages = [ aarch64Pkgs.hello x86Pkgs.git ];
                     };
                     testScript = ''
@@ -380,12 +342,6 @@
                       # the installed tool is the image/flash/deploy/status CLI
                       host.succeed("rpi-deploy --help | grep -q 'flash IMAGE DEVICE'")
                       host.fail("rpi-deploy install")
-                      # auto-update: weekly timer, CLI on PATH, work dir
-                      host.succeed("systemctl cat rpi-autoupdate.timer | grep -q 'OnCalendar=Sun 03:00'")
-                      host.succeed("rpi-autoupdate --help")
-                      host.succeed("test -d /var/lib/rpi-autoupdate")
-                      host.succeed("test \"$(stat -c %U /var/lib/rpi-autoupdate)\" = alice")
-                      host.wait_for_unit("rpi-autoupdate.timer")
                     '';
                   };
                 }

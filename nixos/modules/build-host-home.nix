@@ -2,8 +2,7 @@
 #
 # Use this when the build host is not NixOS-managed (or when you only want
 # the script). On a NixOS host prefer `./build-host.nix`, which also enables
-# aarch64 emulation and offers the weekly auto-update timer
-# (rpi.buildHost.autoUpdate; a system service, so not available here). On
+# aarch64 emulation (a system service, so not available here). On
 # non-NixOS hosts you must set up qemu/binfmt manually (e.g.
 # `binfmt-support` on Debian/Ubuntu), otherwise aarch64 builds fail.
 #

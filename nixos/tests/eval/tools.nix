@@ -27,8 +27,8 @@ in
   "rpi-deploy wrapper points RPI_LIB at the packaged lib" =
     lib.hasInfix "--set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh" install;
 
-  # check_downgrade reads flake.lock with jq (review S4); rpi-autoupdate
-  # takes its lock with flock (util-linux)
+  # check_downgrade reads flake.lock with jq (review S4); flash needs
+  # lsblk/findmnt (util-linux)
   "rpi-deploy wrapper PATH has jq and util-linux" =
     lib.hasInfix (binDir x86.jq) install
     && lib.hasInfix (binDir x86.util-linux) install;

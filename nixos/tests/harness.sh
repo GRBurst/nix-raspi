@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 #
-# Tiny test harness for the bash unit tests (tests/deploy-unit.sh,
-# tests/autoupdate-unit.sh). Source it; it has no arguments.
+# Tiny test harness for the bash unit tests (tests/deploy-unit.sh and any
+# other tests/<n>-unit.sh). Source it; it has no arguments.
 #
 # Provides:
 #   $T          temp dir (removed on exit)       $BIN  mock dir, first in PATH
