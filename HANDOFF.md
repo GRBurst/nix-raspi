@@ -53,13 +53,9 @@ details in `nixos/.scratch/m7/REPORT.md`.
 
 Findings during acceptance (not fixed, outside M7's files):
 
-- `rl_nixos_rebuild` (rpi-lib.sh, M5) does not pass `--accept-flake-config`:
-  nixos-rebuild's own `nix build` then asks about (or, in a sandbox with a
-  read-only `~/.local/share/nix`, fails on) the flake's `nixConfig`. `deploy-smoke.sh`
-  works around it with `NIX_CONFIG='accept-flake-config = true'`. On the real
-  host the nvmd cache is in `nix.conf` (`rpi.buildHost`), so only the prompt remains;
-  adding `--accept-flake-config` to the nixos-rebuild argv would make the tool
-  consistent with its guards.
+- (fixed in 522440b) `rl_nixos_rebuild` now passes
+  `NIX_CONFIG='accept-flake-config = true'` to nixos-rebuild, so its inner
+  `nix build` accepts the flake's `nixConfig` without a prompt (unit test d1).
 - qemu's sdhost model reads synchronously: a stalled host shows up as `PIO read
   timeout` / `EXT4-fs error` in the guest (seen once in 7 runs of
   deploy-smoke while other heavy jobs ran on the host). `deploy-smoke.sh` prints a note
@@ -118,6 +114,22 @@ Findings during acceptance (not fixed, outside M7's files):
 5. **Review flags**: `wheelNeedsPassword = false` for `pi`; `hardware.enableAllHardware`
    kept for parity with the E3-tested image (initrd carries every module);
    closure/size numbers in the acceptance table.
+6. **Open points from the final review** (.scratch/review, documented, not
+   fixed):
+   - *Release bump (26.05 → 26.11)*: the pinned deploy tool is the flake's
+     release, so the first deploy after the bump runs the 26.11 nixos-rebuild
+     against the Pi's 26.05 systemd (the E3 failure: `systemd-run
+     --output=cat`). Re-check the pinned tool then; for that one deploy set
+     `RPI_NIXOS_REBUILD` to the 26.05 tool.
+   - *External storage* (`rpi.externalStorage`, systemd initrd + bind from
+     `/sysroot/external`) was never test-booted: try it in qemu with a second
+     disk before relying on it.
+   - *Root for agents*: passwordless sudo for `pi` (`wheelNeedsPassword =
+     false`) plus nix-terminal `aiSkills.enable` (home.nix) means agents
+     running as `pi` on the Pi have root. Accepted (spec §10); revisit if
+     agents run unattended there.
+   - deploy-smoke (qemu) was not re-run after the boot-fingerprint change
+     (S1/S2); it exercises the remote fingerprint and `status` on a real guest.
 
 ## 5. Hardware acceptance checklist (AC6, manual, ~1 h)
 
