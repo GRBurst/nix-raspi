@@ -134,10 +134,13 @@ External disk (`modules/external-storage.nix`, disabled by default)
   comparing a hash.
 - `deploy [switch|boot|test] [--target root@neptun]`: runs the flake's
   pinned `nixos-rebuild` (flake app `nixos-rebuild`, from our nixpkgs) with
-  `--no-reexec --flake .#rpi --target-host`. Warns and refuses if branch
-  `auto-update` has commits not in HEAD (would downgrade), unless `--force`.
-- `status`: current/booted generation on the Pi, and whether a reboot is
-  pending (booted kernel ≠ current kernel).
+  `--no-reexec --flake .#rpi --target-host`, then `sync` on the Pi (the
+  vfat NIXOS_BOOT is rewritten; switch-to-configuration only syncs the
+  store). Warns and refuses if branch `auto-update` has commits not in HEAD
+  (would downgrade), unless `--force`.
+- `status`: current/booted/boot-default generation on the Pi, and whether a
+  reboot is pending: the boot default is not running, or its boot
+  fingerprint differs from the booted system's (see §3.4 step 6).
 - Removed: `prepare`, `install`, `config`, `eject`, build records,
   `--from`, F-flag handler, chroot checks.
 
@@ -173,9 +176,17 @@ Run (systemd oneshot, `Persistent=true`, `RandomizedDelaySec=30m`):
    gcc/llvm/rustc/ghc/nodejs build and at most `maxBuilds` derivations.
 4. Build toplevel (timeout 4 h); GC-root it.
 5. If equal to the Pi's `/run/current-system` → commit lock, stop.
-6. `nixos-rebuild boot --store-path NEW --target-host` (pinned tool).
-7. If kernel/initrd/kernel-modules equal the booted ones →
-   `nixos-rebuild switch --store-path NEW`; else `shutdown -r <rebootTime>`.
+6. Decide before deploying (the bootloader is installed once per run):
+   compare the boot fingerprint of NEW with the Pi's `/run/booted-system`:
+   kernel, initrd, kernel-modules, dtbs, kernel-params, and the NIXOS_BOOT
+   (FAT) inputs -- the store paths nvmd's bootloader installer
+   (`INSTALL_BOOTLOADER` of the toplevel: uboot-builder.sh ->
+   firmware-builder.sh) copies: firmware package, generated config.txt,
+   u-boot. Unparsable installer → treated as different.
+7. Equal → `nixos-rebuild switch --store-path NEW --target-host`, `sync`.
+   Different → `nixos-rebuild boot --store-path NEW --target-host`, `sync`,
+   `shutdown -r <rebootTime>` (firmware/U-Boot/config.txt are not
+   generational: breakage shows right after the update). Pinned tool.
 8. Commit + push lock to `auto-update`. Failures are logged to the journal;
    a failed run leaves the Pi on its previous generation.
 
@@ -184,12 +195,16 @@ The same guards (2–3) are used by `rpi-deploy image` and `deploy`.
 ## 4. Error handling
 
 - Every guard failure exits non-zero before touching the Pi.
-- `boot` before `switch`: an interrupted copy/activation never changes the
-  running system; the bootloader entry only changes after the closure is
-  complete.
+- `switch` and `boot` copy the whole closure before touching the profile or
+  the bootloader: an interrupted copy never changes the running system.
+  (`boot` before `switch` was dropped: it installed the bootloader twice.)
 - Unbootable kernel after reboot: no automatic fallback (U-Boot extlinux has
   no boot counting). Recovery: pick an older entry via serial console or
   edit `extlinux.conf` DEFAULT on the SD from the host. Accepted (best-effort).
+- Broken firmware/U-Boot/config.txt (NIXOS_BOOT is not generational,
+  extlinux cannot roll it back): restore the FAT partition from the host --
+  write only partition 1 of a known-good image, or mount it and rerun the
+  populate command of a good toplevel (README §5).
 - Rollback of userspace: `nixos-rebuild switch --rollback --target-host`.
 
 ## 5. Testing

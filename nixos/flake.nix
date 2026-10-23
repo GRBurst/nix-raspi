@@ -289,6 +289,7 @@
                         ./rpi-deploy.sh
                         ./rpi-lib.sh
                         ./tests/harness.sh
+                        ./tests/make-sys.sh
                         ./tests/deploy-unit.sh
                         ./tests/fixtures
                       ];
@@ -313,6 +314,7 @@
                         ./rpi-autoupdate.sh
                         ./rpi-lib.sh
                         ./tests/harness.sh
+                        ./tests/make-sys.sh
                         ./tests/autoupdate-unit.sh
                         ./tests/fixtures
                       ];

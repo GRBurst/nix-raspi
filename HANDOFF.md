@@ -140,10 +140,9 @@ Needs the Pi, a card ≥ 8 GiB, the LAN cable, ideally a 3.3 V USB-UART on GPIO
 - [ ] `rpi-deploy deploy boot` with a boot-affecting change (e.g.
       `boot.kernelParams = [ "rpi_marker=1" ]`), then `ssh -p 2222 root@neptun reboot`.
       After the reboot `cat /proc/cmdline` contains `rpi_marker=1` (U-Boot read
-      the new extlinux entry: the part qemu cannot show) and `rpi-deploy status`
-      says `reboot pending: no`. (`status` compares the *running* system with
-      the *booted* one, so it only shows `yes` after a `switch` that changed
-      kernel/initrd/modules, not after `boot`.)
+      the new extlinux entry: the part qemu cannot show). Before the reboot
+      `rpi-deploy status` says `reboot pending: yes (the boot default is not the
+      running system; changed since boot: kernel-params)`, after it `no`.
 - [ ] Reboot-pending detection (optional): `rpi-deploy deploy switch` with an
       initrd change (e.g. `boot.initrd.supportedFilesystems = [ "btrfs" ]`) →
       `status` says `reboot pending: yes`; after a reboot → `no`.
@@ -160,8 +159,9 @@ Needs the Pi, a card ≥ 8 GiB, the LAN cable, ideally a 3.3 V USB-UART on GPIO
       `git log -1 auto-update`.
 - [ ] External disk (only when you want it): README section 6.
 
-Recovery if the new kernel does not boot: README section 5 (serial menu or
-`DEFAULT` edit in `/boot/extlinux/extlinux.conf` from the host).
+Recovery if the new kernel or firmware does not boot: README section 5 (serial menu,
+`DEFAULT` edit in `/boot/extlinux/extlinux.conf` from the host, or restoring
+NIXOS_BOOT from the host).
 
 ## 6. Environment and sandbox gotchas
 

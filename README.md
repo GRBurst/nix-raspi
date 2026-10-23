@@ -195,8 +195,13 @@ on the Pi (it passes a `systemd-run` flag the Pi's systemd lacks; E3).
 | action   | effect |
 |----------|--------|
 | `switch` (default) | build, copy, make it the boot default and activate now; prints `status` afterwards |
-| `boot`   | make it the boot default, activate at the next reboot (use for kernel changes) |
+| `boot`   | make it the boot default, activate at the next reboot (use for kernel or firmware changes; `status` then shows `reboot pending: yes`) |
 | `test`   | activate now, boot default unchanged (gone after a reboot) |
+
+After every deploy (also a failed one) the Pi runs `sync`: switch and boot
+rewrite the vfat `NIXOS_BOOT` partition, and `switch-to-configuration` only
+flushes the store's filesystem. A power cut before the flush can corrupt the
+firmware files (section 5).
 
 A deploy takes a few minutes: measured in qemu (TCG, ~5x slower than a Pi 3)
 276 s = guards 23 s, local build + copy 43 s, firmware copy to the FAT partition
@@ -211,13 +216,23 @@ with `--force`.
 **`status`** prints:
 
 ```
-current: /nix/store/…-nixos-system-neptun-…
-booted: /nix/store/…-nixos-system-neptun-…
+current: /nix/store/…-nixos-system-neptun-…     # running now
+booted: /nix/store/…-nixos-system-neptun-…      # running since the last boot
+default: /nix/store/…-nixos-system-neptun-…     # what the next boot starts
 reboot pending: no
 ```
 
-`reboot pending: yes` means the running kernel, initrd or kernel modules differ
-from the current generation's (a kernel change needs a reboot).
+`reboot pending: yes (…)` means a reboot would change the running system, for
+one or both reasons:
+
+- `the boot default is not the running system`: after `deploy boot` (or
+  `test`);
+- `changed since boot: kernel, fat, …`: a boot-critical part of the boot
+  default differs from the booted system's (after a `switch` to a new kernel or
+  firmware). The parts (the *boot fingerprint*, `rl_fp_*` in `rpi-lib.sh`):
+  `kernel`, `initrd`, `kernel-modules`, `dtbs`, `kernel-params`, and `fat` --
+  the inputs of the `NIXOS_BOOT` partition (Pi firmware package, generated
+  `config.txt`, U-Boot), read from the toplevel's bootloader installer.
 
 Exit codes (all subcommands): 2 usage, 10 kernel not cached, 11 forbidden local
 build, 12 too many local builds, 13 build/eval failed, 14 deploy failed,
@@ -243,8 +258,13 @@ Every Sunday 03:00 (`Persistent=true`, up to 30 min random delay) the host runs
 3. build guard (no kernel/toolchain build, at most `maxBuilds`), build the
    toplevel (4 h limit), GC-rooted in `workDir`;
 4. equal to what the Pi runs → nothing to deploy;
-5. `nixos-rebuild boot` to the Pi, then: kernel/initrd/modules unchanged →
-   `switch`; changed → `shutdown -r 04:30` on the Pi;
+5. compare the boot fingerprint of the new system with the Pi's booted one
+   (section 3, `status`): equal → `nixos-rebuild switch`, `sync`; different
+   (kernel, initrd, modules, device trees, kernel parameters, firmware,
+   `config.txt` or U-Boot) → `nixos-rebuild boot`, `sync`, `shutdown -r 04:30`
+   on the Pi. Decided before deploying, so the bootloader is installed once;
+   the reboot right after the update makes firmware breakage show up then, not
+   at some later power cut;
 6. commit `flake.lock` (`auto-update: flake.lock <date>`, unsigned, identity
    `rpi-autoupdate`) and **force-push it to branch `auto-update`** of your repo.
 
@@ -351,6 +371,37 @@ back to an older generation (the last five are kept, `configurationLimit = 5`):
 
 Both recoveries rely on U-Boot's extlinux handling and are not exercised on hardware yet
 (the labels are as generated in the qemu-tested image; HANDOFF lists the check).
+
+**Broken firmware, `config.txt` or U-Boot** (nothing on the screen/serial,
+no U-Boot prompt). The `NIXOS_BOOT` partition is *not* generational: every
+switch/boot rewrites it from the new system, and the extlinux menu cannot roll
+it back. Restore it from the host, from a known-good commit (e.g. the one
+before the update: `git checkout <good>`), with the card in the host (`sdX` =
+the card). Either rerun the bootloader installer of the good system for the
+FAT only (needs the host's aarch64 binfmt, section 1):
+
+```sh
+TOP=$(nix build --accept-flake-config --no-link --print-out-paths \
+  ./nixos#nixosConfigurations.rpi.config.system.build.toplevel)
+INSTALL=$(sed -n "s/^export INSTALL_BOOTLOADER='\([^ ]*\) .*/\1/p" "$TOP/bin/switch-to-configuration")
+sudo mount /dev/disk/by-label/NIXOS_BOOT /mnt
+sudo "$INSTALL" -f /mnt -c "$TOP"     # firmware, config.txt, U-Boot; no -b: /boot untouched
+sync; sudo umount /mnt
+```
+
+or re-flash only partition 1 from an image of the good commit (same layout,
+so p1 has the same size; p2 with the system and its state stays):
+
+```sh
+rpi-deploy image --out ~/rpi-images
+zstd -d ~/rpi-images/result-rpi-image/sd-image/neptun-rpi3.img.zst -o /tmp/good.img
+LOOP=$(sudo losetup -P -r -f --show /tmp/good.img)
+sudo dd if="${LOOP}p1" of=/dev/sdX1 bs=4M conv=fsync
+sudo losetup -d "$LOOP"
+```
+
+The next deploy writes the firmware of whatever it deploys again; deploy the
+good commit (or fix the cause) before the next weekly run.
 
 **Dead card or re-flash**: section 7. State on the Pi is disposable by design.
 
