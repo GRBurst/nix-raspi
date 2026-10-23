@@ -15,18 +15,17 @@
   };
 
   inputs = {
-    nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi/main";
-
-    # CRITICAL: use exactly the nixpkgs that nixos-raspberrypi pins (and
-    # builds its cache from). Any other revision changes the kernel
-    # derivation hash -> cache miss -> local kernel build.
-    nixpkgs.follows = "nixos-raspberrypi/nixpkgs";
+    # "Hybrid" inputs (checked by checks.x86_64-linux.eval-kernel):
+    # kernel + firmware come from nvmd's own nixpkgs pin (cached in its
+    # cachix), userspace from our nixpkgs. Never add a follows either way;
+    # out-of-tree kernel modules only from config.boot.kernelPackages.
+    nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi/develop";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
     home-manager = {
       # master, not release-26.05: nix-terminal needs HM options that only
-      # exist on master (programs.devenv). Master against the older nixpkgs of
-      # nixos-raspberrypi works; the release-mismatch warning is silenced in
-      # home.nix.
+      # exist on master (programs.devenv). Master against our nixos-26.05
+      # nixpkgs works; the release-mismatch warning is silenced in home.nix.
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
@@ -160,11 +159,23 @@
               # (nixosSystemFull would apply RPi overlays globally = more
               # rebuilds; not needed for this headless system.)
               rpi = nixos-raspberrypi.lib.nixosSystem {
+                # HYBRID: userspace from our nixpkgs; kernel/firmware stay
+                # nvmd's packages (its own pin), see inputs.
+                inherit nixpkgs;
                 specialArgs = { inherit inputs; };
                 modules = [
                   # Raspberry Pi 3 base: U-Boot, firmware, config.txt,
                   # vendor kernel (linuxPackages_rpi3)
                   nixos-raspberrypi.nixosModules.raspberry-pi-3.base
+
+                  # The SD image is a build output of this very system
+                  # (config.system.build.sdImage), see modules/sd-image.nix.
+                  ./modules/sd-image.nix
+                  # Pi modules (rpi.sdWear, rpi.headless: on by default;
+                  # rpi.storage.external: off by default)
+                  ./modules/sd-wear.nix
+                  ./modules/headless.nix
+                  ./modules/external-storage.nix
 
                   ./configuration.nix
 
@@ -187,59 +198,6 @@
               # /etc/nixos` (and autoUpgrade) default to `#<hostname>`. Same
               # derivation as `rpi`, so the installed system does not change.
               neptun = self.nixosConfigurations.rpi;
-
-              # EXPERIMENT (see HANDOFF.md, "Decision record"): the same system
-              # as an SD image, built with nixos-raspberrypi's sd-image module.
-              # The bootloader/firmware are populated inside the image build
-              # (nix sandbox) - no nixos-install, no chroot, no binfmt-in-chroot.
-              #   nix build .#nixosConfigurations.rpi-image.config.system.build.sdImage
-              #
-              # Variant A (`rpi-image-nvmd`): upstream's sd-image module as is.
-              # It imports nixpkgs' profiles/base.nix (rescue tools, zfs/btrfs/
-              # cryptsetup...), i.e. a heavier system than `rpi`. Kept only to
-              # measure that difference.
-              rpi-image-nvmd = self.nixosConfigurations.rpi.extendModules {
-                modules = [
-                  nixos-raspberrypi.nixosModules.sd-image
-                  {
-                    sdImage = {
-                      firmwarePartitionName = "NIXOS_BOOT";
-                      firmwareSize = nixpkgs.lib.mkForce 256;
-                    };
-                  }
-                ];
-              };
-
-              # Variant B (`rpi-image`): only nixpkgs' generic sd-image.nix plus
-              # the same populate commands upstream uses, so the image system
-              # is our system (no base profile).
-              rpi-image = self.nixosConfigurations.rpi.extendModules {
-                modules = [
-                  ({ config, lib, modulesPath, ... }: {
-                    imports = [ (modulesPath + "/installer/sd-card/sd-image.nix") ];
-                    # same mount options as the installed `rpi` system
-                    fileSystems."/boot/firmware".options = lib.mkForce [ "fmask=0077" "dmask=0077" ];
-                    sdImage = {
-                      # keep our labels (configuration.nix mounts by label)
-                      firmwarePartitionName = "NIXOS_BOOT";
-                      # U-Boot: the FAT partition holds only firmware, config.txt,
-                      # u-boot (kernels live on the ext4 root), see README.
-                      firmwareSize = 256;
-                      firmwarePartitionID = "0x2175794e";
-                      compressImage = true;
-                      expandOnBoot = true;
-                      populateFirmwareCommands = ''
-                        ${config.boot.loader.raspberry-pi.firmwarePopulateCmd} -c ${config.system.build.toplevel} -f ./firmware
-                      '';
-                      populateRootCommands = ''
-                        mkdir -p ./files/boot/firmware
-                        ${config.boot.loader.raspberry-pi.bootPopulateCmd} -c ${config.system.build.toplevel} -b ./files/boot
-                      '';
-                    };
-                    image.baseName = "neptun-rpi3";
-                  })
-                ];
-              };
 
               # x86_64 test configuration for the build-host module:
               #   nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel
@@ -285,7 +243,10 @@
                   ":rpi-deploy-aarch64:M:${toString r.offset}:${r.magicOrExtension}:${toString r.mask}:${r.interpreter}:${flags}";
             });
 
-            checks = forSystem [ "aarch64-linux" "x86_64-linux" ] (system: {
+            # recursiveUpdate, not `//`: the x86_64-only checks below must be
+            # merged into checks.x86_64-linux, not replace it (a shallow `//`
+            # dropped rpi-deploy-syntax there).
+            checks = lib.recursiveUpdate (forSystem [ "aarch64-linux" "x86_64-linux" ] (system: {
               # bash syntax check of the wrapper script.
               # Note: the script must come in as `src`, not
               # `nativeBuildInputs` — stdenv *sources* every regular file in
@@ -298,8 +259,8 @@
                 ${(pkgsFor system).bash}/bin/bash -n $src
                 touch $out
               '';
-            })
-            // (
+            }))
+            (
               # x86_64-only checks (the build host is x86_64).
               let
                 x86Pkgs = pkgsFor "x86_64-linux";
@@ -368,6 +329,22 @@
                       host.succeed("rpi-deploy build --dry-run --flake /tmp/fake-flake")
                       host.succeed("rpi-deploy show --flake /tmp/fake-flake | grep -q 'no build record'")
                     '';
+                  };
+                }
+                # Eval-level checks: one check `eval-<name>` per
+                # tests/eval/<name>.nix (auto-discovered, see
+                # tests/eval/default.nix for the file contract).
+                // import ./tests/eval {
+                  inherit lib;
+                  pkgs = x86Pkgs;
+                  args = {
+                    inherit lib nixpkgs hostTestSystem;
+                    rpi = self.nixosConfigurations.rpi;
+                    nvmd = nixos-raspberrypi;
+                    nixosConfigurations = self.nixosConfigurations;
+                    packages = self.packages;
+                    apps = self.apps or { };
+                    flakeLock = lib.importJSON ./flake.lock;
                   };
                 };
               }
