@@ -84,6 +84,17 @@ esac
 exit 0
 EOF
 
+# nix-store --query --hash: a fixed base32 narHash (MOCK_NSQ_RC fails it).
+export NAR32=sha256:1b8m03r63zqhnjf7l5wnldhh7c134ap5vpj0850ymkq1iyzicy5s
+mock nix-store <<'EOF'
+case " $* " in
+*" --query --hash "*)
+    if [[ -n "${MOCK_NSQ_RC:-}" ]]; then echo "error: path is not valid" >&2; exit "$MOCK_NSQ_RC"; fi
+    echo "$NAR32" ;;
+esac
+exit 0
+EOF
+
 # cachix: push/pin print on stdout (the scripts must keep it off theirs);
 # MOCK_PUSH_RC / MOCK_PIN_RC fail them.
 mock cachix <<'EOF'
@@ -249,5 +260,125 @@ expect_exit "u4 missing TOP -> usage" 2
 expect_eq "u4 nothing pushed" 0 "$(log_count '^cachix')"
 run_cmd u4h -- bash "$CI_DIR/publish.sh" --help
 expect_exit "u4 --help" 0
+
+# =============================================================================
+# T7.3 ci/pointer.sh
+# =============================================================================
+SRI=sha256-MOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOC=
+TOP2=/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-neptun-26.05.20261028.0123456
+clone p
+PF="$T/p/nixos/deploy/neptun.json"
+pointer() { bash "$CI_DIR/pointer.sh" "$@"; }
+# put_pointer FILE SEQ PATH: an existing pointer as CI would have written it
+put_pointer() {
+    mkdir -p "$(dirname "$1")"
+    jq -n --argjson seq "$2" --arg p "$3" \
+        '{seq: $seq, storePath: $p, narHash: "sha256-x", rev: "r", built: "b"}' >"$1"
+}
+
+reset_log
+run_cmd w1 -- pointer --seq 7 --rev abc123 --file "$PF" "$TOP"
+expect_exit "w1 new pointer" 0
+expect_eq "w1 stdout is changed=true" "changed=true" "$(cat "$OUT")"
+expect_eq "w1 keys are exactly seq storePath narHash rev built" \
+    '["built","narHash","rev","seq","storePath"]' "$(jq -c 'keys' "$PF" 2>&1)"
+expect_eq "w1 seq is the number N" "number 7" "$(jq -r '"\(.seq|type) \(.seq)"' "$PF" 2>&1)"
+expect_eq "w1 storePath is TOP" "$TOP" "$(jq -r .storePath "$PF" 2>&1)"
+expect_eq "w1 rev is --rev" "abc123" "$(jq -r .rev "$PF" 2>&1)"
+expect_grep "w1 built is an ISO UTC time" '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$' \
+    <(jq -r .built "$PF" 2>&1)
+# w5
+expect_eq "w5 narHash = sri(nix-store --query --hash TOP)" "$SRI" "$(jq -r .narHash "$PF" 2>&1)"
+expect_eq "w5 queries the narHash of TOP" 1 "$(log_count "^nix-store --query --hash $TOP\$")"
+expect_eq "w5 converts that hash to SRI" 1 "$(log_count "^nix hash convert .*--to sri .*$NAR32\$")"
+expect_eq "w1 no temp file left behind" "neptun.json" "$(ls -A "$(dirname "$PF")")"
+
+cp "$PF" "$T/w1.json"
+run_cmd w2 -- pointer --seq 8 --rev def456 --file "$PF" "$TOP"
+expect_exit "w2 same TOP again" 0
+expect_eq "w2 stdout is changed=false" "changed=false" "$(cat "$OUT")"
+expect_true "w2 file bytes unchanged" cmp -s "$T/w1.json" "$PF"
+run_cmd w2b -- pointer --seq 7 --rev abc123 --file "$PF" "$TOP"
+expect_eq "w2 same TOP and seq -> changed=false" "changed=false" "$(cat "$OUT")"
+expect_true "w2 same TOP and seq -> bytes unchanged" cmp -s "$T/w1.json" "$PF"
+
+put_pointer "$PF" 9 "$TOP"
+cp "$PF" "$T/w3.json"
+for s in 9 3; do
+    run_cmd "w3-$s" -- pointer --seq "$s" --rev x --file "$PF" "$TOP2"
+    expect_exit "w3 non-increasing seq refused (existing 9, new path, --seq $s)" 1
+    expect_grepf "w3 --seq $s: says why" "not newer" "$ERR"
+    expect_true "w3 --seq $s: file unchanged" cmp -s "$T/w3.json" "$PF"
+    expect_eq "w3 --seq $s: stdout empty" "" "$(cat "$OUT")"
+done
+run_cmd w3ok -- pointer --seq 10 --rev x --file "$PF" "$TOP2"
+expect_eq "w3 --seq 10 > 9 -> changed=true" "changed=true" "$(cat "$OUT")"
+expect_eq "w3 --seq 10 -> storePath is the new path" "$TOP2" "$(jq -r .storePath "$PF")"
+
+cp "$PF" "$T/w4.json"
+for bad in /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-mars-1 /tmp/x \
+    /nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-nixos-system-neptun-1 \
+    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-1 x" \
+    /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-1/bin; do
+    run_cmd w4 -- pointer --seq 20 --rev x --file "$PF" "$bad"
+    expect_exit "w4 TOP '$bad' refused" 1
+    expect_true "w4 TOP '$bad': file unchanged" cmp -s "$T/w4.json" "$PF"
+done
+for bad in 0 -1 1.0 1e3 01 abc 12345678901 ''; do
+    run_cmd w4s -- pointer --seq "$bad" --rev x --file "$PF" "$TOP"
+    expect_exit "w4 --seq '$bad' refused" 1
+done
+expect_true "w4 bad seqs: file unchanged" cmp -s "$T/w4.json" "$PF"
+MARS=/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-mars-1
+run_cmd w4h -- pointer --host mars --seq 1 --rev x --file "$T/mars/p.json" "$MARS"
+expect_eq "w4 --host mars accepts a mars toplevel" "changed=true" "$(cat "$OUT")"
+run_cmd w4i -- pointer --host 'nep.*' --seq 1 --rev x --file "$T/mars/q.json" "$TOP"
+expect_exit "w4 --host must be a plain name" 1
+
+reset_log
+MOCK_NSQ_RC=1 run_cmd w5f -- pointer --seq 30 --rev x --file "$T/w5f/p.json" "$TOP"
+expect_true "w5 narHash query failure -> non-zero" test "$RC" -ne 0
+expect_true "w5 narHash query failure -> no file" test ! -e "$T/w5f/p.json"
+
+printf 'not json\n' >"$T/w9.json"
+run_cmd w9 -- pointer --seq 30 --rev x --file "$T/w9.json" "$TOP"
+expect_exit "w9 an existing invalid pointer is not overwritten" 1
+expect_eq "w9 file unchanged" "not json" "$(cat "$T/w9.json")"
+
+# w6 (A4): the pointer on origin/main counts too (a stale checkout or a re-run
+# of an older run must not move the pointer backwards).
+clone o
+put_pointer "$T/o/nixos/deploy/neptun.json" 12 "$TOP"
+git -C "$T/o" add -A && git -C "$T/o" commit -q -m "pointer 12" && git -C "$T/o" push -q origin main
+clone q
+QF="$T/q/nixos/deploy/neptun.json"
+put_pointer "$QF" 5 "$TOP"
+git -C "$T/q" fetch -q origin
+cp "$QF" "$T/w6.json"
+run_cmd w6 -- pointer --seq 10 --rev x --file "$QF" "$TOP2"
+expect_exit "w6 origin/main has seq 12 -> --seq 10 refused" 1
+expect_grepf "w6 names origin/main" "origin/main" "$ERR"
+expect_true "w6 file unchanged" cmp -s "$T/w6.json" "$QF"
+run_cmd w6ok -- pointer --seq 13 --rev x --file "$QF" "$TOP2"
+expect_eq "w6 --seq 13 > 12 -> changed=true" "changed=true" "$(cat "$OUT")"
+expect_eq "w6 --seq 13 written" 13 "$(jq -r .seq "$QF")"
+cp "$QF" "$T/w6c.json"
+run_cmd w6c -- pointer --seq 14 --rev x --file "$QF" "$TOP"
+expect_eq "w6 origin/main already points at TOP -> changed=false" "changed=false" "$(cat "$OUT")"
+expect_true "w6 origin/main already points at TOP -> file unchanged" cmp -s "$T/w6c.json" "$QF"
+
+# w8: outside a git repo (pull-smoke writes its pointer into a web root).
+run_cmd w8 -- pointer --seq 1 --rev smoke --file "$T/www/neptun.json" "$TOP"
+expect_exit "w8 no git repo -> written" 0
+expect_eq "w8 stdout" "changed=true" "$(cat "$OUT")"
+
+run_cmd w10 -- pointer --seq 1 --file "$T/w10.json" "$TOP"
+expect_exit "w10 missing --rev -> usage" 2
+run_cmd w10b -- pointer --seq 1 --rev x "$TOP"
+expect_exit "w10 missing --file -> usage" 2
+run_cmd w10c -- pointer --seq 1 --rev x --file "$T/w10.json"
+expect_exit "w10 missing TOP -> usage" 2
+run_cmd w10h -- pointer --help
+expect_exit "w10 --help" 0
 
 summary
