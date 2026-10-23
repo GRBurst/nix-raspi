@@ -7,3 +7,4 @@ result-*
 .rpi-build.log
 .rpi-build/
 .scratch/
+.worktrees/

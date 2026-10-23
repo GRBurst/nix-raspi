@@ -775,3 +775,54 @@ Script (sources `qemu-pi.sh`; `WORK=${RPI_SMOKE_DIR:-$PWD/.scratch/pull-smoke}`,
 11. **Q11 Action pins.** Tags `@v7`/`@v31`/`@v17` (checkout v7 per s8) rather than commit SHAs (nvmd pins SHAs). Default: tags.
 12. **Q12 Timing.** CI Sun 01:00 UTC vs Pi Sun 05:00 local + ≤ 30 min: a CI run over ~3 h is applied a week later. Acceptable? Default: yes (documented).
 13. **Q13 Spec file state.** The addendum has uncommitted edits in the working tree (§3.5 downgrade wording); this plan follows the working-tree text. The orchestrator should commit the spec.
+
+## 17. Review amendments (binding; override earlier sections where they conflict)
+
+Source: plan review `nixos/.scratch/ci/plan-review.md` (experiments E1–E11). §16 defaults stand except where changed here. Q13 is resolved (spec committed).
+
+**Remote.** `origin` = `git@github.com:GRBurst/nix-raspi.git`. Production pointer URL: `https://raw.githubusercontent.com/GRBurst/nix-raspi/main/nixos/deploy/neptun.json` (M6 sets it in `configuration.nix`; null-safe defaults stay). Agents never push or fetch.
+
+- **A1 (S1, M8 pull-smoke).**
+  - Serve via `busybox httpd -f -p 127.0.0.1:PORT -h www`; busybox is resolved from the pinned nixpkgs (`nix build --no-link --print-out-paths --inputs-from . nixpkgs#busybox`). python3 is not on PATH.
+  - Primary cache fill: `nix copy --to "file://$WORK/www/cache?secret-key=cache.sec&compression=none" NEXT` (full closure); EVIL is a second copy into the same dir with `secret-key=evil.sec`. Drop `--no-recursive`.
+  - `smoke-next` also changes the unit (`systemd.services.rpi-pull.environment.SMOKE = "next"`), so `restartIfChanged=false` is exercised.
+- **A2 (S2, M5).**
+  - Seq = `.seq|tostring` must match `^[1-9][0-9]{0,9}$`, else exit 31.
+  - A non-numeric `$STATE/seq` is an error (31), not 0.
+  - Unit cases: `1.0`, `1e3`, `99999999999999999999`.
+- **A3 (S3, M7).**
+  - Workflow pointer + commit steps have `if: github.ref == 'refs/heads/main'`.
+  - `commit-push.sh` refuses unless `GITHUB_REF` is `refs/heads/main` (unit test).
+- **A4 (S4, M7).**
+  - `actions/checkout` with `ref: main` for all triggers.
+  - `rev=$(git rev-parse HEAD)` (amends D13).
+  - `pointer.sh` compares seq with the pointer in `origin/main` (after `git fetch origin main` in CI) as well as the working-tree file.
+- **A5 (S5, M5/M4/M9).**
+  - Staleness alarm: `rpi-pull --max-age-days 21` (default 21; module option `rpi.pull.maxAgeDays`). After a successful or no-op run, if pointer `built` is older than the limit, log "pointer is N days old (CI stalled?)" and exit 39.
+  - `rpi-deploy status` prints pointer seq + age + last-run.
+  - M9 user steps: no branch protection/ruleset on `main` blocking `github-actions[bot]` (or a bypass); Settings → Actions → Workflow permissions "Read and write"; schedules of public repos are disabled after 60 days of inactivity (the staleness alarm catches it).
+- **A6 (S6, M5/M6).**
+  - Service: `Wants=`/`After=` `network-online.target time-sync.target`.
+  - Timer: **daily** `OnCalendar = "*-*-* 05:00"` (option default; the no-op path is one curl), `Persistent=true`, `RandomizedDelaySec=30m`.
+  - `rpi-pull` writes `$STATE/last-run` (`time=… exit=… result=…`, atomic tmp+mv) on every exit path except 37 (busy); status reads it.
+  - `nix store verify` rc 2 → 32 "untrusted"; any other non-zero rc → 38 "cache unavailable".
+- **A7 (N2, M5).**
+  - Path regex: `^STORE/[0-9a-df-np-sv-z]{32}-nixos-system-HOST-[A-Za-z0-9+._?=-]+$`.
+  - `--host` must match `^[A-Za-z0-9_-]+$` (else exit 2).
+  - Reject control characters in extracted fields.
+  - curl: `--max-filesize 65536`.
+- **A8 (N4).**
+  - M1 removes the stale autoupdate text in `modules/build-host-home.nix:5-6`; M2 does the same in `rpi-lib.sh:4`.
+  - `.worktrees/` is added to `.gitignore` by the orchestrator.
+- **A9 (N6, M7).**
+  - Cron `17 0 * * 0`.
+  - `workflow_dispatch` input `update-lock` (boolean, default false); `ci/build.sh --update-lock` runs the lock update for schedule or when the input is true.
+- **A10 (N7, M6).**
+  - Warn when exactly one of `pointerUrl`/`cacheUrl`/`cachePublicKey` is set.
+  - The test key must not reuse nvmd's base64.
+- **A11 (N9, M7).** `commit-push.sh` passes `-c user.name/-c user.email` to `pull --rebase` too.
+- **A12 (N1, M9).** README trust wording:
+  - Verify is ours-only.
+  - The load-bearing binding is the pointer narHash compared after realise.
+  - Dependencies rely on require-sigs + the 3 trusted keys.
+- **A13 (N5, M9 user step).** After the first CI run, dispatch twice and confirm the second produces no pointer commit (same storePath).
