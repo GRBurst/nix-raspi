@@ -197,4 +197,86 @@ reset_log
 run_cmd r7 -- env RPI_SSH_OPTS="-F x -o A=b" bash -c 'source "$RPI_LIB"; rl_ssh true'
 expect_eq "r7 rl_ssh argv" "ssh -p 2222 -F x -o A=b root@neptun true" "$(cat "$MOCK_LOG")"
 
+# =============================================================================
+# T5.4 CLI skeleton
+# =============================================================================
+rd() { bash "$RPI_DEPLOY_SRC" "$@"; }
+reset_log
+
+run_cmd c1 -- rd --help
+expect_exit "c1 --help exits 0" 0
+expect_grep "c1 usage lists image" "rpi-deploy image" "$OUT"
+expect_grepf "c1 usage lists flash IMAGE DEVICE" "flash IMAGE DEVICE" "$OUT"
+expect_grep "c1 usage lists deploy" "rpi-deploy deploy" "$OUT"
+expect_grep "c1 usage lists status" "rpi-deploy status" "$OUT"
+run_cmd c1 -- rd deploy --help
+expect_exit "c1 SUBCOMMAND --help exits 0" 0
+
+for sub in prepare install config eject build show all devices; do
+    run_cmd c2 -- rd "$sub"
+    expect_exit "c2 removed subcommand '$sub' -> exit 2" 2
+    expect_grepf "c2 '$sub': unknown subcommand" "unknown subcommand" "$ERR"
+done
+
+run_cmd c3 -- rd
+expect_exit "c3 no args -> exit 2" 2
+expect_grepf "c3 no args prints the usage" "flash IMAGE DEVICE" "$ERR"
+
+run_cmd c4 -- rd deploy --frobnicate
+expect_exit "c4 unknown option -> exit 2" 2
+run_cmd c4 -- rd deploy --port
+expect_exit "c4 option without value -> exit 2" 2
+run_cmd c4 -- rd deploy --port abc
+expect_exit "c4 non-numeric --port -> exit 2" 2
+run_cmd c4 -- rd deploy --max-builds 1x
+expect_exit "c4 non-numeric --max-builds -> exit 2" 2
+run_cmd c4 -- rd status --force
+expect_exit "c4 option of another subcommand -> exit 2" 2
+run_cmd c4 -- rd image extra
+expect_exit "c4 surplus argument -> exit 2" 2
+expect_eq "c4 usage errors never reach nix/ssh" 0 "$(log_count '^(nix|ssh) ')"
+
+# =============================================================================
+# T5.5 image
+# =============================================================================
+W="$T/work"
+mkdir -p "$W"
+image_in_w() { (cd "$W" && RPI_FLAKE=/flk rd image "$@"); }
+
+reset_log
+MOCK_DRY="$HYB" run_cmd i1 -- image_in_w
+expect_exit "i1 image succeeds" 0
+expect_grep "i1 builds the flake's sdImage into ./result-rpi-image" \
+    "^nix build .*--out-link $W/result-rpi-image .*/flk#nixosConfigurations\.rpi\.config\.system\.build\.sdImage( |$)" "$MOCK_LOG"
+expect_true "i1 order: path-info < dry run < build" test \
+    "$(first_line ' path-info ')" -lt "$(first_line ' --dry-run .*build\.sdImage')" -a \
+    "$(first_line ' --dry-run ')" -lt "$(first_line ' --out-link ')"
+expect_grep "i3 prints the image path" "$W/result-rpi-image/sd-image/neptun-rpi3\.img\.zst$" "$OUT"
+expect_grep "i3 prints the size" "size: *10( |B|$)" "$OUT"
+
+reset_log
+MOCK_CACHED="" MOCK_DRY="$HYB" run_cmd i2 -- image_in_w
+expect_exit "i2 kernel not cached -> RL_E_CACHE" 10
+expect_eq "i2 no real build" 0 "$(log_count '^nix build .*--out-link')"
+
+reset_log
+MOCK_DRY="$KER" run_cmd i2 -- image_in_w
+expect_exit "i2 kernel build in the dry run -> RL_E_FORBIDDEN" 11
+expect_eq "i2 forbidden -> no real build" 0 "$(log_count '^nix build .*--out-link')"
+
+reset_log
+MOCK_DRY="$HYB" run_cmd i2 -- image_in_w --max-builds 10
+expect_exit "i2 --max-builds is honoured -> RL_E_TOO_MANY" 12
+
+reset_log
+MOCK_DRY="$HYB" MOCK_BUILD_RC=1 run_cmd i2 -- image_in_w
+expect_exit "i2 failing image build -> RL_E_BUILD" 13
+
+reset_log
+MOCK_DRY="$HYB" run_cmd i4 -- image_in_w --out "$T/imgout" --flake /other --attr neptun
+expect_exit "i4 image --out succeeds" 0
+expect_grep "i4 out-link in --out DIR, --flake/--attr honoured" \
+    "^nix build .*--out-link $T/imgout/result-rpi-image .*/other#nixosConfigurations\.neptun\.config\.system\.build\.sdImage" "$MOCK_LOG"
+expect_grepf "i4 prints the image under --out" "$T/imgout/result-rpi-image/sd-image/neptun-rpi3.img.zst" "$OUT"
+
 summary
