@@ -26,7 +26,8 @@
 #   8. commit the lock (if it changed), force-push it to auto-update
 #
 # Exit codes: RL_E_* of rpi-lib.sh (2 usage, 10 cache, 11 forbidden build,
-# 12 too many builds, 13 lock update/eval/build, 14 Pi/deploy); 20 git.
+# 12 too many builds, 13 lock update/eval/build, 14 Pi/deploy); 20 git,
+# 21 another run holds $WORK/lock.
 
 set -uo pipefail
 
@@ -34,7 +35,7 @@ RPI_LIB="${RPI_LIB:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/rpi-lib.sh}"
 # shellcheck source=rpi-lib.sh
 source "$RPI_LIB" || { echo "rpi-autoupdate: cannot load $RPI_LIB" >&2; exit 2; }
 
-AU_E_GIT=20
+AU_E_GIT=20 AU_E_BUSY=21
 LOCK=nixos/flake.lock
 
 usage() {
@@ -180,6 +181,12 @@ au_deploy() {
         au_rebuild switch "$new"
     fi
 }
+
+# One run at a time: a manual run and the timer share the work clone.
+mkdir -p "$WORK" && exec {AU_LOCK_FD}>"$WORK/lock" ||
+    die "$AU_E_GIT" "cannot create $WORK/lock"
+flock -n "$AU_LOCK_FD" ||
+    die "$AU_E_BUSY" "another rpi-autoupdate run holds $WORK/lock; try again later"
 
 au_git_sync
 
