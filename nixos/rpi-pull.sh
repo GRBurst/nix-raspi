@@ -25,7 +25,8 @@ cache at --cache-url and its narHash matches the pointer.
   --state-dir DIR     applied seq/store-path and the lock (default /var/lib/rpi-pull)
 
 exit: 0 applied, up to date, already current or no pointer published yet
-      2 usage   30 fetch   31 pointer invalid or older   37 busy
+      2 usage   30 fetch   31 pointer invalid or older   32 untrusted
+      37 busy   38 cache unavailable
 EOF
 }
 
@@ -112,6 +113,20 @@ rp_parse() {
     [[ "$P_NAR" =~ ^sha256-[A-Za-z0-9+/]{43}=$ ]] || die 31 "pointer narHash is not sha256-<base64>: $P_NAR"
 }
 
+# rp_verify_sig: P_PATH is signed by our key (and only ours: --trusted-public-keys
+# replaces the configured keys) in the cache. nix exits 2 for an untrusted
+# path; anything else is an unreachable cache or a missing path.
+rp_verify_sig() {
+    local rc=0
+    nix --extra-experimental-features nix-command store verify --no-contents \
+        --store "$CACHE_URL" --trusted-public-keys "$CACHE_KEY" "$P_PATH" || rc=$?
+    case "$rc" in
+    0) ;;
+    2) die 32 "untrusted: $P_PATH is not signed by $CACHE_KEY in $CACHE_URL" ;;
+    *) die 38 "cache unavailable: cannot verify $P_PATH in $CACHE_URL (nix exit $rc)" ;;
+    esac
+}
+
 main() {
     rp_parse_args "$@"
     rp_lock
@@ -125,6 +140,7 @@ main() {
         exit 0
     fi
     ((P_SEQ > LAST)) || die 31 "pointer seq $P_SEQ is older than applied seq $LAST"
+    rp_verify_sig
     die 1 "not implemented"
 }
 

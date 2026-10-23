@@ -325,6 +325,30 @@ for nar in 'sha256:abc' "${GOOD_NAR%=}" "${GOOD_NAR:1}" "sha512-${GOOD_NAR#sha25
     untouched "p9 narHash $nar"
 done
 
+# --- 5.2 signature by our key only -------------------------------------------
+
+fresh
+MOCK_SIGNER=other rp p10
+expect_exit "p10 signed by another key -> 32" 32
+expect_grepf "p10 says untrusted" "untrusted" "$ERR"
+untouched "p10 untrusted"
+expect_grepf "p10 verify uses --trusted-public-keys only" \
+    "nix --extra-experimental-features nix-command store verify --no-contents --store $CACHE --trusted-public-keys $KEY $NEXT" \
+    "$MOCK_LOG"
+expect_eq "p10 never --extra-trusted-public-keys" 0 "$(log_count 'extra-trusted-public-keys')"
+expect_eq "p10 untrusted: nothing realised" 0 "$(log_count '^nix-store ')"
+
+for rc in 1 4; do
+    fresh
+    MOCK_VERIFY_RC=$rc rp "p10 verify rc $rc"
+    expect_exit "p10 verify rc $rc -> 38 (cache unavailable, not untrusted)" 38
+    expect_grepf "p10 verify rc $rc says cache unavailable" "cache unavailable" "$ERR"
+    untouched "p10 verify rc $rc"
+    expect_eq "p10 verify rc $rc: nothing realised" 0 "$(log_count '^nix-store ')"
+done
+
+# --- lock ------------------------------------------------------------------------
+
 fresh
 mkdir -p "$STATE"
 exec 8>"$STATE/lock"
