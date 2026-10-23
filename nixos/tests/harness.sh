@@ -16,6 +16,7 @@
 #   log_count ERE               number of matching $MOCK_LOG lines
 #   reset_log                   truncate $MOCK_LOG
 #   summary                     "N passed, M failed"; exit 1 if M > 0 or N == 0
+#   make_sys DIR [PART=TAG...]  fake NixOS toplevel (see below)
 #
 # FILE defaults to $ALL. Mocks get an absolute bash shebang: the nix build
 # sandbox has no /usr/bin/env.
@@ -110,3 +111,11 @@ summary() {
     fi
     [[ "$H_FAIL" -eq 0 ]] || exit 1
 }
+
+# make_sys DIR [PART=TAG...]: a fake NixOS toplevel at DIR whose boot-critical
+# parts live in the fake store $FX_STORE (see tests/make-sys.sh). Exported
+# (MAKE_SYS, FX_STORE, FIXTURES) so that mocks can build systems too.
+export MAKE_SYS="${MAKE_SYS:-$(dirname "${BASH_SOURCE[0]}")/make-sys.sh}"
+export FX_STORE="$T/store" FIXTURES
+mkdir -p "$FX_STORE"
+make_sys() { "$BASH_BIN" "$MAKE_SYS" "$@"; }

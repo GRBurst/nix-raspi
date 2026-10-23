@@ -16,8 +16,13 @@
 #   3. build guard on a dry run (no kernel/toolchain, at most --max-builds)
 #   4. build the toplevel (4 h bound; GC root $WORK/rpi-last-built)
 #   5. --no-deploy, or the Pi already runs it: go to 8
-#   6. nixos-rebuild boot --store-path NEW (the flake's pinned tool)
-#   7. same kernel/initrd/modules as booted: switch; else shutdown -r TIME
+#   6. compare the boot fingerprint (rpi-lib.sh rl_fp_*: kernel, initrd,
+#      modules, dtbs, kernel-params, NIXOS_BOOT inputs) of NEW with the
+#      Pi's booted system -- before deploying, so the bootloader is
+#      installed once
+#   7. equal: nixos-rebuild switch --store-path NEW, sync; different:
+#      nixos-rebuild boot --store-path NEW, sync, shutdown -r TIME
+#      (the flake's pinned tool)
 #   8. commit the lock (if it changed), force-push it to auto-update
 #
 # Exit codes: RL_E_* of rpi-lib.sh (2 usage, 10 cache, 11 forbidden build,
@@ -39,8 +44,9 @@ usage: rpi-autoupdate --repo PATH --work-dir PATH [--target USER@HOST] [--port N
 
 Updates nixpkgs + nixos-raspberrypi in a dedicated clone (WORK/repo) of branch
 main of --repo, checks that the kernel is cached and that nothing heavy would
-be built, builds the system, deploys it (boot, then switch; or a reboot at
---reboot-time when kernel/initrd/modules change) and force-pushes the lock
+be built, builds the system, deploys it (switch; or boot and a reboot at
+--reboot-time when a boot-critical part changes: kernel, initrd, modules,
+device trees, kernel parameters, firmware/config.txt/u-boot) and force-pushes the lock
 commit to branch auto-update of --repo. The checkout of --repo is never touched.
 
   --repo PATH          the user's repository (flake in nixos/)
@@ -147,21 +153,31 @@ au_git_push() {
 
 au_update() { nix flake update --accept-flake-config --flake "$RL_FLAKE" "$@"; }
 
-# 6.-7. boot, then switch or a scheduled reboot
+# au_rebuild ACTION NEW: the pinned nixos-rebuild, then sync on the Pi (the
+# vfat NIXOS_BOOT is rewritten and switch-to-configuration only syncs the
+# store's filesystem; synced after a failure too).
+au_rebuild() {
+    local rc=0
+    rl_nixos_rebuild "$1" --no-reexec --store-path "$2" --target-host "$RL_TARGET" || rc=$?
+    rl_ssh sync || die "$RL_E_DEPLOY" "sync on $RL_TARGET failed after nixos-rebuild $1"
+    ((rc == 0)) || die "$RL_E_DEPLOY" "nixos-rebuild $1 failed"
+}
+
+# 6.-7. switch, or boot + a scheduled reboot -- decided before deploying
 au_deploy() {
-    local new="$1" booted
-    log "installing $new as the boot default of $RL_TARGET"
-    rl_nixos_rebuild boot --no-reexec --store-path "$new" --target-host "$RL_TARGET" ||
-        die "$RL_E_DEPLOY" "nixos-rebuild boot failed (the running system is unchanged)"
-    booted="$(rl_triplet_remote booted)" ||
-        die "$RL_E_DEPLOY" "cannot read the booted kernel of $RL_TARGET"
-    if rl_needs_reboot "$booted" "$(rl_triplet_local "$new")"; then
-        log "kernel/initrd/modules changed: $RL_TARGET reboots at $REBOOT_TIME"
+    local new="$1" fp_booted fp_new
+    fp_booted="$(rl_fp_remote /run/booted-system)" ||
+        die "$RL_E_DEPLOY" "cannot read the booted system of $RL_TARGET; the Pi is untouched"
+    fp_new="$(rl_fp_local "$new")" ||
+        die "$RL_E_DEPLOY" "cannot read the boot files of $new; the Pi is untouched"
+    if rl_needs_reboot "$fp_new" "$fp_booted"; then
+        log "changed since boot: $(rl_fp_changed "$fp_booted" "$fp_new"); installing $new as the boot default"
+        au_rebuild boot "$new"
+        log "$RL_TARGET reboots at $REBOOT_TIME"
         rl_ssh shutdown -r "$REBOOT_TIME" || die "$RL_E_DEPLOY" "cannot schedule the reboot"
     else
-        log "switching $RL_TARGET to $new"
-        rl_nixos_rebuild switch --no-reexec --store-path "$new" --target-host "$RL_TARGET" ||
-            die "$RL_E_DEPLOY" "nixos-rebuild switch failed"
+        log "same boot files as booted: switching $RL_TARGET to $new"
+        au_rebuild switch "$new"
     fi
 }
 

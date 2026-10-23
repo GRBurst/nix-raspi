@@ -27,10 +27,13 @@ Usage:
            you type the device name; then read it back and compare hashes
   deploy   push the system to the Pi with the flake's pinned nixos-rebuild
            (default action: switch; boot = activate on next reboot; test =
-           activate without making it the boot default); refuses to deploy
-           a checkout behind branch auto-update unless --force
-  status   current and booted generation on the Pi, and whether a reboot is
-           pending (booted kernel/initrd/modules differ from current)
+           activate without making it the boot default), then sync on
+           the Pi; refuses to deploy a checkout behind branch auto-update
+           unless --force
+  status   current, booted and boot-default generation on the Pi, and whether
+           a reboot is pending (the boot default is not running, or its
+           kernel, initrd, modules, dtbs, kernel-params or NIXOS_BOOT
+           firmware/config.txt/U-Boot differ from the booted system's)
 
 Defaults: --flake $RPI_FLAKE or the current directory, --attr rpi,
   --target root@neptun, --port 2222, --max-builds 500, --out the current
@@ -189,30 +192,46 @@ do_deploy() {
     log "guards: $(rl_conf_ref) (toplevel, at most $MAX_BUILDS local builds)"
     rl_guard toplevel "$MAX_BUILDS" || die_rc $? "guard failed; the Pi was not touched"
     log "nixos-rebuild $ACTION --target-host $RL_TARGET (port $RL_SSH_PORT)"
-    rl_nixos_rebuild "$ACTION" --no-reexec --flake "$RL_FLAKE#$RL_ATTR" --target-host "$RL_TARGET" ||
-        die_rc "$RL_E_DEPLOY" "nixos-rebuild $ACTION failed"
+    local rc=0
+    rl_nixos_rebuild "$ACTION" --no-reexec --flake "$RL_FLAKE#$RL_ATTR" --target-host "$RL_TARGET" || rc=$?
+    # switch/boot rewrite the vfat NIXOS_BOOT, and switch-to-configuration
+    # only syncs the store's filesystem: flush the Pi's caches now (after a
+    # failure too -- the bootloader may already be installed).
+    rl_ssh sync || warn "sync on $RL_TARGET failed: run 'sync' there before cutting its power"
+    ((rc == 0)) || die_rc "$RL_E_DEPLOY" "nixos-rebuild $ACTION failed"
     case "$ACTION" in
     switch) (do_status) || warn "deployed, but the status query failed" ;;
-    boot) log "the new generation becomes active after the next reboot" ;;
+    boot) log "the new generation becomes active after the next reboot (see: rpi-deploy status)" ;;
     test) log "activated until the next reboot (boot default unchanged)" ;;
     esac
 }
 
-# status: current/booted generation and whether a reboot is pending.
+# status: the running, booted and boot-default systems, and whether a reboot
+# would change the running system: the boot default is not running (after
+# `deploy boot`/`test`), or its boot fingerprint (rl_fp_*: kernel, initrd,
+# modules, dtbs, kernel-params, NIXOS_BOOT inputs) differs from the booted
+# system's (after a switch to a new kernel or firmware).
 do_status() {
-    local systems current booted
-    systems="$(rl_ssh readlink /run/current-system /run/booted-system)" &&
-        current="$(rl_triplet_remote current)" &&
-        booted="$(rl_triplet_remote booted)" ||
+    local systems fp_booted fp_default
+    systems="$(rl_ssh readlink -e /run/current-system /run/booted-system /nix/var/nix/profiles/system)" &&
+        fp_booted="$(rl_fp_remote /run/booted-system)" &&
+        fp_default="$(rl_fp_remote /nix/var/nix/profiles/system)" ||
         die "cannot reach $RL_TARGET (port $RL_SSH_PORT)"
-    local -a s
+    local -a s reasons=()
     mapfile -t s <<<"$systems"
     echo "current: ${s[0]:-?}"
     echo "booted: ${s[1]:-?}"
-    if rl_needs_reboot "$current" "$booted"; then
-        echo "reboot pending: yes"
-    else
+    echo "default: ${s[2]:-?}"
+    [[ "${s[2]:-}" == "${s[0]:-}" ]] || reasons+=("the boot default is not the running system")
+    if rl_needs_reboot "$fp_default" "$fp_booted"; then
+        reasons+=("changed since boot: $(rl_fp_changed "$fp_booted" "$fp_default")")
+    fi
+    if ((${#reasons[@]} == 0)); then
         echo "reboot pending: no"
+    elif ((${#reasons[@]} == 1)); then
+        echo "reboot pending: yes (${reasons[0]})"
+    else
+        echo "reboot pending: yes (${reasons[0]}; ${reasons[1]})"
     fi
 }
 

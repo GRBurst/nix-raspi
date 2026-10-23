@@ -25,7 +25,7 @@ source "$HERE/harness.sh"
 
 # The caller's environment must not leak into the tests.
 unset RPI_FLAKE RPI_SSH_OPTS RPI_NIXOS_REBUILD RPI_CACHE_URL RPI_ALLOW_NONBLOCK \
-    RL_FLAKE RL_ATTR RL_TARGET RL_SSH_PORT RL_SSH_OPTS RL_CACHE_URL NIX_SSHOPTS
+    RL_FLAKE RL_ATTR RL_TARGET RL_SSH_PORT RL_SSH_OPTS RL_CACHE_URL RL_STORE_DIR NIX_SSHOPTS
 
 # lib FUNC ARGS...: call a rpi-lib.sh function in a fresh subshell, so the
 # globals pick up the environment of the call site.
@@ -170,29 +170,84 @@ unset RL_FLAKE
 # =============================================================================
 # T5.3 reboot decision + ssh helpers
 # =============================================================================
-run_cmd r1 -- lib rl_needs_reboot "/k /i /m" "/k /i /m"
-expect_exit "r1 equal triplets -> no reboot" 1
-run_cmd r2 -- lib rl_needs_reboot "/k2 /i /m" "/k /i /m"
+run_cmd r1 -- lib rl_needs_reboot $'kernel: /k\nfat: /f' $'kernel: /k\nfat: /f'
+expect_exit "r1 equal fingerprints -> no reboot" 1
+run_cmd r2 -- lib rl_needs_reboot $'kernel: /k2\nfat: /f' $'kernel: /k\nfat: /f'
 expect_exit "r2 kernel differs -> reboot" 0
-run_cmd r3 -- lib rl_needs_reboot "/k /i2 /m" "/k /i /m"
-expect_exit "r3 initrd differs -> reboot" 0
-run_cmd r4 -- lib rl_needs_reboot "/k /i /m2" "/k /i /m"
-expect_exit "r4 kernel-modules differ -> reboot" 0
+run_cmd r3 -- lib rl_needs_reboot $'kernel: /k\nfat: /f2' $'kernel: /k\nfat: /f'
+expect_exit "r3 FAT input differs -> reboot" 0
+run_cmd r4 -- lib rl_fp_changed $'kernel: /k2\ninitrd: /i\nfat: a\nfat: b' $'kernel: /k\ninitrd: /i\nfat: a\nfat: c'
+expect_eq "r4 rl_fp_changed names the differing parts once" "kernel, fat" "$(cat "$OUT")"
 
 RL_SSH_PORT=22 RPI_SSH_OPTS="-F x" run_cmd r5 -- lib rl_sshopts
 expect_eq "r5 rl_sshopts" "-p 22 -F x" "$(cat "$OUT")"
 run_cmd r5 -- lib rl_sshopts
 expect_eq "r5 rl_sshopts default port" "-p 2222" "$(cat "$OUT")"
 
-TOP="$T/toplevel"
-mkdir -p "$T/store/k" "$T/store/m" "$TOP"
-: >"$T/store/k/Image"; : >"$T/store/initrd"
-ln -s "$T/store/k/Image" "$TOP/kernel"
-ln -s "$T/store/initrd" "$TOP/initrd"
-ln -s "$T/store/m" "$TOP/kernel-modules"
-run_cmd r6 -- lib rl_triplet_local "$TOP"
-expect_eq "r6 rl_triplet_local resolves kernel, initrd, kernel-modules" \
-    "$T/store/k/Image $T/store/initrd $T/store/m" "$(cat "$OUT")"
+# Boot fingerprints: fake toplevels (tests/make-sys.sh) whose FAT inputs come
+# through nvmd's real builder templates; the fake store is $FX_STORE.
+export RL_STORE_DIR="$FX_STORE"
+fp() { lib rl_fp_local "$T/$1"; }
+make_sys "$T/sysA"
+make_sys "$T/sysA2"
+run_cmd fp1 -- lib rl_fp_local "$T/sysA"
+expect_exit "fp1 rl_fp_local succeeds" 0
+expect_grep "fp1 kernel" "^kernel: $FX_STORE/fx-kernel-1/Image$" "$OUT"
+expect_grep "fp1 initrd" "^initrd: $FX_STORE/fx-initrd-1/initrd$" "$OUT"
+expect_grep "fp1 kernel-modules" "^kernel-modules: $FX_STORE/fx-modules-1$" "$OUT"
+expect_grep "fp1 dtbs" "^dtbs: $FX_STORE/fx-dtbs-1$" "$OUT"
+expect_grep "fp1 kernel-params" "^kernel-params: console=serial0,115200n8 root=fstab loglevel=1$" "$OUT"
+expect_grep "fp1 FAT: the firmware package" \
+    "^fat: SRC_FIRMWARE_DIR=$FX_STORE/fx-firmware-1/share/raspberrypi/boot$" "$OUT"
+expect_grepf "fp1 FAT: config.txt" "fat: copyForced $FX_STORE/fx-config-1.txt \$target/config.txt" "$OUT"
+expect_grepf "fp1 FAT: u-boot" "fat: copyForced $FX_STORE/fx-uboot-1/u-boot.bin \$fwtarget/" "$OUT"
+expect_grepf "fp1 FAT: the populate command, builder path elided" \
+    "fat: <builder> -r -c \$default -d \$fwtarget" "$OUT"
+expect_not_grep "fp1 no extlinux (/boot is not FAT, its generations roll back)" "extlinux" "$OUT"
+expect_not_grep "fp1 no interpreter" "fx-bash" "$OUT"
+expect_not_grep "fp1 no PATH" "fx-coreutils" "$OUT"
+expect_not_grep "fp1 no toplevel path" "$T/sysA" "$OUT"
+expect_eq "fp2 same parts, another toplevel -> same fingerprint" "$(fp sysA)" "$(fp sysA2)"
+for part in kernel initrd modules dtbs params fw cfg uboot; do
+    make_sys "$T/sys-$part" "$part=2"
+    expect_true "fp3 $part differs -> fingerprint differs" test "$(fp sysA)" != "$(fp "sys-$part")"
+done
+make_sys "$T/sys-ext" ext=2
+expect_eq "fp4 only the extlinux builder differs -> same fingerprint" "$(fp sysA)" "$(fp sys-ext)"
+make_sys "$T/sys-nostc" stc=none
+make_sys "$T/sys-nostc2" stc=none
+run_cmd fp5 -- lib rl_fp_local "$T/sys-nostc"
+expect_exit "fp5 unknown bootloader installer -> still a fingerprint" 0
+expect_grep "fp5 FAT inputs unknown" "^fat: unknown $T/sys-nostc$" "$OUT"
+expect_true "fp5 unknown FAT inputs never compare equal" test "$(fp sys-nostc)" != "$(fp sys-nostc2)"
+make_sys "$T/sys-nofwb" fw=gone
+rm "$FX_STORE"/fx-fwb-gone-*
+expect_grep "fp5 nested builder missing -> FAT inputs unknown" "^fat: unknown $T/sys-nofwb$" <(fp sys-nofwb)
+run_cmd fp6 -- lib rl_fp_local "$T/no-such-system"
+expect_true "fp6 missing system -> non-zero" test "$RC" -ne 0
+expect_eq "fp6 missing system -> no fingerprint" "" "$(cat "$OUT")"
+
+# rl_fp_remote: the same script over ssh (mock: Pi paths under $T/pi, the
+# Pi's /nix/store is $FX_STORE).
+mock ssh <<'EOF'
+case " $* " in
+*" bash -s -- "*)
+    a=("$@")
+    [[ "${a[-1]}" == /nix/store ]] || exit 98
+    exec bash -s -- "$MOCK_PI${a[-2]}" "$FX_STORE" ;;
+esac
+exit 97
+EOF
+export MOCK_PI="$T/pi"
+mkdir -p "$MOCK_PI/run"
+ln -sfn "$T/sysA" "$T/pi/run/booted-system"
+reset_log
+run_cmd fp7 -- lib rl_fp_remote /run/booted-system
+expect_exit "fp7 rl_fp_remote succeeds" 0
+expect_eq "fp7 remote fingerprint = local one of the same system" "$(fp sysA)" "$(cat "$OUT")"
+expect_eq "fp7 one ssh call" 1 "$(log_count '^ssh -p 2222 root@neptun bash -s -- /run/booted-system /nix/store$')"
+run_cmd fp8 -- lib rl_fp_remote /run/no-such-system
+expect_true "fp8 remote failure -> non-zero" test "$RC" -ne 0
 
 mock ssh <<'EOF'
 exit 0
@@ -452,23 +507,34 @@ mock nixos-rebuild <<'EOF'
 echo POISON >>"$MOCK_LOG"
 exit 1
 EOF
-# ssh: the Pi's current/booted system and their kernel triplets.
+# ssh: the Pi as the directory tree $MOCK_PI (run/current-system,
+# run/booted-system, nix/var/nix/profiles/system: links to fake toplevels;
+# its /nix/store is $FX_STORE): readlink -e of those paths, the fingerprint
+# script (bash -s), sync. MOCK_SSH_FAIL: unreachable.
 mock ssh <<'EOF'
 if [[ -n "${MOCK_SSH_FAIL:-}" ]]; then
     echo "ssh: connect to host neptun port 2222: Connection refused" >&2
     exit 255
 fi
+a=("$@")
 case " $* " in
-*" readlink /run/current-system /run/booted-system "*)
-    printf '%s\n%s\n' "${MOCK_CUR-/nix/store/cccc-nixos-system-neptun-2}" \
-        "${MOCK_BOOTED-/nix/store/bbbb-nixos-system-neptun-1}" ;;
-*" readlink -f /run/current-system/kernel "*)
-    printf '%s\n' ${MOCK_CUR_TRIPLET-/nix/store/k1/Image /nix/store/i1/initrd /nix/store/m1} ;;
-*" readlink -f /run/booted-system/kernel "*)
-    printf '%s\n' ${MOCK_BOOTED_TRIPLET-/nix/store/k1/Image /nix/store/i1/initrd /nix/store/m1} ;;
+*" readlink -e /run/current-system /run/booted-system /nix/var/nix/profiles/system ")
+    for p in "${a[@]: -3}"; do readlink -e "$MOCK_PI$p" || exit 1; done ;;
+*" bash -s -- "*" /nix/store ")
+    exec bash -s -- "$MOCK_PI${a[-2]}" "$FX_STORE" ;;
+*" sync ") exit "${MOCK_SYNC_RC:-0}" ;;
 *) echo "ssh mock: unexpected command: $*" >&2; exit 1 ;;
 esac
 EOF
+# pi_state CURRENT BOOTED DEFAULT: the Pi's systems (fake toplevels in $T)
+pi_state() {
+    mkdir -p "$MOCK_PI/run" "$MOCK_PI/nix/var/nix/profiles"
+    ln -sfn "$T/$1" "$MOCK_PI/run/current-system"
+    ln -sfn "$T/$2" "$MOCK_PI/run/booted-system"
+    ln -sfn "$T/$3" "$MOCK_PI/nix/var/nix/profiles/system"
+}
+# default: switched to a userspace-only change (same boot parts as booted)
+pi_state sysA2 sysA sysA2
 
 # the flake: subdir nixos/ of a git repo (like the real checkout)
 REPO="$T/repo" FL="$T/repo/nixos"
@@ -571,38 +637,74 @@ no_poison d9
 reset_log
 MOCK_NR_RC=1 run_cmd d10 -- dep
 expect_exit "d10 nixos-rebuild failure -> RL_E_DEPLOY" 14
-expect_eq "d10 no status after a failed deploy" 0 "$(log_count '^ssh ')"
+expect_eq "d10 no status after a failed deploy" 0 "$(log_count '^ssh .* (readlink|bash) ')"
+expect_eq "d10 a failed deploy still syncs (the bootloader may be written)" 1 "$(log_count '^ssh .* sync$')"
 
 reset_log
 run_cmd d13 -- dep
-expect_grep "d13 switch prints the status" "^reboot pending: (yes|no)$" "$OUT"
-expect_true "d13 status after the switch" test "$(first_line '^nr-mock ')" -lt "$(first_line '^ssh ')"
-reset_log
-run_cmd d13 -- dep boot
-expect_eq "d13 boot: no status query" 0 "$(log_count '^ssh ')"
+expect_grep "d13 switch prints the status" "^reboot pending: (yes|no)" "$OUT"
+expect_true "d13 status after the switch" test "$(first_line '^nr-mock ')" -lt "$(first_line '^ssh .* readlink ')"
+for action in boot test; do
+    reset_log
+    run_cmd d13 -- dep "$action"
+    expect_eq "d13 $action: no status query" 0 "$(log_count '^ssh .* (readlink|bash) ')"
+done
 reset_log
 MOCK_SSH_FAIL=1 run_cmd d13 -- dep
 expect_exit "d13 status failing after a good switch -> still 0" 0
+
+# d14 the Pi syncs after every deploy (S2: the vfat NIXOS_BOOT is rewritten
+# and switch-to-configuration only syncs the store's filesystem)
+for action in switch boot test; do
+    reset_log
+    run_cmd d14 -- dep "$action"
+    expect_eq "d14 $action: one sync on the Pi" 1 "$(log_count '^ssh -p 2222 root@neptun sync$')"
+    expect_true "d14 $action: sync after nixos-rebuild, before the status" \
+        test "$(first_line '^nr-mock ')" -lt "$(first_line ' sync$')" -a \
+        "$(first_line ' sync$')" -lt "$(first_line '^ssh .* readlink ')"
+done
+reset_log
+MOCK_SYNC_RC=1 run_cmd d14 -- dep boot
+expect_exit "d14 sync failure after a good deploy -> still 0" 0
+expect_grepf "d14 sync failure is reported" "sync" "$ERR"
 
 # =============================================================================
 # T5.8 status
 # =============================================================================
 reset_log
-MOCK_CUR=/nix/store/c-sys MOCK_BOOTED=/nix/store/b-sys run_cmd s1 -- rd status
+pi_state sysA2 sysA sysA2
+run_cmd s1 -- rd status
 expect_exit "s1 status succeeds" 0
-expect_grep "s1 current line" "^current: /nix/store/c-sys$" "$OUT"
-expect_grep "s1 booted line" "^booted: /nix/store/b-sys$" "$OUT"
+expect_grep "s1 current line" "^current: $T/sysA2$" "$OUT"
+expect_grep "s1 booted line" "^booted: $T/sysA$" "$OUT"
+expect_grep "s1 boot default line" "^default: $T/sysA2$" "$OUT"
 expect_grep "s1 default target and port" "^ssh -p 2222 root@neptun " "$MOCK_LOG"
+expect_grep "s2 switched, same boot parts as booted -> reboot pending: no" "^reboot pending: no$" "$OUT"
 
-run_cmd s2 -- rd status
-expect_grep "s2 equal triplets -> reboot pending: no" "^reboot pending: no$" "$OUT"
-
-for diff in "/nix/store/k2/Image /nix/store/i1/initrd /nix/store/m1" \
-    "/nix/store/k1/Image /nix/store/i2/initrd /nix/store/m1" \
-    "/nix/store/k1/Image /nix/store/i1/initrd /nix/store/m2"; do
-    MOCK_CUR_TRIPLET="$diff" run_cmd s3 -- rd status
-    expect_grep "s3 current ($diff) != booted -> reboot pending: yes" "^reboot pending: yes$" "$OUT"
+# s3 a reboot would change the system: the boot default is not running
+# (after `deploy boot`, even without boot changes), or a boot part of the
+# default differs from the booted system's (switch to a new kernel, ...).
+pi_state sysA sysA sysA2
+run_cmd s3 -- rd status
+expect_grep "s3 after deploy boot (userspace only) -> reboot pending: yes" \
+    "^reboot pending: yes \(the boot default is not the running system\)$" "$OUT"
+for part in kernel initrd modules dtbs params fw cfg uboot; do
+    pi_state "sys-$part" sysA "sys-$part"
+    run_cmd s3 -- rd status
+    expect_grep "s3 switched to a new $part -> reboot pending: yes" \
+        "^reboot pending: yes \(changed since boot: [a-z-]+\)$" "$OUT"
+    pi_state sysA sysA "sys-$part"
+    run_cmd s3 -- rd status
+    expect_grep "s3 deploy boot of a new $part -> reboot pending: yes, both reasons" \
+        "^reboot pending: yes \(the boot default is not the running system; changed since boot: [a-z-]+\)$" "$OUT"
 done
+pi_state sys-fw sysA sys-fw
+run_cmd s3 -- rd status
+expect_grep "s3 names the changed part" "^reboot pending: yes \(changed since boot: fat\)$" "$OUT"
+pi_state sys-ext sysA sys-ext
+run_cmd s3 -- rd status
+expect_grep "s3 extlinux builder only -> reboot pending: no" "^reboot pending: no$" "$OUT"
+pi_state sysA2 sysA sysA2
 
 reset_log
 RPI_SSH_OPTS="-F cfg" run_cmd s3 -- rd status --target pi@x --port 22

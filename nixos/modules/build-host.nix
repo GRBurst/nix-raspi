@@ -102,8 +102,9 @@ in
       enable = lib.mkEnableOption ''
         weekly Pi security updates pushed from this host: a systemd timer runs
         `rpi-autoupdate` (lock update in a dedicated clone, cache and build
-        guards, build, `nixos-rebuild boot`, then `switch` or a scheduled
-        reboot, push of the lock to branch `auto-update` of `repoPath`)
+        guards, build, `nixos-rebuild switch`, or `boot` and a scheduled
+        reboot when a boot-critical part changed, push of the lock to branch
+        `auto-update` of `repoPath`)
       '';
 
       user = lib.mkOption {
@@ -182,7 +183,8 @@ in
         default = "04:30";
         description = ''
           When the Pi reboots (`shutdown -r HH:MM`) after an update that
-          changes the kernel, initrd or kernel modules.
+          changes a boot-critical part (kernel, initrd, kernel modules,
+          device trees, kernel parameters, firmware, config.txt, U-Boot).
         '';
       };
     };

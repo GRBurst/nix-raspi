@@ -1,0 +1,7 @@
+uboot-builder.sh and firmware-builder.sh: verbatim copies of
+modules/system/boot/loader/raspberrypi/{uboot-builder.sh,firmware-builder.sh}
+of nvmd/nixos-raspberrypi at the pinned rev 747895cf18ea8b3c2f66689a8c5c798a8bdcbc91
+(MIT License, Copyright (c) 2024 Sergey Kazenyuk, nixos-raspberrypi project
+contributors). tests/harness.sh `make_sys` substitutes their @placeholders@
+like nvmd's replaceVarsWith, so the boot fingerprint of rpi-lib.sh is tested
+against the real FAT populate commands. Re-copy them when nvmd is bumped.
