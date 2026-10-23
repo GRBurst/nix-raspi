@@ -128,4 +128,10 @@ in
 
   "no assertion fails for the valid example" =
     lib.all (a: a.assertion) auCfg.assertions;
+
+  # N1 (review): shutdown -r accepts 00:00-23:59 only
+  "rebootTime accepts 00:00-23:59 only" =
+    let check = hostTestSystem.options.rpi.buildHost.autoUpdate.rebootTime.type.check; in
+    lib.all check [ "00:00" "04:30" "19:59" "23:59" ]
+    && !(lib.any check [ "24:00" "29:59" "4:30" "12:60" ]);
 }

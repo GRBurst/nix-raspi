@@ -179,7 +179,7 @@ in
       };
 
       rebootTime = lib.mkOption {
-        type = lib.types.strMatching "[0-2][0-9]:[0-5][0-9]";
+        type = lib.types.strMatching "([01][0-9]|2[0-3]):[0-5][0-9]";
         default = "04:30";
         description = ''
           When the Pi reboots (`shutdown -r HH:MM`) after an update that

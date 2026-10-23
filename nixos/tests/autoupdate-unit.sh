@@ -192,6 +192,10 @@ expect_grepf "c3 names the missing option" "--ssh-key" "$ERR"
 
 run_cmd c4 -- au_std --reboot-time 4:30
 expect_exit "c4 --reboot-time must be HH:MM" 2
+for t in 24:00 29:59 12:60; do
+    run_cmd c4 -- au_std --reboot-time "$t"
+    expect_exit "c4 --reboot-time $t is no time of day" 2
+done
 
 run_cmd c5 -- au_std --max-builds 0
 expect_exit "c5 --max-builds must be a positive number" 2
@@ -261,6 +265,10 @@ MOCK_NEW="initrd=2" run_cmd a2i -- au_std --reboot-time 05:15
 expect_exit "a2i initrd update exits 0" 0
 expect_true "a2i initrd change schedules reboot at --reboot-time, no switch" \
     test "$(log_count '^ssh .* shutdown -r 05:15$')" -eq 1 -a "$(log_count '^nr-mock switch ')" -eq 0
+new_case a2t
+MOCK_NEW="initrd=2" run_cmd a2t -- au_std --reboot-time 23:59
+expect_exit "a2t --reboot-time 23:59 is valid" 0
+expect_eq "a2t reboot at 23:59" 1 "$(log_count '^ssh .* shutdown -r 23:59$')"
 
 # a2x every other boot-critical part (S1): modules, device trees, kernel
 # parameters, and the FAT's firmware, config.txt and u-boot -- these are not
