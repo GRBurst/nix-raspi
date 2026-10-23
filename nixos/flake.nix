@@ -130,12 +130,10 @@
         (lib.intersectLists [ "nix-command" "flakes" ]
         hostTestSystem.config.nix.settings.experimental-features)
         == [ "nix-command" "flakes" ];
-      # the emulator must be usable in the nix build sandbox: either the
-      # kernel already holds it open (F flag) or the sandbox exposes it
-      # (the default without static emulators: extra-sandbox-paths)
+      # the emulator must be usable in the nix build sandbox: the sandbox
+      # exposes it via extra-sandbox-paths (NixOS default for binfmt)
       sandboxPaths =
-        hostTestSystem.config.boot.binfmt.registrations.aarch64-linux.fixBinary
-        || lib.any
+        lib.any
           (p: lib.strings.hasInfix "qemu-aarch64" p || p == "/run/binfmt")
           hostTestSystem.config.nix.settings.extra-sandbox-paths;
       nvmdCache = lib.elem "https://nixos-raspberrypi.cachix.org"
@@ -152,7 +150,7 @@
     (lib.assertMsg contract.binfmt "build-host contract: boot.binfmt.emulatedSystems = [ aarch64-linux ]")
     && (lib.assertMsg contract.extraPlatforms "build-host contract: nix extra-platforms includes aarch64-linux")
     && (lib.assertMsg contract.expFeatures "build-host contract: nix experimental-features include nix-command + flakes")
-    && (lib.assertMsg contract.sandboxPaths "build-host contract: the qemu-aarch64 handler is usable in the nix sandbox (F flag or extra-sandbox-paths)")
+    && (lib.assertMsg contract.sandboxPaths "build-host contract: the qemu-aarch64 handler is exposed in the nix sandbox (extra-sandbox-paths)")
     && (lib.assertMsg contract.nvmdCache "build-host contract: nix extra-substituters include the nixos-raspberrypi cache")
     && (lib.assertMsg contract.wrapperPkg "build-host contract: rpi-deploy wrapper is in environment.systemPackages")
   then
@@ -345,6 +343,15 @@
                       rpi.buildHost.enable = true;
                       # exercises the RPI_FLAKE wrapper (mirrors live-host use)
                       rpi.buildHost.flakePath = "/tmp/rpi-nixos";
+                      # the weekly auto-update units are wired (never run:
+                      # the VM has no repo, key or Pi)
+                      users.users.alice.isNormalUser = true;
+                      rpi.buildHost.autoUpdate = {
+                        enable = true;
+                        user = "alice";
+                        repoPath = "/tmp/repo";
+                        sshKey = "/tmp/key";
+                      };
                       environment.systemPackages = [ aarch64Pkgs.hello x86Pkgs.git ];
                     };
                     testScript = ''
@@ -370,6 +377,12 @@
                       # the installed tool is the image/flash/deploy/status CLI
                       host.succeed("rpi-deploy --help | grep -q 'flash IMAGE DEVICE'")
                       host.fail("rpi-deploy install")
+                      # auto-update: weekly timer, CLI on PATH, work dir
+                      host.succeed("systemctl cat rpi-autoupdate.timer | grep -q 'OnCalendar=Sun 03:00'")
+                      host.succeed("rpi-autoupdate --help")
+                      host.succeed("test -d /var/lib/rpi-autoupdate")
+                      host.succeed("test \"$(stat -c %U /var/lib/rpi-autoupdate)\" = alice")
+                      host.wait_for_unit("rpi-autoupdate.timer")
                     '';
                   };
                 }
