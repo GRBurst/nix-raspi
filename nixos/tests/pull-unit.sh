@@ -57,6 +57,7 @@ psys() {
         printf 'exit "${MOCK_STC_RC:-0}"\n'
     } >"$p/bin/.switch-to-configuration-wrapped"
     chmod 755 "$p/bin/.switch-to-configuration-wrapped"
+    [[ ! -e "$p/bin/switch-to-configuration" ]] || chmod 755 "$p/bin/switch-to-configuration"
     echo "$p"
 }
 
@@ -403,6 +404,143 @@ MOCK_QHASH_RC=1 rp p13-query
 expect_exit "p13 narHash unreadable -> 34" 34
 untouched "p13 narHash unreadable"
 
+# --- 5.5 decision, profile, activation, state -----------------------------------
+
+PROFILE="$T/pi/nix/var/nix/profiles/system"
+
+fresh
+rp p14
+expect_exit "p14 userspace-only change -> 0" 0
+expect_grepf "p14 sets the system profile" "nix-env -p $PROFILE --set $NEXT" "$MOCK_LOG"
+expect_eq "p14 profile points at the new system" "$NEXT" "$(readlink "$PROFILE")"
+expect_grepf "p14 switches to the new system" "stc $NEXT switch" "$MOCK_LOG"
+expect_eq "p14 no boot activation" 0 "$(log_count '^stc .* boot$')"
+expect_eq "p14 no shutdown" 0 "$(log_count '^shutdown ')"
+expect_eq "p14 one sync" 1 "$(log_count '^sync-state ')"
+expect_eq "p14 records the seq" 1 "$(cat "$STATE/seq" 2>/dev/null)"
+expect_eq "p14 records the store path" "$NEXT" "$(cat "$STATE/store-path" 2>/dev/null)"
+expect_eq "p14 no temp files left in the state dir" "lock seq store-path" "$(state_files)"
+expect_grepf "p14 says applied (switch)" "applied seq 1 (switch)" "$ERR"
+expect_true "p14 P2 verify < realise" \
+    test "$(first_line ' store verify ')" -lt "$(first_line '^nix-store --realise ')"
+expect_true "p14 P2 realise < nix-env" \
+    test "$(first_line '^nix-store --realise ')" -lt "$(first_line '^nix-env ')"
+expect_true "p14 P2 nix-env < stc" \
+    test "$(first_line '^nix-env ')" -lt "$(first_line '^stc ')"
+expect_true "p14 P2 stc < sync" \
+    test "$(first_line '^stc ')" -lt "$(first_line '^sync-state ')"
+expect_grep "p14 P2 sync < state written" '^sync-state none$' "$MOCK_LOG"
+
+for part in kernel initrd modules dtbs params fw cfg uboot; do
+    N=$(psys "n-$part" "$part=2")
+    fresh
+    pointer 1 "$N"
+    rp "p15 $part"
+    expect_exit "p15 $part change -> 0" 0
+    expect_true "p15 $part change -> boot + shutdown -r 04:30" \
+        grep -qxF -e "stc $N boot" "$MOCK_LOG"
+    expect_grepf "p15 $part change: shutdown -r 04:30" "shutdown -r 04:30" "$MOCK_LOG"
+    expect_eq "p15 $part change: no switch" 0 "$(log_count '^stc .* switch$')"
+    expect_true "p15 $part change: stc boot < shutdown" \
+        test "$(first_line '^stc ')" -lt "$(first_line '^shutdown ')"
+    expect_eq "p15 $part change: one sync" 1 "$(log_count '^sync-state ')"
+    expect_eq "p15 $part change: profile set" "$N" "$(readlink "$PROFILE")"
+    expect_eq "p15 $part change: seq recorded" 1 "$(cat "$STATE/seq" 2>/dev/null)"
+    expect_grepf "p15 $part change: says reboot at 04:30" "applied seq 1 (boot, reboot at 04:30)" "$ERR"
+done
+
+N=$(psys n-kernel kernel=2)
+fresh
+pointer 1 "$N"
+rp p15-time --reboot-time 03:15
+expect_exit "p15 --reboot-time 03:15 -> 0" 0
+expect_grepf "p15 --reboot-time 03:15 -> shutdown -r 03:15" "shutdown -r 03:15" "$MOCK_LOG"
+
+# The boot fingerprint is the booted system's, not the current one's: after
+# a switch to a new kernel (no reboot yet), another system with that kernel
+# still needs the reboot.
+K2=$(psys n-kernel kernel=2)
+K2B=$(psys n-kernel-b kernel=2)
+fresh
+pi "$K2" "$A" "$K2"
+pointer 1 "$K2B"
+rp p15-booted
+expect_exit "p15 booted kernel 1, current kernel 2 -> 0" 0
+expect_true "p15 compares with the booted system (boot)" grep -qxF -e "stc $K2B boot" "$MOCK_LOG"
+fresh
+pi "$A" "$K2" "$A"
+pointer 1 "$K2B"
+rp p15-booted-same
+expect_true "p15 same boot fingerprint as booted -> switch" grep -qxF -e "stc $K2B switch" "$MOCK_LOG"
+
+for t in '' x 4:30 24:00 12:60 now +5 '04:30 -k' $'04:30\n'; do
+    fresh
+    rp "p15 reboot-time '$t'" --reboot-time "$t"
+    expect_exit "p15 --reboot-time '$t' refused -> 2" 2
+    expect_eq "p15 --reboot-time '$t': nothing fetched" 0 "$(log_count '^curl ')"
+done
+
+N=$(psys n-ext ext=2)
+fresh
+pointer 1 "$N"
+rp p16
+expect_exit "p16 extlinux-only change -> 0" 0
+expect_true "p16 extlinux-only change -> switch" grep -qxF -e "stc $N switch" "$MOCK_LOG"
+expect_eq "p16 no shutdown" 0 "$(log_count '^shutdown ')"
+
+fresh
+MOCK_STC_RC=1 rp p17
+expect_exit "p17 switch-to-configuration fails -> 36" 36
+expect_eq "p17 sync still runs" 1 "$(log_count '^sync-state ')"
+expect_eq "p17 seq not recorded" none "$(cat "$STATE/seq" 2>/dev/null || echo none)"
+
+N=$(psys n-kernel kernel=2)
+fresh
+pointer 1 "$N"
+MOCK_STC_RC=1 rp p17-boot
+expect_exit "p17 stc boot fails -> 36" 36
+expect_eq "p17 stc boot fails: no shutdown" 0 "$(log_count '^shutdown ')"
+expect_eq "p17 stc boot fails: sync still runs" 1 "$(log_count '^sync-state ')"
+expect_eq "p17 stc boot fails: seq not recorded" none "$(cat "$STATE/seq" 2>/dev/null || echo none)"
+
+fresh
+pointer 1 "$N"
+MOCK_SHUTDOWN_RC=1 rp p17-shutdown
+expect_exit "p17 shutdown fails -> 36" 36
+expect_eq "p17 shutdown fails: seq not recorded" none "$(cat "$STATE/seq" 2>/dev/null || echo none)"
+
+fresh
+pi "$A" "$T/pi/gone" "$A"
+rp p17-booted
+expect_exit "p17 booted-system unreadable -> 36" 36
+expect_eq "p17 booted-system unreadable: no nix-env (D7)" 0 "$(log_count '^nix-env ')"
+untouched "p17 booted-system unreadable"
+
+fresh
+pointer 1 "$FX_STORE/$H_NEXT-nixos-system-neptun-26.05.absent"
+rp p17-newfp
+expect_exit "p17 new system unreadable after the realise -> 36" 36
+expect_eq "p17 new system unreadable: no nix-env (D7)" 0 "$(log_count '^nix-env ')"
+untouched "p17 new system unreadable"
+
+fresh
+RPI_FP_LIB="$T/no-such-fp.sh" rp p17-fplib
+expect_exit "p17 rpi-fp.sh missing -> 36" 36
+untouched "p17 rpi-fp.sh missing"
+
+fresh
+MOCK_NIXENV_RC=1 rp p17-nixenv
+expect_exit "p17 nix-env fails -> 35" 35
+expect_eq "p17 nix-env fails: no stc" 0 "$(log_count '^stc ')"
+expect_eq "p17 nix-env fails: seq not recorded" none "$(cat "$STATE/seq" 2>/dev/null || echo none)"
+
+fresh
+rm -rf "$STATE"
+rp p20
+expect_exit "p20 no state dir, seq 1 -> applies" 0
+expect_eq "p20 seq 1 recorded" 1 "$(cat "$STATE/seq" 2>/dev/null)"
+expect_grepf "p20 switched" "stc $NEXT switch" "$MOCK_LOG"
+
 # --- lock ------------------------------------------------------------------------
 
 fresh
@@ -423,4 +561,8 @@ expect_grepf "p18 state dir unusable: says why" "cannot open $T/not-a-dir/lock" 
 expect_eq "p18 state dir unusable: nothing fetched" 0 "$(log_count '^curl ')"
 
 fresh
+# p19 (G1): no evaluation or build on the Pi, in any case of this file
+expect_eq "p19 no nix eval/build or nixos-rebuild anywhere" 0 \
+    "$(grep -cE '^nix .*[[:space:]](eval|build)( |$)|^nix-(build|instantiate) |nixos-rebuild' "$ALL_LOG")"
+expect_true "p19 the mocks logged something" test -s "$ALL_LOG"
 summary
