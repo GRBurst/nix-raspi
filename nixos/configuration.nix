@@ -4,8 +4,11 @@
   lib,
   ...
 }: let
-  keys = import ./keys.nix;
+  # keys.nix, overridable through _module.args.rpiKeys (eval tests)
+  keys = config._module.args.rpiKeys;
 in {
+  _module.args.rpiKeys = lib.mkDefault (import ./keys.nix);
+
   # Bootloader: provided by nixos-raspberrypi (nvmd), pulled in through
   # `nixosModules.raspberry-pi-3.base` in flake.nix. For the Pi 3 it is U-Boot
   # (default): the firmware partition (/boot/firmware: Pi firmware, config.txt,
@@ -150,11 +153,13 @@ in {
   };
 
   # Push deploys log in as root (no sudo, no trusted-users needed). The
-  # auto-update key may only log in from the build host.
+  # auto-update key may only log in from the build host, and `restrict`
+  # drops forwarding and the pty (nix copy and systemd-run --pipe need
+  # neither).
   users.users.root.openssh.authorizedKeys.keys =
     [keys.user]
     ++ lib.optional (keys.autoUpdate != null)
-    ''from="${keys.hostAddress}" ${keys.autoUpdate}'';
+    ''from="${keys.hostAddress}",restrict ${keys.autoUpdate}'';
 
   # NixOS requires the login shell to be an enabled shell program (see the
   # users.users.<name>.shell assertion); the actual zsh configuration comes
