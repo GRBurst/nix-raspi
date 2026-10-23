@@ -134,35 +134,35 @@ expect_eq "g8 rl_kernel_paths prints kernel and modules" "$K_DEF"$'\n'"$M_DEF" "
 expect_grepf "g8 kernel path from the flake's config" "/flk#nixosConfigurations.rpi.config.boot.kernelPackages.kernel.outPath" "$MOCK_LOG"
 
 reset_log
-run_cmd g9 -- env MOCK_CACHED="$K_DEF" MOCK_DRY="$HYB" bash -c 'source "$RPI_LIB"; rl_guard toplevel 500'
+MOCK_CACHED="$K_DEF" MOCK_DRY="$HYB" run_cmd g9 -- lib rl_guard toplevel 500
 expect_exit "g9 modules missing from the cache -> RL_E_CACHE" 10
-run_cmd g9 -- env MOCK_CACHED="" MOCK_NETERR=1 MOCK_DRY="$HYB" bash -c 'source "$RPI_LIB"; rl_guard toplevel 500'
+MOCK_CACHED="" MOCK_NETERR=1 MOCK_DRY="$HYB" run_cmd g9 -- lib rl_guard toplevel 500
 expect_exit "g9 path-info network error counts as a miss -> RL_E_CACHE" 10
 
 reset_log
-run_cmd g10 -- env MOCK_DRY="$HYB" bash -c 'source "$RPI_LIB"; rl_guard toplevel 500'
+MOCK_DRY="$HYB" run_cmd g10 -- lib rl_guard toplevel 500
 expect_exit "g10 cached kernel + hybrid dry run -> 0" 0
 expect_grep "g10 dry run of the toplevel" "^nix build .*--dry-run.* /flk#nixosConfigurations\.rpi\.config\.system\.build\.toplevel( |$)" "$MOCK_LOG"
 expect_true "g10 order: path-info before the dry run" \
     test "$(first_line ' path-info ')" -lt "$(first_line ' --dry-run ')"
 
 reset_log
-run_cmd g10 -- env MOCK_DRY="$KER" bash -c 'source "$RPI_LIB"; rl_guard sdImage 500'
+MOCK_DRY="$KER" run_cmd g10 -- lib rl_guard sdImage 500
 expect_exit "g10 kernel build in the dry run -> RL_E_FORBIDDEN" 11
 expect_grep "g10 sdImage dry run" "^nix build .*--dry-run.*\.config\.system\.build\.sdImage( |$)" "$MOCK_LOG"
 
 reset_log
-run_cmd g11 -- env MOCK_CACHED="" MOCK_DRY="$HYB" bash -c 'source "$RPI_LIB"; rl_guard toplevel 500'
+MOCK_CACHED="" MOCK_DRY="$HYB" run_cmd g11 -- lib rl_guard toplevel 500
 expect_eq "g11 cache miss -> no dry run" 0 "$(log_count ' --dry-run ')"
 expect_grepf "g11 names the missing path" "$K_DEF" "$ERR"
 
 reset_log
-run_cmd g12 -- env MOCK_DRY_RC=1 bash -c 'source "$RPI_LIB"; rl_guard toplevel 500'
+MOCK_DRY_RC=1 run_cmd g12 -- lib rl_guard toplevel 500
 expect_exit "g12 dry-run eval error -> RL_E_BUILD" 13
 expect_grepf "g12 shows nix's error" "attribute 'rpi' missing" "$ERR"
 
 reset_log
-run_cmd g12 -- env MOCK_EVAL_RC=1 bash -c 'source "$RPI_LIB"; rl_guard toplevel 500'
+MOCK_EVAL_RC=1 run_cmd g12 -- lib rl_guard toplevel 500
 expect_exit "g12 kernel eval error -> RL_E_BUILD" 13
 expect_eq "g12 kernel eval error -> no cache query" 0 "$(log_count ' path-info ')"
 unset RL_FLAKE
@@ -179,7 +179,7 @@ expect_exit "r3 initrd differs -> reboot" 0
 run_cmd r4 -- lib rl_needs_reboot "/k /i /m2" "/k /i /m"
 expect_exit "r4 kernel-modules differ -> reboot" 0
 
-run_cmd r5 -- env RL_SSH_PORT=22 RPI_SSH_OPTS="-F x" bash -c 'source "$RPI_LIB"; rl_sshopts'
+RL_SSH_PORT=22 RPI_SSH_OPTS="-F x" run_cmd r5 -- lib rl_sshopts
 expect_eq "r5 rl_sshopts" "-p 22 -F x" "$(cat "$OUT")"
 run_cmd r5 -- lib rl_sshopts
 expect_eq "r5 rl_sshopts default port" "-p 2222" "$(cat "$OUT")"
@@ -198,7 +198,7 @@ mock ssh <<'EOF'
 exit 0
 EOF
 reset_log
-run_cmd r7 -- env RPI_SSH_OPTS="-F x -o A=b" bash -c 'source "$RPI_LIB"; rl_ssh true'
+RPI_SSH_OPTS="-F x -o A=b" run_cmd r7 -- lib rl_ssh true
 expect_eq "r7 rl_ssh argv" "ssh -p 2222 -F x -o A=b root@neptun true" "$(cat "$MOCK_LOG")"
 
 # =============================================================================
@@ -296,7 +296,9 @@ mock lsblk <<'EOF'
 dev="${!#}"
 case " $* " in
 *" -nlso NAME "*) printf '%s\n%s\n' "$(basename "$dev")" "${MOCK_PKNAME:-nvme0n1}" ;;
-*" MOUNTPOINTS "*) printf '\n%s\n\n' "${MOCK_MOUNTS:-}" ;;
+*" MOUNTPOINTS "*)
+    if [[ -n "${MOCK_MOUNTS_FAIL:-}" ]]; then echo "lsblk: unknown column: MOUNTPOINTS" >&2; exit 1; fi
+    printf '\n%s\n\n' "${MOCK_MOUNTS:-}" ;;
 *" RM "*) echo "  ${MOCK_RM-1}" ;;
 *" TYPE "*) echo "${MOCK_TYPE-disk}" ;;
 *" MODEL "*) echo "${MOCK_MODEL-Generic STORAGE DEVICE}   " ;;
@@ -310,6 +312,7 @@ echo "${MOCK_ROOTSRC-/dev/nvme0n1p2}"
 EOF
 
 mock sudo <<'EOF'
+if [[ -n "${MOCK_READBACK_FAIL:-}" && "$1" == head ]]; then echo "head: cannot open: Permission denied" >&2; exit 1; fi
 exec "$@"
 EOF
 
@@ -424,6 +427,15 @@ expect_grepf "f11 verified" "verified" "$OUT"
 reset_log
 MOCK_RM=0 MOCK_ROOTSRC=/dev/mmcblk0p2 MOCK_PKNAME=mmcblk0 run_cmd f11 -- rd flash "$IMG" "$MMC" <<<"mmcblk0"
 expect_exit "f11 an mmcblk holding / is still refused" 16
+
+reset_log; new_dev
+MOCK_MOUNTS_FAIL=1 run_cmd f14 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f14 mount points unknown (lsblk fails) -> fail closed"
+
+reset_log; new_dev
+MOCK_READBACK_FAIL=1 run_cmd f15 -- rd flash "$IMG" "$DEV" <<<"sdz"
+expect_exit "f15 read-back failure -> RL_E_VERIFY" 17
+expect_grepf "f15 says verify failed" "verify failed" "$ERR"
 unset RPI_ALLOW_NONBLOCK
 
 # =============================================================================
