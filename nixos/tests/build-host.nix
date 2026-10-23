@@ -14,6 +14,9 @@
     fsType = "ext4";
   };
   boot.loader.grub.devices = [ "/dev/sda" ];
+  # Every flake evaluation forces this system (contract asserts in
+  # flake.nix); without it each nix command warns "stateVersion is not set".
+  system.stateVersion = "26.05";
 
   rpi.buildHost.enable = true;
   # arbitrary: exercises the RPI_FLAKE wrapper in the test system
