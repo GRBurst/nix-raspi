@@ -84,6 +84,15 @@ pointer() {
 # state SEQ: the applied seq in $STATE/seq
 state() { mkdir -p "$STATE" && printf '%s\n' "$1" >"$STATE/seq"; }
 
+# state_files: the file names in $STATE (but last-run), space-separated
+state_files() {
+    local f out=""
+    for f in "$STATE"/*; do
+        [[ "${f##*/}" == last-run ]] || out+="${out:+ }${f##*/}"
+    done
+    echo "$out"
+}
+
 # --- mocks -------------------------------------------------------------------
 
 # curl: copies $MOCK_BODY to the -o file, prints ${MOCK_HTTP:-200} for -w,
@@ -346,6 +355,26 @@ for rc in 1 4; do
     untouched "p10 verify rc $rc"
     expect_eq "p10 verify rc $rc: nothing realised" 0 "$(log_count '^nix-store ')"
 done
+
+# --- 5.3 already current ------------------------------------------------------
+
+fresh
+pi "$NEXT" "$A" "$NEXT"
+state 3
+pointer 4 "$NEXT"
+rp p11
+expect_exit "p11 already current -> 0" 0
+expect_grepf "p11 says already current" "already current" "$ERR"
+expect_eq "p11 records the pointer seq" 4 "$(cat "$STATE/seq" 2>/dev/null)"
+expect_eq "p11 records the store path" "$NEXT" "$(cat "$STATE/store-path" 2>/dev/null)"
+expect_eq "p11 nothing realised, set or activated" 0 "$(log_count '^(nix-store --realise|nix-env|stc|shutdown) ')"
+expect_eq "p11 no temp files left in the state dir" "lock seq store-path" "$(state_files)"
+
+fresh
+pi "$NEXT" "$A" "$NEXT"
+MOCK_SIGNER=other rp p11-untrusted
+expect_exit "p11 already current but untrusted -> 32 (verify first)" 32
+expect_eq "p11 untrusted: nothing recorded" none "$(cat "$STATE/seq" 2>/dev/null || echo none)"
 
 # --- lock ------------------------------------------------------------------------
 

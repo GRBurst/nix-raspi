@@ -25,8 +25,8 @@ cache at --cache-url and its narHash matches the pointer.
   --state-dir DIR     applied seq/store-path and the lock (default /var/lib/rpi-pull)
 
 exit: 0 applied, up to date, already current or no pointer published yet
-      2 usage   30 fetch   31 pointer invalid or older   32 untrusted
-      37 busy   38 cache unavailable
+      1 state dir not writable   2 usage   30 fetch
+      31 pointer invalid or older   32 untrusted   37 busy   38 cache unavailable
 EOF
 }
 
@@ -127,11 +127,23 @@ rp_verify_sig() {
     esac
 }
 
+# rp_record: the applied pointer -> $STATE/store-path, $STATE/seq (each
+# written to a temp file and renamed; seq last, so a crash re-applies)
+rp_record() {
+    local f v
+    for f in store-path seq; do
+        v="$P_PATH"
+        [[ "$f" == seq ]] && v="$P_SEQ"
+        { printf '%s\n' "$v" >"$STATE/$f.tmp" && mv -f "$STATE/$f.tmp" "$STATE/$f"; } ||
+            die 1 "cannot write $STATE/$f"
+    done
+}
+
 main() {
     rp_parse_args "$@"
     rp_lock
     rp_last_seq
-    TMP=$(mktemp "$STATE/pointer.XXXXXX") || die 30 "cannot create a temp file in $STATE"
+    TMP=$(mktemp "$STATE/pointer.XXXXXX") || die 1 "cannot create a temp file in $STATE"
     trap 'rm -f "$TMP"' EXIT
     rp_fetch "$TMP"
     rp_parse "$TMP"
@@ -141,6 +153,11 @@ main() {
     fi
     ((P_SEQ > LAST)) || die 31 "pointer seq $P_SEQ is older than applied seq $LAST"
     rp_verify_sig
+    if [[ "$(readlink -f "${RPI_PULL_ROOT:-}/run/current-system")" == "$P_PATH" ]]; then
+        rp_record
+        log "already current: $P_PATH (seq $P_SEQ recorded)"
+        exit 0
+    fi
     die 1 "not implemented"
 }
 
