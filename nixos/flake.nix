@@ -52,29 +52,35 @@
     pkgsFor = system: nixpkgs.legacyPackages.${system};
     forSystem = systems: lib.genAttrs systems;
 
-    # The install/build wrapper script as a package (pure shell, so the
-    # package is usable on any build host). Explicit mkDerivation: the
+    # The host tool (image/flash/deploy/status) as a package: pure shell, so
+    # it is usable on any build host. Explicit mkDerivation: the
     # writeShellScript* helpers' store-path shape varies between nixpkgs
     # versions, but $out/bin/<name> is what environment.systemPackages
-    # (buildEnv) requires.
+    # (buildEnv) requires. The shared guard library goes to libexec and the
+    # wrapper pins RPI_LIB to it.
     #
-    # The card tools of `prepare`/`eject`/`config` are appended to PATH
-    # (suffix: the host's own tools win), so the script works on a host that
-    # has none of them in its profile. nix/nixos-install/sudo are deliberately
-    # NOT bundled: they must be the host's.
+    # The tools the script calls are appended to PATH (suffix: the host's
+    # own tools win), so it works on a host that has none of them in its
+    # profile. nix and sudo are deliberately NOT bundled: they must be the
+    # host's. nixos-rebuild is never the host's: the script runs the flake's
+    # pinned app (apps.x86_64-linux.nixos-rebuild).
     mkRpiDeploy = pkgs: pkgs.stdenv.mkDerivation {
       name = "rpi-deploy";
       dontUnpack = true;
       dontBuild = true;
       nativeBuildInputs = [ pkgs.makeWrapper ];
       installPhase = ''
-        mkdir -p $out/bin
+        mkdir -p $out/bin $out/libexec/rpi-deploy
         cp ${./rpi-deploy.sh} $out/bin/rpi-deploy
+        cp ${./rpi-lib.sh} $out/libexec/rpi-deploy/rpi-lib.sh
         chmod 755 $out/bin/rpi-deploy
-        wrapProgram $out/bin/rpi-deploy --suffix PATH : ${lib.makeBinPath (with pkgs; [
-          util-linux dosfstools e2fsprogs gnutar findutils coreutils git
-        ])}
+        wrapProgram $out/bin/rpi-deploy \
+          --set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh \
+          --suffix PATH : ${lib.makeBinPath (with pkgs; [
+            util-linux coreutils zstd gnugrep gnused gawk git openssh
+          ])}
       '';
+      meta.mainProgram = "rpi-deploy";
     };
     rpiDeploy = system: mkRpiDeploy (pkgsFor system);
 
@@ -219,10 +225,22 @@
               ];
             };
 
+            # The deploy tool pinned to the Pi's release (spec "pinned
+            # nixos-rebuild"): nixos-rebuild-ng from our nixpkgs, run with
+            # --no-reexec by rpi-deploy. The host's own (newer) one half-
+            # applies on the Pi (E3: systemd-run --output=cat).
+            apps.x86_64-linux.nixos-rebuild = {
+              type = "app";
+              program = lib.getExe (pkgsFor "x86_64-linux").nixos-rebuild-ng;
+              meta.description = "nixos-rebuild pinned to the Pi's release";
+            };
+
             packages = forSystem [ "aarch64-linux" "x86_64-linux" ] (system: {
               rpi-deploy = rpiDeploy system;
               default = rpiDeploy system;
             } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+              nixos-rebuild = (pkgsFor system).nixos-rebuild-ng;
+
               # The binfmt_misc registration line (with the F flag) that
               # `rpi-deploy install` writes temporarily to
               # /proc/sys/fs/binfmt_misc/register while nixos-install runs.
