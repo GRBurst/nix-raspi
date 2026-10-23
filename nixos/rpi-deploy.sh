@@ -79,6 +79,7 @@ do_image() {
     echo "size:  $(du -h --apparent-size "${imgs[0]}" | cut -f1) (zstd)"
     echo "next:  rpi-deploy flash ${imgs[0]} /dev/sdX"
 }
+
 # blk PROP DEV: one lsblk property of DEV itself (not its partitions), trimmed.
 blk() {
     local v
@@ -110,7 +111,10 @@ flash_check_device() {
     if [[ -n "$root" ]] && lsblk -nlso NAME -- "$root" 2>/dev/null | grep -qxF -- "$name"; then
         die_rc "$RL_E_DEVICE" "$dev holds the host's / ($root); refusing"
     fi
-    mounts="$(lsblk -nlo MOUNTPOINTS -- "$dev" 2>/dev/null | grep -v '^[[:space:]]*$' | tr '\n' ' ')" || mounts=""
+    # fail closed: unknown mount points count as mounted
+    mounts="$(lsblk -nlo MOUNTPOINTS -- "$dev")" ||
+        die_rc "$RL_E_DEVICE" "cannot list the mount points of $dev (lsblk failed); refusing"
+    mounts="$(printf '%s\n' "$mounts" | grep -v '^[[:space:]]*$' | tr '\n' ' ')" || true
     [[ -z "$mounts" ]] ||
         die_rc "$RL_E_DEVICE" "$dev has mounted partitions (${mounts% }); unmount them first"
 }
@@ -141,7 +145,8 @@ flash_verify() {
     local img="$1" dev="$2" len want got
     len="$(zstdcat "$img" | wc -c)"
     want="$(zstdcat "$img" | sha256sum | cut -d' ' -f1)"
-    got="$(sudo head -c "$len" "$dev" | sha256sum | cut -d' ' -f1)"
+    got="$(sudo head -c "$len" "$dev" | sha256sum | cut -d' ' -f1)" ||
+        die_rc "$RL_E_VERIFY" "verify failed: cannot read $dev back"
     [[ "$want" == "$got" ]] ||
         die_rc "$RL_E_VERIFY" "verify failed: the first $len bytes of $dev differ from the image (sha256 $got, want $want)"
     echo "verified: $len bytes, sha256 $want"
@@ -160,6 +165,7 @@ do_flash() {
     flash_verify "$img" "$dev"
     echo "done: the card can be removed"
 }
+
 # check_downgrade: refuse (unless --force) when branch auto-update of the
 # flake's git repo has commits HEAD lacks: deploying would roll the Pi back
 # from what the weekly job already pushed. Skipped outside git.
