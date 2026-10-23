@@ -84,6 +84,12 @@ in {
 
   boot.tmp.cleanOnBoot = true;
 
+  # Generations in the U-Boot menu (extlinux.conf on the SD root). nvmd's
+  # uboot path runs generic-extlinux-compatible's populateCmd (`-g <limit>`);
+  # boot.loader.raspberry-pi.configurationLimit is for the `kernel`
+  # bootloader only.
+  boot.loader.generic-extlinux-compatible.configurationLimit = 5;
+
   nix = {
     settings = {
       max-jobs = 3;
@@ -91,10 +97,18 @@ in {
     };
     gc = {
       automatic = true;
-      dates = "monthly";
-      options = "--delete-older-than 7d";
+      dates = "weekly";
+      options = "--delete-older-than 21d";
     };
     daemonIOSchedPriority = 7;
+    # No channels: the Pi never evaluates its own config (pushed from the host).
+    channel.enable = false;
+  };
+  # `nix shell nixpkgs#…` / <nixpkgs> on the Pi use the system's own nixpkgs
+  # (already in the store, cache hits).
+  nixpkgs.flake = {
+    setFlakeRegistry = true;
+    setNixPath = true;
   };
 
   security = {
