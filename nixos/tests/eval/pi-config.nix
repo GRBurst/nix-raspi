@@ -1,6 +1,6 @@
 # Pi configuration (spec §3.2): deployment access, removals, boot/GC
 # hygiene. Reads option values only; never forces the toplevel.
-{ lib, rpi, ... }:
+{ lib, rpi, nixpkgs, ... }:
 let
   cfg = rpi.config;
   keys = import ../../keys.nix;
@@ -11,6 +11,10 @@ let
   definedInConf = opt:
     lib.concatMap (d: lib.toList d.value)
     (lib.filter (d: d.file == confFile) opt.definitionsWithLocations);
+  extlinux = cfg.boot.loader.generic-extlinux-compatible;
+  limit = 5;
+  gc = cfg.nix.gc;
+  nixPath = cfg.nix.nixPath;
 in
 {
   # --- access (Task 2.1) ---
@@ -54,4 +58,23 @@ in
   "no wireless-regdb firmware from configuration.nix" =
     !lib.any (p: lib.hasInfix "wireless-regdb" p.name)
       (definedInConf rpi.options.hardware.firmware);
+
+  # --- boot/GC hygiene (Task 2.3) ---
+  # P4: the effect, not just the value. nvmd's U-Boot path runs
+  # generic-extlinux-compatible's populateCmd; the raspberry-pi
+  # configurationLimit is "Used only by `kernel` bootloader!".
+  "extlinux keeps 5 generations (populateCmd -g 5)" =
+    extlinux.configurationLimit == limit
+    && lib.hasInfix "-g ${toString limit} " extlinux.populateCmd;
+
+  "nix gc weekly, older than 21d" =
+    gc.automatic && gc.dates == [ "weekly" ] && gc.options == "--delete-older-than 21d";
+
+  "channels off" =
+    !cfg.nix.channel.enable && !lib.any (lib.hasInfix "channels") nixPath;
+
+  "flake registry and NIX_PATH point at system nixpkgs" =
+    cfg.nixpkgs.flake.setFlakeRegistry && cfg.nixpkgs.flake.setNixPath
+    && (cfg.nix.registry.nixpkgs.to.path or null) == nixpkgs.outPath
+    && lib.elem "nixpkgs=flake:nixpkgs" nixPath;
 }
