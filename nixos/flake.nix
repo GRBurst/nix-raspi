@@ -128,6 +128,7 @@
         == [ "nix-command" "flakes" ];
       # the emulator must be usable in the nix build sandbox: either the
       # kernel already holds it open (F flag) or the sandbox exposes it
+      # (the default without static emulators: extra-sandbox-paths)
       sandboxPaths =
         hostTestSystem.config.boot.binfmt.registrations.aarch64-linux.fixBinary
         || lib.any
@@ -135,10 +136,6 @@
           hostTestSystem.config.nix.settings.extra-sandbox-paths;
       nvmdCache = lib.elem "https://nixos-raspberrypi.cachix.org"
         hostTestSystem.config.nix.settings.extra-substituters;
-      # F flag: the qemu handler must also work inside the card chroot that
-      # nixos-install uses (see modules/build-host.nix)
-      chrootEmulation =
-        hostTestSystem.config.boot.binfmt.registrations.aarch64-linux.fixBinary;
       wrapperPkg = lib.any
         (p: p.name == "rpi-deploy-flake-wrapper")
         hostTestSystem.config.environment.systemPackages;
@@ -153,7 +150,6 @@
     && (lib.assertMsg contract.expFeatures "build-host contract: nix experimental-features include nix-command + flakes")
     && (lib.assertMsg contract.sandboxPaths "build-host contract: the qemu-aarch64 handler is usable in the nix sandbox (F flag or extra-sandbox-paths)")
     && (lib.assertMsg contract.nvmdCache "build-host contract: nix extra-substituters include the nixos-raspberrypi cache")
-    && (lib.assertMsg contract.chrootEmulation "build-host contract: the aarch64 binfmt handler has the F flag (works in the nixos-install chroot)")
     && (lib.assertMsg contract.wrapperPkg "build-host contract: rpi-deploy wrapper is in environment.systemPackages")
   then
   {
@@ -240,25 +236,6 @@
               default = rpiDeploy system;
             } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
               nixos-rebuild = (pkgsFor system).nixos-rebuild-ng;
-
-              # The binfmt_misc registration line (with the F flag) that
-              # `rpi-deploy install` writes temporarily to
-              # /proc/sys/fs/binfmt_misc/register while nixos-install runs.
-              # Derived from the build-host module's own aarch64 registration
-              # (static qemu), so it is what boot.binfmt.preferStaticEmulators
-              # would set up permanently. Building it fetches that qemu.
-              # The interpreter is referenced directly instead of through
-              # /run/binfmt/<name>, so it needs no tmpfiles/systemd state.
-              rpi-binfmt =
-                let
-                  r = hostTestSystem.config.boot.binfmt.registrations.aarch64-linux;
-                  flags = nixpkgs.lib.optionalString r.preserveArgvZero "P"
-                    + nixpkgs.lib.optionalString (r.openBinary && !r.matchCredentials) "O"
-                    + nixpkgs.lib.optionalString r.matchCredentials "C"
-                    + "F";
-                in
-                (pkgsFor system).writeText "rpi-binfmt-register"
-                  ":rpi-deploy-aarch64:M:${toString r.offset}:${r.magicOrExtension}:${toString r.mask}:${r.interpreter}:${flags}";
             });
 
             # recursiveUpdate, not `//`: the x86_64-only checks below must be
