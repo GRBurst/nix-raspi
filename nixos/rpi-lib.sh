@@ -65,3 +65,103 @@ rl_check_builds() {
     fi
     return 0
 }
+
+# rl_conf_ref: flake reference of the Pi's nixosConfiguration.
+rl_conf_ref() { echo "$RL_FLAKE#nixosConfigurations.$RL_ATTR"; }
+
+# rl_kernel_paths: kernel and kernel-modules out paths, one per line.
+rl_kernel_paths() {
+    local k m ref
+    ref="$(rl_conf_ref).config.boot.kernelPackages.kernel"
+    k="$(nix eval --accept-flake-config --raw "$ref.outPath")" || return "$RL_E_BUILD"
+    m="$(nix eval --accept-flake-config --raw "$ref.modules.outPath")" || return "$RL_E_BUILD"
+    [[ -n "$k" && -n "$m" ]] || return "$RL_E_BUILD"
+    printf '%s\n%s\n' "$k" "$m"
+}
+
+# rl_cache_has PATH...: 0 iff every PATH is in $RL_CACHE_URL. Any error
+# (404, network, eviction) counts as a miss.
+rl_cache_has() {
+    local p
+    for p in "$@"; do
+        if ! nix path-info --store "$RL_CACHE_URL" "$p" >/dev/null 2>&1; then
+            echo "guard: not in $RL_CACHE_URL (or the cache is unreachable): $p" >&2
+            return 1
+        fi
+    done
+}
+
+# rl_guard BUILD_ATTR MAX (BUILD_ATTR: toplevel | sdImage)
+# Cache guard (the kernel must be substitutable), then the build guard on a
+# dry run of config.system.build.BUILD_ATTR. Nothing is built or copied.
+# -> 0 | RL_E_CACHE | RL_E_FORBIDDEN | RL_E_TOO_MANY | RL_E_BUILD (eval error)
+rl_guard() {
+    local attr="$1" max="$2" paths dry
+    case "$attr" in
+    toplevel | sdImage) ;;
+    *)
+        echo "rl_guard: unknown build attribute '$attr'" >&2
+        return "$RL_E_USAGE"
+        ;;
+    esac
+    if ! paths="$(rl_kernel_paths)"; then
+        echo "guard: cannot evaluate the kernel of $(rl_conf_ref)" >&2
+        return "$RL_E_BUILD"
+    fi
+    local -a kernel_paths
+    mapfile -t kernel_paths <<<"$paths"
+    rl_cache_has "${kernel_paths[@]}" || return "$RL_E_CACHE"
+    if ! dry="$(nix build --accept-flake-config --dry-run \
+        "$(rl_conf_ref).config.system.build.$attr" 2>&1)"; then
+        printf '%s\n' "$dry" >&2
+        echo "guard: dry run of $(rl_conf_ref) ($attr) failed" >&2
+        return "$RL_E_BUILD"
+    fi
+    rl_check_builds <(printf '%s\n' "$dry") "$max"
+}
+
+# rl_triplet_local DIR: "kernel initrd kernel-modules" of a system closure,
+# resolved. Two systems with equal triplets boot the same kernel stack.
+rl_triplet_local() {
+    echo "$(readlink -f "$1/kernel") $(readlink -f "$1/initrd") $(readlink -f "$1/kernel-modules")"
+}
+
+# rl_triplet_remote current|booted: the same for /run/<which>-system on the Pi.
+rl_triplet_remote() {
+    local s="/run/$1-system" out
+    out="$(rl_ssh readlink -f "$s/kernel" "$s/initrd" "$s/kernel-modules")" || return 1
+    local -a t
+    mapfile -t t <<<"$out"
+    [[ "${#t[@]}" -eq 3 ]] || {
+        echo "unexpected answer from $RL_TARGET for $s: $out" >&2
+        return 1
+    }
+    echo "${t[0]} ${t[1]} ${t[2]}"
+}
+
+# rl_needs_reboot A B: 0 iff the triplets differ (the new kernel, initrd or
+# modules only take effect after a reboot).
+rl_needs_reboot() { [[ "$1" != "$2" ]]; }
+
+# rl_sshopts: ssh options for the Pi, also used as NIX_SSHOPTS.
+rl_sshopts() { echo "-p $RL_SSH_PORT${RL_SSH_OPTS:+ $RL_SSH_OPTS}"; }
+
+# rl_ssh CMD...: run CMD on the Pi.
+rl_ssh() {
+    local -a opts
+    read -ra opts <<<"$RL_SSH_OPTS"
+    ssh -p "$RL_SSH_PORT" "${opts[@]}" "$RL_TARGET" "$@"
+}
+
+# rl_nixos_rebuild ARGS...: the flake's pinned nixos-rebuild (never the
+# host's: a newer one half-applies on the Pi, see E3), ssh options for the
+# Pi in NIX_SSHOPTS.
+rl_nixos_rebuild() {
+    local -a tool
+    if [[ -n "${RPI_NIXOS_REBUILD:-}" ]]; then
+        tool=("$RPI_NIXOS_REBUILD")
+    else
+        tool=(nix run --accept-flake-config "$RL_FLAKE#nixos-rebuild" --)
+    fi
+    NIX_SSHOPTS="$(rl_sshopts)" "${tool[@]}" "$@"
+}
