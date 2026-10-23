@@ -59,6 +59,7 @@ clone() { rm -rf "${T:?}/$1"; git clone -q "$T/origin.git" "$T/$1"; }
 mock nix <<'EOF'
 case " $* " in
 *" eval "*" --expr "*)
+    echo "nix-cwd $PWD" >>"$MOCK_LOG"
     printf '%s' "${MOCK_CACHE_NAME-}" ;;
 *" eval "*".kernel.modules.outPath "*) printf '%s' "$M_DEF" ;;
 *" eval "*".kernel.outPath "*) printf '%s' "$K_DEF" ;;
@@ -79,6 +80,16 @@ case " $* " in
     echo "$MOCK_TOP" ;;
 *" hash convert "*)
     echo "sha256-MOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOC=" ;;
+esac
+exit 0
+EOF
+
+# cachix: push/pin print on stdout (the scripts must keep it off theirs);
+# MOCK_PUSH_RC / MOCK_PIN_RC fail them.
+mock cachix <<'EOF'
+case "$1" in
+push) echo "pushing $3"; exit "${MOCK_PUSH_RC:-0}" ;;
+pin) echo "pinned $3"; exit "${MOCK_PIN_RC:-0}" ;;
 esac
 exit 0
 EOF
@@ -186,5 +197,57 @@ expect_exit "b9 non-numeric --max-builds -> usage" 2
 run_cmd b9h -- build --help
 expect_exit "b9 --help" 0
 expect_grepf "b9 --help shows the usage" "--update-lock" "$OUT"
+
+# =============================================================================
+# T7.2 ci/cache-name.sh, ci/publish.sh
+# =============================================================================
+reset_log
+MOCK_CACHE_NAME='' run_cmd c1 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b/nixos"
+expect_exit "c1 no cache in keys.nix -> exit 1" 1
+expect_grepf "c1 says where to set it" "nixos/keys.nix" "$ERR"
+expect_eq "c1 stdout empty" "" "$(cat "$OUT")"
+
+reset_log
+MOCK_CACHE_NAME=neptun-x run_cmd c2 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b/nixos"
+expect_exit "c2 cache name set" 0
+expect_eq "c2 stdout is name=<cache>" "name=neptun-x" "$(cat "$OUT")"
+expect_eq "c2 nix eval --impure --raw --expr" 1 "$(log_count '^nix eval --impure --raw --expr ')"
+expect_eq "c2 reads keys.nix of --flake DIR" 1 "$(log_count "^nix-cwd $T/b/nixos\$")"
+expect_eq "c2 the expression imports ./keys.nix" 1 "$(log_count 'import \./keys\.nix')"
+
+reset_log
+MOCK_CACHE_NAME=neptun-y run_cmd c2d -- bash "$CI_DIR/cache-name.sh"
+expect_eq "c2 DIR defaults to the flake next to ci/" 1 \
+    "$(log_count "^nix-cwd $(cd "$CI_DIR/.." && pwd)\$")"
+
+MOCK_CACHE_NAME=$'evil\ntop=/nix/store/x' run_cmd c3 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b/nixos"
+expect_exit "c3 a name that is not a cachix name -> exit 1" 1
+expect_eq "c3 stdout empty" "" "$(cat "$OUT")"
+
+reset_log
+run_cmd u1 -- bash "$CI_DIR/publish.sh" c "$TOP"
+expect_exit "u1 publish" 0
+expect_eq "u1 pushes the closure" 1 "$(log_count "^cachix push c $TOP\$")"
+expect_eq "u1 pins neptun, keeping 4 revisions" 1 \
+    "$(log_count "^cachix pin c neptun $TOP --keep-revisions 4\$")"
+expect_true "u1 push before pin" \
+    test "$(first_line '^cachix push')" -lt "$(first_line '^cachix pin')"
+expect_eq "u1 stdout empty (cachix output goes to stderr)" "" "$(cat "$OUT")"
+
+reset_log
+MOCK_PUSH_RC=1 run_cmd u2 -- bash "$CI_DIR/publish.sh" c "$TOP"
+expect_true "u2 push failure -> non-zero" test "$RC" -ne 0
+expect_eq "u2 push failure -> no pin" 0 "$(log_count '^cachix pin')"
+
+reset_log
+MOCK_PIN_RC=1 run_cmd u3 -- bash "$CI_DIR/publish.sh" c "$TOP"
+expect_true "u3 pin failure -> non-zero" test "$RC" -ne 0
+
+reset_log
+run_cmd u4 -- bash "$CI_DIR/publish.sh" c
+expect_exit "u4 missing TOP -> usage" 2
+expect_eq "u4 nothing pushed" 0 "$(log_count '^cachix')"
+run_cmd u4h -- bash "$CI_DIR/publish.sh" --help
+expect_exit "u4 --help" 0
 
 summary
