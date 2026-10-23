@@ -9,10 +9,42 @@
 {
   config,
   lib,
+  pkgs,
+  utils,
   ...
 }: let
   cfg = config.rpi.pull;
   url = lib.types.nullOr (lib.types.strMatching "https?://.+");
+  stateDir = "/var/lib/rpi-pull";
+
+  settings = {
+    inherit (cfg) pointerUrl cacheUrl cachePublicKey;
+  };
+  unset = lib.attrNames (lib.filterAttrs (_: v: v == null) settings);
+  partial = unset != [ ] && unset != lib.attrNames settings;
+
+  # rpi-pull plus the fingerprint library it sources (D1); the Pi carries
+  # no other host script.
+  rpiPull = pkgs.stdenvNoCC.mkDerivation {
+    name = "rpi-pull";
+    dontUnpack = true;
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+    installPhase = ''
+      install -Dm755 ${../rpi-pull.sh} $out/bin/rpi-pull
+      install -Dm644 ${../rpi-fp.sh} $out/libexec/rpi-pull/rpi-fp.sh
+      wrapProgram $out/bin/rpi-pull \
+        --set RPI_FP_LIB $out/libexec/rpi-pull/rpi-fp.sh \
+        --prefix PATH : ${lib.makeBinPath [
+          config.nix.package
+          pkgs.curl
+          pkgs.jq
+          pkgs.coreutils
+          pkgs.util-linux
+          config.systemd.package
+          pkgs.gnugrep
+        ]}
+    '';
+  };
 in {
   options.rpi.pull = {
     enable = lib.mkOption {
@@ -78,12 +110,76 @@ in {
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = cfg.pointerUrl != null && cfg.cacheUrl != null && cfg.cachePublicKey != null;
-        message = "rpi.pull.enable needs rpi.pull.pointerUrl, rpi.pull.cacheUrl and rpi.pull.cachePublicKey (keys.nix `cache`).";
-      }
-    ];
-  };
+  config = lib.mkMerge [
+    {
+      # A10: a partial setup would leave rpi.pull silently off.
+      warnings = lib.optional (partial && !cfg.enable)
+        "rpi.pull stays disabled: ${lib.concatMapStringsSep ", " (n: "rpi.pull.${n}") unset} not set (keys.nix `cache` gives cacheUrl and cachePublicKey).";
+    }
+
+    (lib.mkIf cfg.enable {
+      assertions = [
+        {
+          assertion = unset == [ ];
+          message = "rpi.pull.enable needs rpi.pull.pointerUrl, rpi.pull.cacheUrl and rpi.pull.cachePublicKey (keys.nix `cache`).";
+        }
+      ];
+    })
+
+    # Only a complete setup gets units: enabling an incomplete one fails the
+    # assertion above, not with an evaluation error on a null argument.
+    (lib.mkIf (cfg.enable && unset == [ ]) {
+      # D9: http only for the qemu smoke test.
+      warnings = lib.optional (lib.hasPrefix "http://" cfg.pointerUrl)
+        "rpi.pull.pointerUrl uses plain HTTP: the pointer is not authenticated (use HTTPS outside tests)";
+
+      system.build.rpiPull = rpiPull;
+
+      # cache.nixos.org (nixpkgs, mkAfter) and nvmd's cache stay.
+      nix.settings.substituters = [ cfg.cacheUrl ];
+      nix.settings.trusted-public-keys = [ cfg.cachePublicKey ];
+
+      systemd.timers.rpi-pull = {
+        description = "Daily check for a new system published by CI";
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnCalendar = cfg.onCalendar;
+          Persistent = true;
+          RandomizedDelaySec = "30m";
+        };
+      };
+
+      systemd.services.rpi-pull = {
+        description = "Apply the system CI published for this Pi (rpi-pull)";
+        # Persistent catch-up may fire at boot, before NTP (no RTC).
+        after = [ "network-online.target" "time-sync.target" ];
+        wants = [ "network-online.target" "time-sync.target" ];
+        # D15: switch-to-configuration runs inside this unit; a switch that
+        # changes the unit must neither restart nor stop it.
+        restartIfChanged = false;
+        unitConfig.X-StopOnRemoval = false;
+        environment.HOME = "/root";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${rpiPull}/bin/rpi-pull "
+            + utils.escapeSystemdExecArgs [
+              "--pointer-url" cfg.pointerUrl
+              "--cache-url" cfg.cacheUrl
+              "--cache-key" cfg.cachePublicKey
+              "--host" config.system.name
+              "--reboot-time" cfg.rebootTime
+              "--max-age-days" (toString cfg.maxAgeDays)
+              "--state-dir" stateDir
+            ];
+          StateDirectory = "rpi-pull";
+          # ~2x the measured worst case (s8: 180 MB with 2 substitution jobs)
+          MemoryMax = "384M";
+          Nice = 19;
+          IOSchedulingClass = "idle";
+          CPUSchedulingPolicy = "idle";
+          TimeoutStartSec = "2h";
+        };
+      };
+    })
+  ];
 }
