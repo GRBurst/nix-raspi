@@ -34,7 +34,9 @@ Usage:
   status   current, booted and boot-default generation on the Pi, and whether
            a reboot is pending (the boot default is not running, or its
            kernel, initrd, modules, dtbs, kernel-params or NIXOS_BOOT
-           firmware/config.txt/U-Boot differ from the booted system's)
+           firmware/config.txt/U-Boot differ from the booted system's); then the
+           pull state: the applied pointer seq and its age, and the last
+           rpi-pull run (result, exit code, time) from /var/lib/rpi-pull
 
 Defaults: --flake $RPI_FLAKE or the current directory, --attr rpi,
   --target root@neptun, --port 2222, --max-builds 500, --out the current
@@ -254,6 +256,65 @@ do_deploy() {
     esac
 }
 
+# The pull state on the Pi, one ssh round trip: the unit's load state and the
+# state files rpi-pull writes (seq, store-path, last-run), plus the age in
+# seconds of seq (= when the pointer was applied). key=value lines.
+RL_PULL_QUERY='systemctl show -p LoadState rpi-pull.service
+d=/var/lib/rpi-pull
+for f in seq store-path last-run; do
+    [ -r "$d/$f" ] && { printf "%s=" "$f"; head -n 1 "$d/$f"; }
+done
+[ -r "$d/seq" ] && echo "age=$(( $(date +%s) - $(stat -c %Y "$d/seq") ))"
+exit 0'
+
+# fmt_age SECONDS: 90 -> 1m, 7200 -> 2h, 172800 -> 2d
+fmt_age() {
+    local s="$1"
+    if ((s < 3600)); then
+        echo "$((s / 60))m"
+    elif ((s < 172800)); then
+        echo "$((s / 3600))h"
+    else
+        echo "$((s / 86400))d"
+    fi
+}
+
+# status_pull: the pull state (rpi-pull) as the last lines of status: what was
+# applied (seq, store path, age) and the last run (result, exit, time). Never
+# fails status: an unanswerable query prints "pull: unknown".
+status_pull() {
+    local out line key val load="" seq="" path="" age="" last=""
+    if ! out="$(rl_ssh "$RL_PULL_QUERY" 2>/dev/null)"; then
+        echo "pull: unknown (cannot query rpi-pull on $RL_TARGET)"
+        return 0
+    fi
+    while IFS= read -r line; do
+        key="${line%%=*}" val="${line#*=}"
+        case "$key" in
+        LoadState) load="$val" ;;
+        seq) seq="$val" ;;
+        store-path) path="$val" ;;
+        age) age="$val" ;;
+        last-run) last="$val" ;;
+        esac
+    done <<<"$out"
+    if [[ "$load" == not-found ]]; then
+        echo "pull: disabled"
+        return 0
+    fi
+    if [[ "$seq" =~ ^[0-9]+$ ]]; then
+        [[ "$age" =~ ^[0-9]+$ ]] && age=" ($(fmt_age "$age") ago)" || age=""
+        echo "pull applied: seq $seq $path$age"
+    else
+        echo "pull applied: none"
+    fi
+    if [[ "$last" =~ ^time=(.*)\ exit=([0-9]+)\ result=(.*)$ ]]; then
+        echo "pull last run: ${BASH_REMATCH[3]} (exit ${BASH_REMATCH[2]}) at ${BASH_REMATCH[1]}"
+    else
+        echo "pull last run: never"
+    fi
+}
+
 # status: the running, booted and boot-default systems, and whether a reboot
 # would change the running system: the boot default is not running (after
 # `deploy boot`/`test`), or its boot fingerprint (rl_fp_*: kernel, initrd,
@@ -281,6 +342,7 @@ do_status() {
     else
         echo "reboot pending: yes (${reasons[0]}; ${reasons[1]})"
     fi
+    status_pull
 }
 
 # --- argument parsing --------------------------------------------------------

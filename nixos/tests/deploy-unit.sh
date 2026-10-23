@@ -550,6 +550,10 @@ case " $* " in
 *" bash -s -- "*" /nix/store ")
     exec bash -s -- "$MOCK_PI${a[-2]}" "$FX_STORE" ;;
 *" sync ") exit "${MOCK_SYNC_RC:-0}" ;;
+*"rpi-pull.service"*)
+    # the pull-state query: MOCK_PULL_OUT is its output (default: no rpi-pull unit)
+    [[ -z "${MOCK_PULL_FAIL:-}" ]] || { echo "ssh: query failed" >&2; exit 1; }
+    printf '%s\n' "${MOCK_PULL_OUT-LoadState=not-found}" ;;
 *) echo "ssh mock: unexpected command: $*" >&2; exit 1 ;;
 esac
 EOF
@@ -867,4 +871,52 @@ expect_true "s4 ssh failure -> non-zero" test "$RC" -ne 0
 expect_grepf "s4 cannot reach root@neptun" "cannot reach root@neptun" "$ERR"
 expect_not_grep "s4 no half status" "reboot pending" "$OUT"
 
+
+# =============================================================================
+# status: the Pi's pull state (S5/S6: applied seq + age, last run)
+# =============================================================================
+pi_state sysA2 sysA sysA2
+P7=/nix/store/pppppppppppppppppppppppppppppppp-nixos-system-neptun-x
+export MOCK_PULL_OUT="LoadState=loaded
+seq=7
+store-path=$P7
+age=172800
+last-run=time=2026-10-25T05:12:03+01:00 exit=0 result=success"
+reset_log
+run_cmd s5 -- rd status
+expect_exit "s5 status succeeds" 0
+expect_grepf "s5 status shows the applied pull seq" "pull applied: seq 7 $P7 (2d ago)" "$OUT"
+expect_grepf "s5 status shows the last run" "pull last run: success (exit 0) at 2026-10-25T05:12:03+01:00" "$OUT"
+expect_grep "s5 pull lines come after reboot pending" "reboot pending" "$OUT"
+expect_true "s5 pull state is the last section" test "$(grep -n '^reboot pending:' "$OUT" | cut -d: -f1)" -lt "$(grep -n '^pull applied:' "$OUT" | cut -d: -f1)"
+expect_grep "s5 query goes to the target" "^ssh -p 2222 root@neptun .*rpi-pull" "$MOCK_LOG"
+
+# a failed run is shown with its result and exit code
+export MOCK_PULL_OUT="LoadState=loaded
+seq=7
+store-path=$P7
+age=7200
+last-run=time=2026-10-26T05:00:00+01:00 exit=32 result=untrusted"
+run_cmd s5 -- rd status
+expect_grepf "s5 failed last run shows result and exit" "pull last run: untrusted (exit 32) at 2026-10-26T05:00:00+01:00" "$OUT"
+expect_grepf "s5 age in hours" "(2h ago)" "$OUT"
+
+# s6 loaded, nothing applied, never ran
+export MOCK_PULL_OUT="LoadState=loaded"
+run_cmd s6 -- rd status
+expect_grepf "s6 nothing applied" "pull applied: none" "$OUT"
+expect_grepf "s6 never ran" "pull last run: never" "$OUT"
+
+# s7 no rpi-pull unit: exactly one pull line
+export MOCK_PULL_OUT="LoadState=not-found"
+run_cmd s7 -- rd status
+expect_eq "s7 one pull line" 1 "$(grep -c '^pull' "$OUT")"
+expect_grepf "s7 disabled" "pull: disabled" "$OUT"
+
+# s8 the pull query fails: status still succeeds and says so
+unset MOCK_PULL_OUT
+MOCK_PULL_FAIL=1 run_cmd s8 -- rd status
+expect_exit "s8 pull query failure -> status still 0" 0
+expect_grepf "s8 pull unknown" "pull: unknown (cannot query rpi-pull on root@neptun)" "$OUT"
+expect_grep "s8 booted/reboot lines still printed" "^reboot pending: " "$OUT"
 summary
