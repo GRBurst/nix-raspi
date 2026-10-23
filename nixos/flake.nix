@@ -52,8 +52,9 @@
     pkgsFor = system: nixpkgs.legacyPackages.${system};
     forSystem = systems: lib.genAttrs systems;
 
-    # The host tool (image/flash/deploy/status) as a package: pure shell, so
-    # it is usable on any build host. Explicit mkDerivation: the
+    # The host tool (image/flash/deploy/status) and the weekly job
+    # (rpi-autoupdate, run by rpi.buildHost.autoUpdate) as a package: pure
+    # shell, so it is usable on any build host. Explicit mkDerivation: the
     # writeShellScript* helpers' store-path shape varies between nixpkgs
     # versions, but $out/bin/<name> is what environment.systemPackages
     # (buildEnv) requires. The shared guard library goes to libexec and the
@@ -72,13 +73,16 @@
       installPhase = ''
         mkdir -p $out/bin $out/libexec/rpi-deploy
         cp ${./rpi-deploy.sh} $out/bin/rpi-deploy
+        cp ${./rpi-autoupdate.sh} $out/bin/rpi-autoupdate
         cp ${./rpi-lib.sh} $out/libexec/rpi-deploy/rpi-lib.sh
-        chmod 755 $out/bin/rpi-deploy
-        wrapProgram $out/bin/rpi-deploy \
-          --set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh \
-          --suffix PATH : ${lib.makeBinPath (with pkgs; [
-            util-linux coreutils zstd gnugrep gnused gawk git openssh
-          ])}
+        for tool in rpi-deploy rpi-autoupdate; do
+          chmod 755 $out/bin/$tool
+          wrapProgram $out/bin/$tool \
+            --set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh \
+            --suffix PATH : ${lib.makeBinPath (with pkgs; [
+              util-linux coreutils zstd gnugrep gnused gawk git openssh
+            ])}
+        done
       '';
       meta.mainProgram = "rpi-deploy";
     };
@@ -253,15 +257,15 @@
               rpi-deploy-syntax = (pkgsFor system).runCommand "rpi-deploy-syntax-check" {
                 src = lib.fileset.toSource {
                   root = ./.;
-                  fileset = lib.fileset.unions [ ./rpi-deploy.sh ./rpi-lib.sh ];
+                  fileset = lib.fileset.unions [ ./rpi-deploy.sh ./rpi-autoupdate.sh ./rpi-lib.sh ];
                 };
                 nativeBuildInputs = [ (pkgsFor system).shellcheck ];
               } ''
                 cd $src
-                for f in rpi-deploy.sh rpi-lib.sh; do
+                for f in rpi-deploy.sh rpi-autoupdate.sh rpi-lib.sh; do
                   ${(pkgsFor system).bash}/bin/bash -n $f
                 done
-                shellcheck -x -S warning rpi-deploy.sh rpi-lib.sh
+                shellcheck -x -S warning rpi-deploy.sh rpi-autoupdate.sh rpi-lib.sh
                 touch $out
               '';
             }))
@@ -294,6 +298,30 @@
                   } ''
                     RPI_DEPLOY_SRC=$src/rpi-deploy.sh RPI_LIB=$src/rpi-lib.sh FIXTURES=$src/tests/fixtures \
                       ${x86Pkgs.bash}/bin/bash $src/tests/deploy-unit.sh
+                    touch $out
+                  '';
+
+                  # Unit tests for rpi-autoupdate.sh (the weekly job): the
+                  # real script + lib against mocked nix/ssh/timeout/
+                  # nixos-rebuild and real git on throwaway repositories
+                  # (lock flow, cache fallback, guards, boot -> switch or
+                  # scheduled reboot, push to auto-update, the user's
+                  # checkout left alone). No network, no real Pi.
+                  autoupdate-unit = x86Pkgs.runCommand "autoupdate-unit-check" {
+                    src = lib.fileset.toSource {
+                      root = ./.;
+                      fileset = lib.fileset.unions [
+                        ./rpi-autoupdate.sh
+                        ./rpi-lib.sh
+                        ./tests/harness.sh
+                        ./tests/autoupdate-unit.sh
+                        ./tests/fixtures
+                      ];
+                    };
+                    nativeBuildInputs = with x86Pkgs; [ git gnugrep gnused gawk findutils ];
+                  } ''
+                    RPI_AUTOUPDATE_SRC=$src/rpi-autoupdate.sh RPI_LIB=$src/rpi-lib.sh FIXTURES=$src/tests/fixtures \
+                      ${x86Pkgs.bash}/bin/bash $src/tests/autoupdate-unit.sh
                     touch $out
                   '';
 
