@@ -15,6 +15,7 @@ let
   limit = 5;
   gc = cfg.nix.gc;
   nixPath = cfg.nix.nixPath;
+  journaldConf = cfg.environment.etc."systemd/journald.conf".text;
 in
 {
   # --- access (Task 2.1) ---
@@ -77,4 +78,11 @@ in
     cfg.nixpkgs.flake.setFlakeRegistry && cfg.nixpkgs.flake.setNixPath
     && (cfg.nix.registry.nixpkgs.to.path or null) == nixpkgs.outPath
     && lib.elem "nixpkgs=flake:nixpkgs" nixPath;
+
+  # --- dead/duplicate config (Task 2.4); journald belongs to rpi.sdWear ---
+  "no cma=32M kernel parameter" = !lib.elem "cma=32M" cfg.boot.kernelParams;
+
+  "no stale journald limits in configuration.nix" =
+    !lib.hasInfix "SystemMaxUse=" journaldConf
+    && !lib.hasInfix "RuntimeMaxUse=8M" journaldConf;
 }
