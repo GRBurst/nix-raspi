@@ -162,8 +162,9 @@ boot expands p2 to the card (needs ≥ 5 GiB).
 `zstdcat | sudo dd bs=4M conv=fsync oflag=direct status=progress` and reads it
 back (`sudo head -c LEN DEVICE | sha256sum` against the image). It refuses:
 anything that is not a block device, a partition instead of a whole disk, a
-non-removable disk (an `mmcblkN` reader counts as removable: Linux never sets
-the flag on MMC), the disk that holds the host's `/`, a device with mounted
+non-removable disk (an SD card in a built-in `mmcblkN` reader counts as
+removable, since Linux never sets the flag on MMC, but only if
+`/sys/block/mmcblkN/device/type` is `SD`: eMMC is refused), the disk that holds the host's `/`, a device with mounted
 partitions, and a missing or wrong confirmation: you must type the device name
 (`type the device name (sdX):`). Writing is the only privileged step (plus the
 read-back); the image is 1.3 GiB compressed, 4.2 GiB raw, ~4 min each way at

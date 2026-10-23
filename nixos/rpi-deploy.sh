@@ -41,7 +41,7 @@ Defaults: --flake $RPI_FLAKE or the current directory, --attr rpi,
   directory.
 Environment: RPI_FLAKE (default flake dir), RPI_SSH_OPTS (extra ssh options),
   RPI_NIXOS_REBUILD (nixos-rebuild to use instead of the flake's pinned one),
-  RPI_LIB (path of rpi-lib.sh); test hook RPI_ALLOW_NONBLOCK=1.
+  RPI_LIB (path of rpi-lib.sh); test hooks RPI_ALLOW_NONBLOCK=1, RPI_SYSFS.
 Exit codes: 2 usage, 10 kernel not cached, 11 forbidden local build,
   12 too many local builds, 13 build/eval failed, 14 deploy failed,
   15 would downgrade, 16 device refused, 17 verify failed.
@@ -92,8 +92,17 @@ blk() {
     printf '%s\n' "${v%"${v##*[![:space:]]}"}"
 }
 
+# is_sd_card NAME: NAME is an mmcblkN whose card is an SD card (not eMMC).
+# RPI_SYSFS (default /sys) is a test hook.
+is_sd_card() {
+    local t=""
+    [[ "$1" =~ ^mmcblk[0-9]+$ ]] || return 1
+    read -r t <"${RPI_SYSFS:-/sys}/block/$1/device/type" 2>/dev/null || true
+    [[ "$t" == SD ]]
+}
+
 # flash_check_device DEV: refuse anything but an unmounted, removable whole
-# disk that does not hold the host's /.
+# disk (or SD card in a built-in reader) that does not hold the host's /.
 flash_check_device() {
     local dev="$1" name type rm root mounts
     if [[ ! -b "$dev" ]] && ! [[ "${RPI_ALLOW_NONBLOCK:-0}" == 1 && -f "$dev" ]]; then
@@ -105,9 +114,10 @@ flash_check_device() {
         die_rc "$RL_E_DEVICE" "$dev is a '${type:-unknown}', not a whole disk (give e.g. /dev/sdb, not /dev/sdb1)"
     # MMC/SD block devices never carry the removable flag (linux
     # drivers/mmc/core/block.c: the medium is removable, not the device), so
-    # a card in a built-in reader (mmcblkN, RM=0) counts as removable.
+    # an SD card in a built-in reader (mmcblkN, RM=0, sysfs device/type
+    # "SD") counts as removable; eMMC (type "MMC", soldered in) does not.
     rm="$(blk RM "$dev")"
-    if [[ "$rm" != 1 && ! "$name" =~ ^mmcblk[0-9]+$ ]]; then
+    if [[ "$rm" != 1 ]] && ! is_sd_card "$name"; then
         die_rc "$RL_E_DEVICE" "$dev is not removable (RM=${rm:-?}); refusing to overwrite it"
     fi
     root="$(findmnt -nro SOURCE --mountpoint / 2>/dev/null)" || root=""

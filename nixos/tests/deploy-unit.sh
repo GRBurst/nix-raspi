@@ -473,15 +473,34 @@ expect_exit "f13 typing the full device path also confirms" 0
 
 # MMC/SD block devices never carry the kernel's removable flag (see
 # flash_check_device), so a card in a built-in reader is mmcblkN with RM=0.
+# Only an SD card (sysfs device/type "SD") counts; eMMC ("MMC") is
+# soldered-in storage. RPI_SYSFS points the check at a fixture tree.
 reset_log
 MMC="$T/dev/mmcblk0"
 head -c 65536 /dev/zero >"$MMC"
+export RPI_SYSFS="$T/sys"
+mmc_type() {
+    rm -rf "$RPI_SYSFS"
+    [[ -z "$1" ]] && return 0
+    mkdir -p "$RPI_SYSFS/block/mmcblk0/device"
+    echo "$1" >"$RPI_SYSFS/block/mmcblk0/device/type"
+}
+mmc_type SD
 MOCK_RM=0 run_cmd f11 -- rd flash "$IMG" "$MMC" <<<"mmcblk0"
 expect_exit "f11 an SD card in a built-in reader (mmcblk0, RM=0) is accepted" 0
 expect_grepf "f11 verified" "verified" "$OUT"
 reset_log
 MOCK_RM=0 MOCK_ROOTSRC=/dev/mmcblk0p2 MOCK_PKNAME=mmcblk0 run_cmd f11 -- rd flash "$IMG" "$MMC" <<<"mmcblk0"
 expect_exit "f11 an mmcblk holding / is still refused" 16
+for t in MMC SDIO ""; do
+    reset_log
+    mmc_type "$t"
+    MOCK_RM=0 run_cmd f11 -- rd flash "$IMG" "$MMC" <<<"mmcblk0"
+    expect_exit "f11 mmcblk0 with device/type '${t:-missing}' (eMMC/other, RM=0) is refused" 16
+    expect_grepf "f11 ($t) says not removable" "not removable" "$ERR"
+    expect_eq "f11 ($t) nothing written" 0 "$(log_count '^sudo ')"
+done
+unset RPI_SYSFS
 
 reset_log; new_dev
 MOCK_MOUNTS_FAIL=1 run_cmd f14 -- rd flash "$IMG" "$DEV" <<<"sdz"
