@@ -107,10 +107,11 @@ pull state (last seq, last run result via `systemctl show rpi-pull`).
 
 - Remove `rpi.buildHost.autoUpdate`, `rpi-autoupdate.sh`,
   `tests/autoupdate-unit.sh`, `eval-build-host` autoUpdate rows, the
-  restricted auto-update key (`keys.autoUpdate`, `hostAddress`) and the
-  `auto-update` branch logic in `rpi-deploy` (downgrade check now compares
-  the working tree lock with `main`'s lock? → simplified: warn when the
-  working tree lock is older than `origin/main`'s, if a remote exists).
+  restricted auto-update key (`keys.autoUpdate`, `hostAddress`).
+- `rpi-deploy deploy` downgrade check: same lock-content comparison as
+  today, but against `origin/main` (where CI commits lock updates) instead
+  of branch `auto-update`; skipped when there is no `origin` remote; the
+  user is told to `git pull` first; `--force` overrides.
 - System name: drop the `sd-card` tag so the toplevel is
   `nixos-system-neptun-<version>` (spec §3 "one configuration" parity).
 
