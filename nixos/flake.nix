@@ -176,6 +176,8 @@
                   ./modules/sd-wear.nix
                   ./modules/headless.nix
                   ./modules/external-storage.nix
+                  # rpi-pull timer/service (rpi.pull.*): the Pi pulls CI builds
+                  ./modules/pull-update.nix
 
                   ./configuration.nix
 
@@ -249,18 +251,24 @@
               # nativeBuildInputs as a setup hook, which would execute the
               # script (with `$pkg -1 0` as positional args) before the check
               # even starts.
+              #
+              # Auto-discovered (D2): every `*.sh` outside tests/ is covered
+              # (rpi-*.sh, ci/*.sh), so new scripts need no flake edit.
               rpi-deploy-syntax = (pkgsFor system).runCommand "rpi-deploy-syntax-check" {
                 src = lib.fileset.toSource {
                   root = ./.;
-                  fileset = lib.fileset.unions [ ./rpi-deploy.sh ./rpi-lib.sh ];
+                  fileset = lib.fileset.difference
+                    (lib.fileset.fileFilter (f: f.hasExt "sh") ./.)
+                    ./tests;
                 };
                 nativeBuildInputs = [ (pkgsFor system).shellcheck ];
               } ''
                 cd $src
-                for f in rpi-deploy.sh rpi-lib.sh; do
-                  ${(pkgsFor system).bash}/bin/bash -n $f
+                mapfile -t fs < <(find . -name '*.sh' | sort)
+                for f in "''${fs[@]}"; do
+                  ${(pkgsFor system).bash}/bin/bash -n "$f"
                 done
-                shellcheck -x -S warning rpi-deploy.sh rpi-lib.sh
+                shellcheck -x -P SCRIPTDIR -S warning "''${fs[@]}"
                 touch $out
               '';
             }))
@@ -269,34 +277,36 @@
               let
                 x86Pkgs = pkgsFor "x86_64-linux";
                 aarch64Pkgs = pkgsFor "aarch64-linux";
+
+                # Unit tests, auto-discovered (D2, D4): tests/<n>-unit.sh ->
+                # checks.x86_64-linux.rpi-<n>-unit. Each runs the real
+                # scripts against mocks in $BIN (first on PATH) with real
+                # git, zstd, coreutils, flock, jq; no real builds, no
+                # network, no devices. util-linux is present for flock, but
+                # the mocks (lsblk, findmnt, ...) come first on PATH.
+                unitChecks = lib.mapAttrs'
+                  (file: _:
+                    let n = lib.removeSuffix ".sh" file; in
+                    lib.nameValuePair "rpi-${n}" (x86Pkgs.runCommand "rpi-${n}-check" {
+                      src = lib.fileset.toSource {
+                        root = ./.;
+                        fileset = lib.fileset.unions [
+                          (lib.fileset.fileFilter (f: f.hasExt "sh") ./.)
+                          ./tests/fixtures
+                        ];
+                      };
+                      nativeBuildInputs = with x86Pkgs; [
+                        git zstd gnugrep gnused gawk jq findutils util-linux coreutils
+                      ];
+                    } ''
+                      FIXTURES=$src/tests/fixtures ${x86Pkgs.bash}/bin/bash $src/tests/${file}
+                      touch $out
+                    ''))
+                  (lib.filterAttrs
+                    (f: t: t == "regular" && lib.hasSuffix "-unit.sh" f)
+                    (builtins.readDir ./tests));
               in {
                 x86_64-linux = {
-                  # Unit tests for rpi-deploy.sh + rpi-lib.sh: the real
-                  # scripts against mocked nix/ssh/sudo/lsblk/findmnt/dd/
-                  # nixos-rebuild (real git, zstd, coreutils), plus guard
-                  # parsing on real `nix build --dry-run` fixtures. No real
-                  # builds, no network, no devices (flash writes to temp
-                  # files only). util-linux is deliberately absent: lsblk
-                  # and findmnt must be the mocks.
-                  rpi-deploy-unit = x86Pkgs.runCommand "rpi-deploy-unit-check" {
-                    src = lib.fileset.toSource {
-                      root = ./.;
-                      fileset = lib.fileset.unions [
-                        ./rpi-deploy.sh
-                        ./rpi-lib.sh
-                        ./tests/harness.sh
-                        ./tests/make-sys.sh
-                        ./tests/deploy-unit.sh
-                        ./tests/fixtures
-                      ];
-                    };
-                    nativeBuildInputs = with x86Pkgs; [ git zstd gnugrep gnused gawk jq ];
-                  } ''
-                    RPI_DEPLOY_SRC=$src/rpi-deploy.sh RPI_LIB=$src/rpi-lib.sh FIXTURES=$src/tests/fixtures \
-                      ${x86Pkgs.bash}/bin/bash $src/tests/deploy-unit.sh
-                    touch $out
-                  '';
-
                   # Boots the build-host test system in a VM and verifies
                   # the module end-to-end: binfmt registration, nix aarch64
                   # support, the rpi-deploy wrapper, and that a real
@@ -345,6 +355,7 @@
                     '';
                   };
                 }
+                // unitChecks
                 # Eval-level checks: one check `eval-<name>` per
                 # tests/eval/<name>.nix (auto-discovered, see
                 # tests/eval/default.nix for the file contract).
