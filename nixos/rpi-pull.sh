@@ -16,22 +16,26 @@ usage() {
     cat <<'EOF'
 usage: rpi-pull --pointer-url URL --cache-url URL --cache-key KEY
                 [--host NAME] [--state-dir DIR] [--reboot-time HH:MM]
+                [--max-age-days N]
 
 Applies the system in the pointer at URL if its seq is newer than the last
 applied one, its store path is HOST's system, it is signed by KEY in the
 cache at --cache-url and its narHash matches the pointer. A change the
 booted system's boot fingerprint does not cover is switched to; any other
 is activated for the next boot, with a reboot scheduled at --reboot-time.
+A pointer built more than --max-age-days ago means CI has stalled: exit 39
+(after the run has otherwise succeeded).
 
   --host NAME         system name in the store path (default neptun)
   --state-dir DIR     applied seq/store-path and the lock (default /var/lib/rpi-pull)
   --reboot-time HH:MM when to reboot into a new boot configuration (default 04:30)
+  --max-age-days N    the pointer's maximum age, 1-9999 (default 21)
 
 exit: 0 applied, up to date, already current or no pointer published yet
       1 state dir not writable   2 usage   30 fetch
       31 pointer invalid or older   32 untrusted   33 realise   34 narHash mismatch
       35 profile   36 activation (switch-to-configuration, shutdown)
-      37 busy   38 cache unavailable
+      37 busy   38 cache unavailable   39 pointer stale (CI stalled?)
 EOF
 }
 
@@ -46,14 +50,15 @@ die() {
 SEQ_RE='^[1-9][0-9]{0,9}$'
 
 POINTER_URL="" CACHE_URL="" CACHE_KEY="" HOST=neptun STATE=/var/lib/rpi-pull
-REBOOT_TIME=04:30
+REBOOT_TIME=04:30 MAX_AGE_DAYS=21
 STORE="${RPI_PULL_STORE:-/nix/store}"
 
 rp_parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
         -h | --help) usage; exit 0 ;;
-        --pointer-url | --cache-url | --cache-key | --host | --state-dir | --reboot-time)
+        --pointer-url | --cache-url | --cache-key | --host | --state-dir | --reboot-time | \
+            --max-age-days)
             [[ $# -ge 2 ]] || die 2 "$1 needs a value (see --help)"
             case "$1" in
             --pointer-url) POINTER_URL="$2" ;;
@@ -62,6 +67,7 @@ rp_parse_args() {
             --host) HOST="$2" ;;
             --state-dir) STATE="$2" ;;
             --reboot-time) REBOOT_TIME="$2" ;;
+            --max-age-days) MAX_AGE_DAYS="$2" ;;
             esac
             shift ;;
         *) die 2 "unknown argument: $1 (see --help)" ;;
@@ -73,6 +79,8 @@ rp_parse_args() {
     [[ "$HOST" =~ ^[A-Za-z0-9_-]+$ ]] || die 2 "invalid --host: '$HOST'"
     [[ "$REBOOT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] ||
         die 2 "invalid --reboot-time: '$REBOOT_TIME' (HH:MM)"
+    [[ "$MAX_AGE_DAYS" =~ ^[1-9][0-9]{0,3}$ ]] ||
+        die 2 "invalid --max-age-days: '$MAX_AGE_DAYS' (1-9999)"
 }
 
 # rp_lock: hold $STATE/lock for the rest of the run (exit 37 if taken)
@@ -112,14 +120,18 @@ rp_parse() {
     fields=$(jq -er '
         def text: explode | all(. >= 32 and . != 127);
         if (.seq | type) == "number" and (.storePath | text) and (.narHash | text)
-        then (.seq | tostring), .storePath, .narHash
+            and (.built | text)
+        then (.seq | tostring), .storePath, .narHash, .built
         else error("bad pointer") end' "$1" 2>/dev/null) ||
-        die 31 "pointer is not a JSON object with seq, storePath and narHash"
-    { IFS= read -r P_SEQ; IFS= read -r P_PATH; IFS= read -r P_NAR; } <<<"$fields"
+        die 31 "pointer is not a JSON object with seq, storePath, narHash and built"
+    { IFS= read -r P_SEQ; IFS= read -r P_PATH; IFS= read -r P_NAR; IFS= read -r P_BUILT; } <<<"$fields"
     [[ "$P_SEQ" =~ $SEQ_RE ]] || die 31 "pointer seq is not a positive integer: $P_SEQ"
     [[ "$P_PATH" =~ ^"$STORE"/[0-9a-df-np-sv-z]{32}-nixos-system-"$HOST"-[A-Za-z0-9+._?=-]+$ ]] ||
         die 31 "pointer storePath is not a $HOST system in $STORE: $P_PATH"
     [[ "$P_NAR" =~ ^sha256-[A-Za-z0-9+/]{43}=$ ]] || die 31 "pointer narHash is not sha256-<base64>: $P_NAR"
+    [[ "$P_BUILT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] &&
+        P_BUILT_S=$(date -u -d "$P_BUILT" +%s 2>/dev/null) ||
+        die 31 "pointer built is not a UTC time YYYY-MM-DDTHH:MM:SSZ: $P_BUILT"
 }
 
 # rp_verify_sig: P_PATH is signed by our key (and only ours: --trusted-public-keys
@@ -179,6 +191,14 @@ rp_apply() {
     fi
 }
 
+# rp_check_age: exit 39 if the pointer was built more than MAX_AGE_DAYS ago
+# -- CI stopped publishing (A5); a pointer from the future is not stale.
+rp_check_age() {
+    local age
+    age=$(($(date -u +%s) - P_BUILT_S))
+    ((age <= MAX_AGE_DAYS * 86400)) || die 39 "pointer is $((age / 86400)) days old (CI stalled?)"
+}
+
 # rp_record: the applied pointer -> $STATE/store-path, $STATE/seq (each
 # written to a temp file and renamed; seq last, so a crash re-applies)
 rp_record() {
@@ -199,16 +219,22 @@ main() {
     trap 'rm -f "$TMP"' EXIT
     rp_fetch "$TMP"
     rp_parse "$TMP"
+    rp_update
+    rp_check_age
+}
+
+# rp_update: bring the Pi to the parsed pointer (exit on any failure)
+rp_update() {
     if ((P_SEQ == LAST)); then
         log "up to date (seq $P_SEQ)"
-        exit 0
+        return 0
     fi
     ((P_SEQ > LAST)) || die 31 "pointer seq $P_SEQ is older than applied seq $LAST"
     rp_verify_sig
     if [[ "$(readlink -f "${RPI_PULL_ROOT:-}/run/current-system")" == "$P_PATH" ]]; then
         rp_record
         log "already current: $P_PATH (seq $P_SEQ recorded)"
-        exit 0
+        return 0
     fi
     rp_realise
     rp_activation

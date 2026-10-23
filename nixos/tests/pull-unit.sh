@@ -73,14 +73,23 @@ pi() {
 # json_str S: S as a JSON string (escaped by jq)
 json_str() { jq -n --arg s "$1" '$s'; }
 
-# pointer SEQ PATH [NAR]: the served pointer; SEQ is raw JSON text ("-" omits
-# the field), PATH and NAR are strings (NAR default $GOOD_NAR).
+# ago SECONDS: the UTC time SECONDS ago, as the pointer's `built`
+ago() { date -u -d "@$(($(date -u +%s) - $1))" +%Y-%m-%dT%H:%M:%SZ; }
+DAY=86400
+
+# pointer SEQ PATH [NAR [BUILT]]: the served pointer; SEQ and BUILT are raw
+# JSON text ("-" omits the field), PATH and NAR are strings (NAR default
+# $GOOD_NAR, BUILT default: now).
 pointer() {
-    local seq=""
+    local seq="" built="${4:-"\"$(ago 0)\""}"
     [[ "$1" != - ]] && seq="\"seq\": $1, "
-    printf '{%s"storePath": %s, "narHash": %s, "rev": "0123abc"}\n' \
-        "$seq" "$(json_str "$2")" "$(json_str "${3:-$GOOD_NAR}")" >"$MOCK_BODY"
+    [[ "$built" != - ]] && built=", \"built\": $built" || built=""
+    printf '{%s"storePath": %s, "narHash": %s, "rev": "0123abc"%s}\n' \
+        "$seq" "$(json_str "$2")" "$(json_str "${3:-$GOOD_NAR}")" "$built" >"$MOCK_BODY"
 }
+
+# built_ago SECONDS: pointer seq 1 -> NEXT, built SECONDS ago
+built_ago() { pointer 1 "$NEXT" "$GOOD_NAR" "\"$(ago "$1")\""; }
 
 # state SEQ: the applied seq in $STATE/seq
 state() { mkdir -p "$STATE" && printf '%s\n' "$1" >"$STATE/seq"; }
@@ -540,6 +549,80 @@ rp p20
 expect_exit "p20 no state dir, seq 1 -> applies" 0
 expect_eq "p20 seq 1 recorded" 1 "$(cat "$STATE/seq" 2>/dev/null)"
 expect_grepf "p20 switched" "stc $NEXT switch" "$MOCK_LOG"
+
+# --- A5 staleness: pointer `built`, --max-age-days -----------------------------
+
+for built in - 7 '"2026-10-23"' '"2026-10-23T12:00:00"' '"2026-10-23 12:00:00Z"' \
+    '"2026-10-23T12:00Z"' '"2026-13-45T25:61:61Z"' '"2026-02-30T12:00:00Z"' \
+    '"2026-10-23T12:00:00Z\n"' '"x2026-10-23T12:00:00Z"' '"2026-10-23T12:00:00+02:00"'; do
+    fresh
+    pointer 1 "$NEXT" "$GOOD_NAR" "$built"
+    rp "a5 built $built"
+    expect_exit "a5 built $built -> 31" 31
+    untouched "a5 built $built"
+done
+
+for days in 0 -1 x '' 1.5 021 100000 ' 21'; do
+    fresh
+    rp "a5 max-age-days '$days'" --max-age-days "$days"
+    expect_exit "a5 --max-age-days '$days' refused -> 2" 2
+    expect_eq "a5 --max-age-days '$days': nothing fetched" 0 "$(log_count '^curl ')"
+done
+
+fresh
+built_ago $((22 * DAY))
+rp a5-applied
+expect_exit "a5 stale pointer applied -> 39" 39
+expect_grepf "a5 says how old" "pointer is 22 days old (CI stalled?)" "$ERR"
+expect_eq "a5 stale pointer: seq recorded" 1 "$(cat "$STATE/seq" 2>/dev/null)"
+expect_grepf "a5 stale pointer: switched" "stc $NEXT switch" "$MOCK_LOG"
+
+fresh
+state 1
+built_ago $((22 * DAY))
+rp a5-uptodate
+expect_exit "a5 stale pointer up to date -> 39" 39
+expect_grepf "a5 up to date: says how old" "pointer is 22 days old (CI stalled?)" "$ERR"
+
+fresh
+pi "$NEXT" "$A" "$NEXT"
+built_ago $((22 * DAY))
+rp a5-current
+expect_exit "a5 stale pointer already current -> 39" 39
+expect_eq "a5 already current: seq recorded" 1 "$(cat "$STATE/seq" 2>/dev/null)"
+
+fresh
+built_ago $((21 * DAY - 3600))
+rp a5-young
+expect_exit "a5 pointer 20 days 23 h old -> 0" 0
+expect_not_grep "a5 young pointer: no age warning" "days old" "$ERR"
+
+fresh
+built_ago $((21 * DAY + 3600))
+rp a5-21
+expect_exit "a5 pointer 21 days 1 h old -> 39" 39
+expect_grepf "a5 says 21 days" "pointer is 21 days old (CI stalled?)" "$ERR"
+
+fresh
+built_ago $((22 * DAY))
+rp a5-max30 --max-age-days 30
+expect_exit "a5 22 days old, --max-age-days 30 -> 0" 0
+
+fresh
+built_ago $((3 * DAY))
+rp a5-max2 --max-age-days 2
+expect_exit "a5 3 days old, --max-age-days 2 -> 39" 39
+expect_grepf "a5 says 3 days" "pointer is 3 days old (CI stalled?)" "$ERR"
+
+fresh
+built_ago $((-30 * DAY))
+rp a5-future
+expect_exit "a5 built 30 days in the future (clock skew) -> 0" 0
+
+fresh
+built_ago $((22 * DAY))
+MOCK_STC_RC=1 rp a5-failed
+expect_exit "a5 stale pointer, activation fails -> 36 (the failure wins)" 36
 
 # --- lock ------------------------------------------------------------------------
 
