@@ -444,6 +444,7 @@ unset RPI_ALLOW_NONBLOCK
 # nr-mock: the nixos-rebuild under test (RPI_NIXOS_REBUILD); logs argv + env.
 mock nr-mock <<'EOF'
 printf 'NIX_SSHOPTS=%s\n' "${NIX_SSHOPTS-unset}" >>"$MOCK_LOG"
+printf 'NIX_CONFIG=%s\n' "${NIX_CONFIG-unset}" | tr '\n' ' ' >>"$MOCK_LOG"; echo >>"$MOCK_LOG"
 exit "${MOCK_NR_RC:-0}"
 EOF
 # The host's nixos-rebuild (newer release) must never run.
@@ -493,6 +494,9 @@ expect_exit "d1 deploy succeeds" 0
 expect_eq "d1 default action switch, pinned argv" 1 \
     "$(log_count "^nr-mock switch --no-reexec --flake $FL#rpi --target-host root@neptun\$")"
 expect_true "d1 guards before nixos-rebuild" test "$(first_line ' --dry-run ')" -lt "$(first_line '^nr-mock ')"
+# nixos-rebuild's inner `nix build` of the flake must accept its nixConfig
+# (nvmd cachix) without an interactive prompt
+expect_grep "d1 nixos-rebuild accepts the flake config" "^NIX_CONFIG=.*accept-flake-config = true" "$MOCK_LOG"
 no_poison d1
 
 for action in boot test; do
