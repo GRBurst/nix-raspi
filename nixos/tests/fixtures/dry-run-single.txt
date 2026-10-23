@@ -1,0 +1,2 @@
+this derivation will be built:
+  /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-26.05.drv

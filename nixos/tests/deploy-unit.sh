@@ -1,1001 +1,612 @@
 #!/usr/bin/env bash
 #
-# Unit tests for rpi-deploy.sh (rpi-deploy).
+# Unit tests for rpi-deploy.sh and rpi-lib.sh (check `rpi-deploy-unit`).
 #
-# Runs the real script against a mocked `nix` and `nixos-install`, so no
-# real builds happen and no aarch64 emulation is needed in the test
-# environment (binfmt locations are overridden via RPI_BINMFT_*).
+#   RPI_DEPLOY_SRC=rpi-deploy.sh RPI_LIB=rpi-lib.sh FIXTURES=tests/fixtures \
+#     bash tests/deploy-unit.sh
 #
-# Invoked by the flake check `checks.x86_64-linux.rpi-deploy-unit`:
+# (all three default to the files next to this test, so a plain
+# `bash tests/deploy-unit.sh` works in a checkout).
 #
-#   RPI_DEPLOY_SRC=<path to rpi-deploy.sh> bash tests/deploy-unit.sh
-#
-# Exits non-zero if any test fails.
+# nix, ssh, sudo, lsblk, findmnt, dd and nixos-rebuild are mocks (see
+# tests/harness.sh); git, zstd and coreutils are real. `flash` only ever
+# writes to regular files under the test's temp dir: the dd mock refuses any
+# other target, so these tests can never touch a real device.
 
 set -u
 
-SCRIPT="${RPI_DEPLOY_SRC:?RPI_DEPLOY_SRC must point at rpi-deploy.sh}"
-[[ -f "$SCRIPT" ]] || { echo "FAIL: script not found: $SCRIPT"; exit 1; }
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export RPI_DEPLOY_SRC="${RPI_DEPLOY_SRC:-$HERE/../rpi-deploy.sh}"
+export RPI_LIB="${RPI_LIB:-$HERE/../rpi-lib.sh}"
+FIXTURES="${FIXTURES:-$HERE/fixtures}"
 
-T="$(mktemp -d)"
-trap 'rm -rf "$T"' EXIT
+# shellcheck source=tests/harness.sh
+source "$HERE/harness.sh"
 
-# Hermetic git: ignore user/global config (e.g. commit.gpgsign) so the
-# fixture repos commit without a GPG key in any environment.
-export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0
+# The caller's environment must not leak into the tests.
+unset RPI_FLAKE RPI_SSH_OPTS RPI_NIXOS_REBUILD RPI_CACHE_URL RPI_ALLOW_NONBLOCK \
+    RL_FLAKE RL_ATTR RL_TARGET RL_SSH_PORT RL_SSH_OPTS RL_CACHE_URL NIX_SSHOPTS
 
-# The mock executables below need an absolute interpreter path: in a nix
-# build sandbox /usr/bin/env does not exist (util-linux is not part of
-# stdenv), so `#!/usr/bin/env bash` shebangs would fail silently.
-BASH_BIN="$(command -v bash)"
+# lib FUNC ARGS...: call a rpi-lib.sh function in a fresh subshell, so the
+# globals pick up the environment of the call site.
+lib() { (
+    # shellcheck source=rpi-lib.sh
+    source "$RPI_LIB" || exit 99
+    "$@"
+); }
 
-# --- mock environment --------------------------------------------------------
-export MOCK_LOG="$T/mocks.log"
-export MOCK_SYS="$T/mock-sys"
-export MOCK_DRV="$T/mock-toplevel.drv"
-export MOCK_COPY=1
-: > "$MOCK_LOG"
+# first_line ERE: line number of the first matching mock-log line (999999 if none)
+first_line() { grep -nE -- "$1" "$MOCK_LOG" | head -n1 | cut -d: -f1 | grep . || echo 999999; }
 
-BIN="$T/bin"
-mkdir -p "$BIN"
+# --- mocks -------------------------------------------------------------------
+export K_DEF=/nix/store/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-linux_rpi-bcm2711-6.18.52
+export M_DEF=/nix/store/mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm-linux_rpi-bcm2711-6.18.52-modules
 
-# Mock `nix`:
-#   show-config            -> prints extra-platforms (aarch64 only if
-#                             MOCK_PLATFORMS contains it)
-#   eval --raw ...         -> prints $MOCK_DRV
-#   build ... --print-out-paths -> creates and prints $MOCK_SYS
-#   ... copy --to STORE ...    -> (MOCK_COPY=1) creates STORE/store/<basename>
-#                                  for each path argument after the target
-#   everything else (build --print-build-logs) -> no-op
-cat > "$BIN/nix" <<'MOCK'
-#!BASHPLACEHOLDER
+# nix: kernel/modules eval ($MOCK_K/$MOCK_M; MOCK_EVAL_RC fails it),
+# path-info --store (hit iff the path is in $MOCK_CACHED, default both;
+# MOCK_NETERR prints a network error), build --dry-run (cat $MOCK_DRY to
+# stderr; MOCK_DRY_RC fails it), build --out-link L (creates the image under
+# L), run (the pinned nixos-rebuild; logged only).
+mock nix <<'EOF'
+k="${MOCK_K-$K_DEF}" m="${MOCK_M-$M_DEF}"
 case " $* " in
-  *"#rpi-binfmt"*)
-    [[ -n "${MOCK_BINFMT_BUILD_FAIL:-}" ]] && { echo "error: unable to download qemu: Failure when receiving data from the peer" >&2; exit 1; }
-    echo "nix build rpi-binfmt" >> "$MOCK_LOG"; echo "$MOCK_BINFMT_FILE" ;;
-  *" path-info "*) echo "$MOCK_SYS ${MOCK_CLOSURE-1000}" ;;
-  *" --apply "*) echo "${MOCK_LOGIN-pi 1 0}" ;;
-  *" config show "*)
-    case "${@: -1}" in
-      substituters) echo "https://cache.nixos.org/ ${MOCK_CACHE:+https://nixos-raspberrypi.cachix.org}" ;;
-      trusted-users) echo "${MOCK_TRUSTED-$(id -un)}" ;;
-    esac ;;
-  *" build --dry-run "*)
-    [[ -n "${MOCK_PLAN_FAIL:-}" ]] && { echo "error: evaluation failed" >&2; exit 1; }
-    if [[ "${MOCK_KERNEL:-fetch}" == build ]]; then
-      printf 'these 2 derivations will be built:\n  /nix/store/aaaa-linux_rpi-bcm2711-6.18.34.drv\n  /nix/store/bbbb-nixos-system-neptun.drv\nthese 9 paths will be fetched (10 MiB download):\n  /nix/store/cccc-glibc\n'
+*" eval "*".kernel.modules.outPath "* | *" eval "*".kernel.outPath "*)
+    if [[ -n "${MOCK_EVAL_RC:-}" ]]; then echo "error: evaluation aborted" >&2; exit "$MOCK_EVAL_RC"; fi
+    case " $* " in *".kernel.modules.outPath "*) printf '%s' "$m" ;; *) printf '%s' "$k" ;; esac ;;
+*" path-info "*)
+    p="${!#}"
+    case " ${MOCK_CACHED-$k $m} " in *" $p "*) echo "$p"; exit 0 ;; esac
+    if [[ -n "${MOCK_NETERR:-}" ]]; then
+        echo "error: unable to download 'https://nixos-raspberrypi.cachix.org/x.narinfo': Couldn't resolve host name (6)" >&2
     else
-      printf 'these 9 paths will be fetched (300 MiB download, 900 MiB unpacked):\n  /nix/store/dddd-linux_rpi-bcm2711-6.18.34\n  /nix/store/eeee-glibc\nthis derivation will be built:\n  /nix/store/ffff-nixos-system-neptun.drv\n'
-    fi ;;
-  *" show-config "*)
-    if [[ "${MOCK_PLATFORMS:-}" == *aarch64* ]]; then
-      echo "extra-platforms = x86_64-linux aarch64-linux"
-    else
-      echo "extra-platforms = x86_64-linux"
+        echo "error: path '$p' is not valid" >&2
     fi
-    [[ "${MOCK_CACHE:-0}" == 1 ]] && echo "extra-substituters = https://nixos-raspberrypi.cachix.org"
-    ;;
-  *" eval --raw "*)
-    printf '%s\n' "${MOCK_EVAL_DRV:-$MOCK_DRV}"
-    ;;
-  *" --print-out-paths "*)
-    mkdir -p "$MOCK_SYS"
-    printf '%s\n' "$MOCK_SYS"
-    ;;
-  *" --print-build-logs "*)
-    case "${MOCK_BUILD_FAIL:-}" in
-      255) echo "error: builder for '/nix/store/x.drv' failed with exit code 255" ; exit 1 ;;
-      oom) echo "Killed"; exit 1 ;;
-    esac
-    ;;
-  *" copy "*" --to "*)
-    echo "nix $*" >> "$MOCK_LOG"
-    if [[ "${MOCK_COPY:-1}" == 1 ]]; then
-      state="pre"; target=""
-      for a in "$@"; do
-        case "$state" in
-          pre)        [[ "$a" == "--to" ]] && state="wanttarget" ;;
-          wanttarget) target="$a"; state="paths" ;;
-          paths)      case "$a" in *.drv) mkdir -p "$target/nix/store"; echo "Derive(...)" > "$target/nix/store/$(basename "$a")" ;; *) mkdir -p "$target/nix/store/$(basename "$a")"; : > "$target/nix/store/$(basename "$a")/activate"; chmod +x "$target/nix/store/$(basename "$a")/activate" ;; esac ;;
-        esac
-      done
-    fi
-    ;;
-esac
-exit 0
-MOCK
-
-# Mock `sudo`: runs the command unprivileged.
-cat > "$BIN/sudo" <<'MOCK'
-#!BASHPLACEHOLDER
-# sudo -v / sudo -n -v: credential refresh only; otherwise run the command
-while [[ "${1:-}" == -* ]]; do
-  case "$1" in
-    -v) echo "sudo -v" >> "$MOCK_LOG"; [[ -n "${MOCK_SUDO_FAIL:-}" ]] && exit 1; exit 0 ;;
-    *) shift ;;
-  esac
-done
-exec "$@"
-MOCK
-
-# Mock `nixos-install`: records its args, succeeds.
-cat > "$BIN/nixos-install" <<'MOCK'
-#!BASHPLACEHOLDER
-echo "nixos-install $*" >> "$MOCK_LOG"
-# record whether the temporary F-flag binfmt handler is registered right now
-[[ -f "${RPI_BINMFT_DIR:-/nonexistent}/register" ]] && grep -q rpi-deploy-aarch64 "$RPI_BINMFT_DIR/register" && echo "f-handler-active-during-install" >> "$MOCK_LOG"
-exit "${MOCK_NIXOS_INSTALL_RC:-0}"
-MOCK
-sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/nix" "$BIN/nixos-install" "$BIN/sudo"
-chmod 755 "$BIN/nix" "$BIN/nixos-install" "$BIN/sudo"
-export PATH="$BIN:$PATH"
-
-
-# --- mocks for the card tools (prepare / eject) ------------------------------
-# All privileged commands go through the `sudo` mock, so the mutating tools
-# only record their arguments.
-MOCK_MNT="$T/mnt-state"; mkdir -p "$MOCK_MNT"; export MOCK_MNT
-for tool in wipefs mkfs.vfat mkfs.ext4 udevadm umount mount sync fatlabel e2label; do
-  cat > "$BIN/$tool" <<'MOCK'
-#!BASHPLACEHOLDER
-echo "$(basename "$0") $*" >> "$MOCK_LOG"
-exit 0
-MOCK
-done
-# flock DEV CMD...: record, then run CMD (like util-linux flock on a path)
-cat > "$BIN/flock" <<'MOCK'
-#!BASHPLACEHOLDER
-echo "flock $1" >> "$MOCK_LOG"
-shift
-exec "$@"
-MOCK
-
-# sfdisk also records the partition script it reads from stdin
-cat > "$BIN/sfdisk" <<'MOCK'
-#!BASHPLACEHOLDER
-echo "sfdisk $*" >> "$MOCK_LOG"
-sed 's/^/sfdisk-script: /' >> "$MOCK_LOG"
-exit 0
-MOCK
-# findmnt: --mountpoint DIR -> contents of $MOCK_MNT/<DIR with / -> _> (else rc 1);
-#          -T PATH          -> the host source device $MOCK_HOST_SRC
-cat > "$BIN/findmnt" <<'MOCK'
-#!BASHPLACEHOLDER
-case " $* " in
-  *" --mountpoint "*)
-    f="$MOCK_MNT/$(printf '%s' "${@: -1}" | tr / _)"
-    [[ -f "$f" ]] && { cat "$f"; exit 0; }
     exit 1 ;;
-  *" -T "*) echo "${MOCK_HOST_SRC:-/dev/nvme0n1p1}" ;;
+*" build "*" --dry-run "*)
+    if [[ -n "${MOCK_DRY_RC:-}" ]]; then echo "error: attribute 'rpi' missing" >&2; exit "$MOCK_DRY_RC"; fi
+    cat "${MOCK_DRY:-/dev/null}" >&2 ;;
+*" build "*" --out-link "*)
+    if [[ -n "${MOCK_BUILD_RC:-}" ]]; then echo "error: build failed" >&2; exit "$MOCK_BUILD_RC"; fi
+    prev=""
+    for a in "$@"; do
+        if [[ "$prev" == --out-link ]]; then
+            mkdir -p "$a/sd-image"
+            printf '0123456789' >"$a/sd-image/neptun-rpi3.img.zst"
+        fi
+        prev="$a"
+    done ;;
 esac
-MOCK
-# lsblk: -dno TYPE -> $MOCK_LSBLK_TYPE (disk); -nlso NAME <src> -> src and its disk;
-#        -nlo MOUNTPOINT -> $MOCK_DEV_MOUNTS; anything else -> a table line
-cat > "$BIN/lsblk" <<'MOCK'
-#!BASHPLACEHOLDER
+exit 0
+EOF
+
+# =============================================================================
+# T5.1 dry-run parsing + build guard
+# =============================================================================
+HYB="$FIXTURES/dry-run-hybrid.txt"
+KER="$FIXTURES/dry-run-kernel.txt"
+
+run_cmd g1 -- lib rl_built_names <"$HYB"
+header_n=$(sed -nE 's/^these ([0-9]+) derivations will be built:$/\1/p' "$HYB")
+expect_eq "g1 hybrid fixture: one name per built derivation (= header N)" "$header_n" "$(grep -c . "$OUT")"
+expect_eq "g1 hybrid header N is 377" 377 "$header_n"
+expect_not_grep "g1 names carry no store prefix" "/nix/store/" "$OUT"
+expect_not_grep "g1 names carry no .drv suffix" ".drv" "$OUT"
+expect_not_grep "g1 the evaluation warning line is ignored" "evaluation warning" "$OUT"
+
+run_cmd g2 -- lib rl_check_builds "$HYB" 500
+expect_exit "g2 hybrid fixture is allowed" 0
+
+run_cmd g3 -- lib rl_check_builds "$KER" 500
+expect_exit "g3 kernel fixture is forbidden" 11
+expect_grepf "g3 lists linux-config" "linux-config-6.18.34-unstable_20260604" "$ERR"
+expect_grep "g3 lists the kernel" "(^|[^-])linux_rpi-bcm2711-6\.18\.34-unstable_20260604$" "$ERR"
+expect_grepf "g3 lists kernel-intermediate-config" "kernel-intermediate-config" "$ERR"
+
+run_cmd g4 -- lib rl_check_builds "$KER" 500
+expect_not_grep "g4 initrd-linux_rpi is not forbidden" "initrd-linux_rpi" "$ERR"
+expect_not_grep "g4 kernel modules are not forbidden" "-modules" "$ERR"
+expect_not_grep "g4 installkernel is not forbidden" "installkernel" "$ERR"
+
+run_cmd g5 -- lib rl_check_builds "$HYB" 300
+expect_exit "g5 too many builds" 12
+expect_grepf "g5 reports N > MAX" "377 > 300" "$ERR"
+
+run_cmd g6 -- lib rl_built_names <"$FIXTURES/dry-run-single.txt"
+expect_eq "g6 single fixture -> one name" "nixos-system-neptun-26.05" "$(cat "$OUT")"
+
+run_cmd g7 -- lib rl_built_names <"$FIXTURES/dry-run-none.txt"
+expect_eq "g7 none fixture -> no names" "" "$(cat "$OUT")"
+run_cmd g7 -- lib rl_check_builds "$FIXTURES/dry-run-none.txt" 500
+expect_exit "g7 none fixture is allowed" 0
+
+# =============================================================================
+# T5.2 cache guard + rl_guard
+# =============================================================================
+export RL_FLAKE=/flk
+
+reset_log
+run_cmd g8 -- lib rl_cache_has "$K_DEF" "$M_DEF"
+expect_exit "g8 kernel + modules cached -> 0" 0
+expect_grepf "g8 asks nvmd's cachix" "nix path-info --store https://nixos-raspberrypi.cachix.org" "$MOCK_LOG"
+
+run_cmd g8 -- lib rl_kernel_paths
+expect_eq "g8 rl_kernel_paths prints kernel and modules" "$K_DEF"$'\n'"$M_DEF" "$(cat "$OUT")"
+expect_grepf "g8 kernel path from the flake's config" "/flk#nixosConfigurations.rpi.config.boot.kernelPackages.kernel.outPath" "$MOCK_LOG"
+
+reset_log
+MOCK_CACHED="$K_DEF" MOCK_DRY="$HYB" run_cmd g9 -- lib rl_guard toplevel 500
+expect_exit "g9 modules missing from the cache -> RL_E_CACHE" 10
+MOCK_CACHED="" MOCK_NETERR=1 MOCK_DRY="$HYB" run_cmd g9 -- lib rl_guard toplevel 500
+expect_exit "g9 path-info network error counts as a miss -> RL_E_CACHE" 10
+
+reset_log
+MOCK_DRY="$HYB" run_cmd g10 -- lib rl_guard toplevel 500
+expect_exit "g10 cached kernel + hybrid dry run -> 0" 0
+expect_grep "g10 dry run of the toplevel" "^nix build .*--dry-run.* /flk#nixosConfigurations\.rpi\.config\.system\.build\.toplevel( |$)" "$MOCK_LOG"
+expect_true "g10 order: path-info before the dry run" \
+    test "$(first_line ' path-info ')" -lt "$(first_line ' --dry-run ')"
+
+reset_log
+MOCK_DRY="$KER" run_cmd g10 -- lib rl_guard sdImage 500
+expect_exit "g10 kernel build in the dry run -> RL_E_FORBIDDEN" 11
+expect_grep "g10 sdImage dry run" "^nix build .*--dry-run.*\.config\.system\.build\.sdImage( |$)" "$MOCK_LOG"
+
+reset_log
+MOCK_CACHED="" MOCK_DRY="$HYB" run_cmd g11 -- lib rl_guard toplevel 500
+expect_eq "g11 cache miss -> no dry run" 0 "$(log_count ' --dry-run ')"
+expect_grepf "g11 names the missing path" "$K_DEF" "$ERR"
+
+reset_log
+MOCK_DRY_RC=1 run_cmd g12 -- lib rl_guard toplevel 500
+expect_exit "g12 dry-run eval error -> RL_E_BUILD" 13
+expect_grepf "g12 shows nix's error" "attribute 'rpi' missing" "$ERR"
+
+reset_log
+MOCK_EVAL_RC=1 run_cmd g12 -- lib rl_guard toplevel 500
+expect_exit "g12 kernel eval error -> RL_E_BUILD" 13
+expect_eq "g12 kernel eval error -> no cache query" 0 "$(log_count ' path-info ')"
+unset RL_FLAKE
+
+# =============================================================================
+# T5.3 reboot decision + ssh helpers
+# =============================================================================
+run_cmd r1 -- lib rl_needs_reboot "/k /i /m" "/k /i /m"
+expect_exit "r1 equal triplets -> no reboot" 1
+run_cmd r2 -- lib rl_needs_reboot "/k2 /i /m" "/k /i /m"
+expect_exit "r2 kernel differs -> reboot" 0
+run_cmd r3 -- lib rl_needs_reboot "/k /i2 /m" "/k /i /m"
+expect_exit "r3 initrd differs -> reboot" 0
+run_cmd r4 -- lib rl_needs_reboot "/k /i /m2" "/k /i /m"
+expect_exit "r4 kernel-modules differ -> reboot" 0
+
+RL_SSH_PORT=22 RPI_SSH_OPTS="-F x" run_cmd r5 -- lib rl_sshopts
+expect_eq "r5 rl_sshopts" "-p 22 -F x" "$(cat "$OUT")"
+run_cmd r5 -- lib rl_sshopts
+expect_eq "r5 rl_sshopts default port" "-p 2222" "$(cat "$OUT")"
+
+TOP="$T/toplevel"
+mkdir -p "$T/store/k" "$T/store/m" "$TOP"
+: >"$T/store/k/Image"; : >"$T/store/initrd"
+ln -s "$T/store/k/Image" "$TOP/kernel"
+ln -s "$T/store/initrd" "$TOP/initrd"
+ln -s "$T/store/m" "$TOP/kernel-modules"
+run_cmd r6 -- lib rl_triplet_local "$TOP"
+expect_eq "r6 rl_triplet_local resolves kernel, initrd, kernel-modules" \
+    "$T/store/k/Image $T/store/initrd $T/store/m" "$(cat "$OUT")"
+
+mock ssh <<'EOF'
+exit 0
+EOF
+reset_log
+RPI_SSH_OPTS="-F x -o A=b" run_cmd r7 -- lib rl_ssh true
+expect_eq "r7 rl_ssh argv" "ssh -p 2222 -F x -o A=b root@neptun true" "$(cat "$MOCK_LOG")"
+
+# =============================================================================
+# T5.4 CLI skeleton
+# =============================================================================
+rd() { bash "$RPI_DEPLOY_SRC" "$@"; }
+reset_log
+
+run_cmd c1 -- rd --help
+expect_exit "c1 --help exits 0" 0
+expect_grep "c1 usage lists image" "rpi-deploy image" "$OUT"
+expect_grepf "c1 usage lists flash IMAGE DEVICE" "flash IMAGE DEVICE" "$OUT"
+expect_grep "c1 usage lists deploy" "rpi-deploy deploy" "$OUT"
+expect_grep "c1 usage lists status" "rpi-deploy status" "$OUT"
+run_cmd c1 -- rd deploy --help
+expect_exit "c1 SUBCOMMAND --help exits 0" 0
+
+for sub in prepare install config eject build show all devices; do
+    run_cmd c2 -- rd "$sub"
+    expect_exit "c2 removed subcommand '$sub' -> exit 2" 2
+    expect_grepf "c2 '$sub': unknown subcommand" "unknown subcommand" "$ERR"
+done
+
+run_cmd c3 -- rd
+expect_exit "c3 no args -> exit 2" 2
+expect_grepf "c3 no args prints the usage" "flash IMAGE DEVICE" "$ERR"
+
+run_cmd c4 -- rd deploy --frobnicate
+expect_exit "c4 unknown option -> exit 2" 2
+run_cmd c4 -- rd deploy --port
+expect_exit "c4 option without value -> exit 2" 2
+run_cmd c4 -- rd deploy --port abc
+expect_exit "c4 non-numeric --port -> exit 2" 2
+run_cmd c4 -- rd deploy --max-builds 1x
+expect_exit "c4 non-numeric --max-builds -> exit 2" 2
+run_cmd c4 -- rd status --force
+expect_exit "c4 option of another subcommand -> exit 2" 2
+run_cmd c4 -- rd image extra
+expect_exit "c4 surplus argument -> exit 2" 2
+expect_eq "c4 usage errors never reach nix/ssh" 0 "$(log_count '^(nix|ssh) ')"
+
+# =============================================================================
+# T5.5 image
+# =============================================================================
+W="$T/work"
+mkdir -p "$W"
+image_in_w() { (cd "$W" && RPI_FLAKE=/flk rd image "$@"); }
+
+reset_log
+MOCK_DRY="$HYB" run_cmd i1 -- image_in_w
+expect_exit "i1 image succeeds" 0
+expect_grep "i1 builds the flake's sdImage into ./result-rpi-image" \
+    "^nix build .*--out-link $W/result-rpi-image .*/flk#nixosConfigurations\.rpi\.config\.system\.build\.sdImage( |$)" "$MOCK_LOG"
+expect_true "i1 order: path-info < dry run < build" test \
+    "$(first_line ' path-info ')" -lt "$(first_line ' --dry-run .*build\.sdImage')" -a \
+    "$(first_line ' --dry-run ')" -lt "$(first_line ' --out-link ')"
+expect_grep "i3 prints the image path" "$W/result-rpi-image/sd-image/neptun-rpi3\.img\.zst$" "$OUT"
+expect_grep "i3 prints the size" "size: *10( |B|$)" "$OUT"
+
+reset_log
+MOCK_CACHED="" MOCK_DRY="$HYB" run_cmd i2 -- image_in_w
+expect_exit "i2 kernel not cached -> RL_E_CACHE" 10
+expect_eq "i2 no real build" 0 "$(log_count '^nix build .*--out-link')"
+
+reset_log
+MOCK_DRY="$KER" run_cmd i2 -- image_in_w
+expect_exit "i2 kernel build in the dry run -> RL_E_FORBIDDEN" 11
+expect_eq "i2 forbidden -> no real build" 0 "$(log_count '^nix build .*--out-link')"
+
+reset_log
+MOCK_DRY="$HYB" run_cmd i2 -- image_in_w --max-builds 10
+expect_exit "i2 --max-builds is honoured -> RL_E_TOO_MANY" 12
+
+reset_log
+MOCK_DRY="$HYB" MOCK_BUILD_RC=1 run_cmd i2 -- image_in_w
+expect_exit "i2 failing image build -> RL_E_BUILD" 13
+
+reset_log
+MOCK_DRY="$HYB" run_cmd i4 -- image_in_w --out "$T/imgout" --flake /other --attr neptun
+expect_exit "i4 image --out succeeds" 0
+expect_grep "i4 out-link in --out DIR, --flake/--attr honoured" \
+    "^nix build .*--out-link $T/imgout/result-rpi-image .*/other#nixosConfigurations\.neptun\.config\.system\.build\.sdImage" "$MOCK_LOG"
+expect_grepf "i4 prints the image under --out" "$T/imgout/result-rpi-image/sd-image/neptun-rpi3.img.zst" "$OUT"
+
+# =============================================================================
+# T5.6 flash (devices are regular files under $T; lsblk/findmnt/sudo/dd mocked)
+# =============================================================================
+REAL_DD="$(PATH="${PATH#"$BIN:"}" command -v dd)"
+export REAL_DD MOCK_ROOT="$T"
+
+# lsblk: one property per call (-dno PROP DEV), the mount points of DEV and
+# its partitions (-nlo MOUNTPOINTS), and the inverse chain of the root
+# source (-nlso NAME SRC: SRC's name, then $MOCK_PKNAME).
+mock lsblk <<'EOF'
+dev="${!#}"
 case " $* " in
-  *" -dnP "*) echo 'PATH="/dev/sdq" SIZE="29.8G" TRAN="usb" RM="1" MODEL="Card Reader"' ;;
-  *" -dno RM "*) echo "${MOCK_RM:-1}" ;;
-  *" -dno TYPE "*) echo "${MOCK_LSBLK_TYPE:-disk}" ;;
-  *" -nlso NAME "*)
-    src="${@: -1}"; n="$(basename "$src")"; echo "$n"
-    case "$n" in nvme*p[0-9]*) echo "${n%p[0-9]*}" ;; sd*[0-9]) echo "${n%[0-9]*}" ;; esac ;;
-  *" -no FSTYPE "*)
-    case "${@: -1}" in *p1|*[a-z]1) echo "${MOCK_FS_BOOT-vfat}" ;; *) echo "${MOCK_FS_ROOT-ext4}" ;; esac ;;
-  *" -no LABEL "*)
-    case "${@: -1}" in *p1|*[a-z]1) echo "${MOCK_LABEL_BOOT-NIXOS_BOOT}" ;; *) echo "${MOCK_LABEL_ROOT-NIXOS_SD}" ;; esac ;;
-  *" -no MOUNTPOINT "*) echo "${MOCK_PART_MNT:-}" ;;
-  *" -nlo PATH,LABEL "*) [[ -n "${MOCK_DUP_LABELS:-}" ]] && printf '%b\n' "$MOCK_DUP_LABELS" ;;
-  *" -nlo MOUNTPOINT "*) [[ -n "${MOCK_DEV_MOUNTS:-}" ]] && printf '%s\n' "$MOCK_DEV_MOUNTS" ;;
-  *) echo "NAME SIZE FSTYPE LABEL MODEL (mock)" ;;
+*" -nlso NAME "*) printf '%s\n%s\n' "$(basename "$dev")" "${MOCK_PKNAME:-nvme0n1}" ;;
+*" MOUNTPOINTS "*)
+    if [[ -n "${MOCK_MOUNTS_FAIL:-}" ]]; then echo "lsblk: unknown column: MOUNTPOINTS" >&2; exit 1; fi
+    printf '\n%s\n\n' "${MOCK_MOUNTS:-}" ;;
+*" RM "*) echo "  ${MOCK_RM-1}" ;;
+*" TYPE "*) echo "${MOCK_TYPE-disk}" ;;
+*" MODEL "*) echo "${MOCK_MODEL-Generic STORAGE DEVICE}   " ;;
+*" SIZE "*) echo " ${MOCK_SIZE-29.7G}" ;;
+*) echo "lsblk mock: unexpected call: $*" >&2; exit 1 ;;
 esac
-exit 0
-MOCK
-sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,flock,sfdisk,findmnt,lsblk}
-chmod 755 "$BIN"/{wipefs,mkfs.vfat,mkfs.ext4,udevadm,umount,mount,sync,fatlabel,e2label,flock,sfdisk,findmnt,lsblk}
+EOF
 
+mock findmnt <<'EOF'
+echo "${MOCK_ROOTSRC-/dev/nvme0n1p2}"
+EOF
 
+mock sudo <<'EOF'
+if [[ -n "${MOCK_READBACK_FAIL:-}" && "$1" == head ]]; then echo "head: cannot open: Permission denied" >&2; exit 1; fi
+exec "$@"
+EOF
 
-# tee mock: writing a registration line to <dir>/register behaves like the
-# kernel's binfmt_misc: it creates the entry file <dir>/<name> ("enabled").
-# Everything else is the real tee.
-REAL_TEE="$(command -v tee)"
-cat > "$BIN/tee" <<MOCK
-#!$BASH_BIN
-if [[ "\${1:-}" == */register ]]; then
-  content="\$(cat)"
-  printf '%s\n' "\$content" > "\$1"
-  name="\${content#:}"; name="\${name%%:*}"
-  echo enabled > "\$(dirname "\$1")/\$name"
-  exit 0
+# dd: never writes outside the test dir; drops oflag=direct (no O_DIRECT on
+# tmpfs); MOCK_DD_CORRUPT=1 flips one byte after writing.
+mock dd <<'EOF'
+args=() of=""
+for a in "$@"; do
+    case "$a" in
+    oflag=direct) continue ;;
+    of=*) of="${a#of=}" ;;
+    esac
+    args+=("$a")
+done
+case "$of" in
+"$MOCK_ROOT"/*) ;;
+*) echo "dd mock: refusing to write outside the test dir: '$of'" >&2; exit 99 ;;
+esac
+"$REAL_DD" "${args[@]}" || exit
+if [[ "${MOCK_DD_CORRUPT:-}" == 1 ]]; then
+    printf 'X' | "$REAL_DD" of="$of" bs=1 seek=100 conv=notrunc status=none
 fi
-exec "$REAL_TEE" "\$@"
-MOCK
-chmod 755 "$BIN/tee"
+EOF
 
-# chroot mock: never really chroots. Succeeds, unless
-#   MOCK_CHROOT_NEEDS_F=1     fails until the temporary F handler was written to $RPI_BINMFT_DIR/register
-#   MOCK_CHROOT_FAIL=1        always fails (127, like the real error)
-cat > "$BIN/chroot" <<'MOCK'
-#!BASHPLACEHOLDER
-echo "chroot $*" >> "$MOCK_LOG"
-root="$1"
-if [[ -n "${MOCK_CHROOT_FAIL:-}" ]] || { [[ -n "${MOCK_CHROOT_NEEDS_F:-}" ]] && ! grep -q rpi-deploy-aarch64 "${RPI_BINMFT_DIR:-/nonexistent}/register" 2>/dev/null; }; then
-  echo "chroot: failed to run command '$2': No such file or directory" >&2
-  exit 127
+IMG="$T/neptun-rpi3.img.zst"
+printf 'NIXIMG%.0s' {1..1000} | zstd -q >"$IMG"
+mkdir -p "$T/dev"
+DEV="$T/dev/sdz"
+new_dev() { head -c 65536 /dev/zero >"$DEV"; }
+dev_sum() { sha256sum <"$DEV" | cut -d' ' -f1; }
+new_dev
+ZERO_SUM="$(dev_sum)"
+export RPI_ALLOW_NONBLOCK=1
+
+refused() {  # NAME: exit RL_E_DEVICE, nothing written, no sudo
+    expect_exit "$1 -> RL_E_DEVICE" 16
+    expect_eq "$1: device unchanged" "$ZERO_SUM" "$(dev_sum)"
+    expect_eq "$1: no sudo" 0 "$(log_count '^sudo ')"
+}
+
+reset_log; new_dev
+MOCK_RM=0 run_cmd f1 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f1 flash refuses non-removable disk"
+expect_grepf "f1 says not removable" "not removable" "$ERR"
+
+reset_log; new_dev
+MOCK_MOUNTS=/run/media/x run_cmd f2 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f2 flash refuses a disk with a mounted partition"
+expect_grepf "f2 names the mount point" "/run/media/x" "$ERR"
+
+reset_log; new_dev
+MOCK_ROOTSRC=/dev/sdz2 MOCK_PKNAME=sdz run_cmd f3 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f3 flash refuses the disk holding /"
+expect_grepf "f3 names the root source" "/dev/sdz2" "$ERR"
+
+reset_log; new_dev
+RPI_ALLOW_NONBLOCK=0 run_cmd f4 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f4 flash refuses a non-block device"
+expect_grepf "f4 says not a block device" "not a block device" "$ERR"
+
+reset_log; new_dev
+MOCK_TYPE=part run_cmd f12 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f12 flash refuses a partition"
+
+reset_log; new_dev
+run_cmd f5 -- rd flash "$IMG" "$DEV" <<<"sdx"
+refused "f5 confirmation typo"
+expect_eq "f5 confirmation typo: no dd" 0 "$(log_count '^dd ')"
+reset_log; new_dev
+run_cmd f5 -- rd flash "$IMG" "$DEV"
+refused "f5 no confirmation (EOF)"
+
+reset_log; new_dev
+run_cmd f6 -- rd flash "$IMG" "$DEV" <<<"sdz"
+expect_exit "f6 flash succeeds" 0
+expect_grepf "f6 shows the model" "Generic STORAGE DEVICE" "$OUT"
+expect_grepf "f6 shows the size" "29.7G" "$OUT"
+expect_grepf "f6 asks to type the device name" "type the device name" "$OUT"
+for flag in bs=4M conv=fsync oflag=direct status=progress "of=$DEV"; do
+    expect_grep "f6 dd has $flag" "^dd (.* )?$flag( |$)" "$MOCK_LOG"
+done
+expect_grep "f6 dd runs under sudo" "^sudo dd " "$MOCK_LOG"
+expect_grepf "f7 verified" "verified" "$OUT"
+expect_true "f7 the device starts with the image" \
+    cmp -s -n "$(zstdcat "$IMG" | wc -c)" <(zstdcat "$IMG") "$DEV"
+expect_eq "f10 sudo only for the write and the read-back" 2 "$(log_count '^sudo ')"
+expect_eq "f10 sudo dd once" 1 "$(log_count '^sudo dd ')"
+expect_eq "f10 sudo read-back once" 1 "$(log_count "^sudo head -c [0-9]+ $DEV\$")"
+
+reset_log; new_dev
+MOCK_DD_CORRUPT=1 run_cmd f8 -- rd flash "$IMG" "$DEV" <<<"sdz"
+expect_exit "f8 corrupt write -> RL_E_VERIFY" 17
+expect_grepf "f8 says verify failed" "verify failed" "$ERR"
+
+reset_log
+run_cmd f9 -- rd flash "$T/missing.img.zst" "$DEV" <<<"sdz"
+expect_exit "f9 missing IMAGE -> exit 2" 2
+expect_eq "f9 no device query" 0 "$(log_count '^(lsblk|sudo|dd) ')"
+
+reset_log; new_dev
+run_cmd f13 -- rd flash "$IMG" "$DEV" <<<"$DEV"
+expect_exit "f13 typing the full device path also confirms" 0
+
+# MMC/SD block devices never carry the kernel's removable flag (see
+# flash_check_device), so a card in a built-in reader is mmcblkN with RM=0.
+reset_log
+MMC="$T/dev/mmcblk0"
+head -c 65536 /dev/zero >"$MMC"
+MOCK_RM=0 run_cmd f11 -- rd flash "$IMG" "$MMC" <<<"mmcblk0"
+expect_exit "f11 an SD card in a built-in reader (mmcblk0, RM=0) is accepted" 0
+expect_grepf "f11 verified" "verified" "$OUT"
+reset_log
+MOCK_RM=0 MOCK_ROOTSRC=/dev/mmcblk0p2 MOCK_PKNAME=mmcblk0 run_cmd f11 -- rd flash "$IMG" "$MMC" <<<"mmcblk0"
+expect_exit "f11 an mmcblk holding / is still refused" 16
+
+reset_log; new_dev
+MOCK_MOUNTS_FAIL=1 run_cmd f14 -- rd flash "$IMG" "$DEV" <<<"sdz"
+refused "f14 mount points unknown (lsblk fails) -> fail closed"
+
+reset_log; new_dev
+MOCK_READBACK_FAIL=1 run_cmd f15 -- rd flash "$IMG" "$DEV" <<<"sdz"
+expect_exit "f15 read-back failure -> RL_E_VERIFY" 17
+expect_grepf "f15 says verify failed" "verify failed" "$ERR"
+unset RPI_ALLOW_NONBLOCK
+
+# =============================================================================
+# T5.7 deploy
+# =============================================================================
+# nr-mock: the nixos-rebuild under test (RPI_NIXOS_REBUILD); logs argv + env.
+mock nr-mock <<'EOF'
+printf 'NIX_SSHOPTS=%s\n' "${NIX_SSHOPTS-unset}" >>"$MOCK_LOG"
+exit "${MOCK_NR_RC:-0}"
+EOF
+# The host's nixos-rebuild (newer release) must never run.
+mock nixos-rebuild <<'EOF'
+echo POISON >>"$MOCK_LOG"
+exit 1
+EOF
+# ssh: the Pi's current/booted system and their kernel triplets.
+mock ssh <<'EOF'
+if [[ -n "${MOCK_SSH_FAIL:-}" ]]; then
+    echo "ssh: connect to host neptun port 2222: Connection refused" >&2
+    exit 255
 fi
-exit 0
-MOCK
-sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/chroot"; chmod 755 "$BIN/chroot"
+case " $* " in
+*" readlink /run/current-system /run/booted-system "*)
+    printf '%s\n%s\n' "${MOCK_CUR-/nix/store/cccc-nixos-system-neptun-2}" \
+        "${MOCK_BOOTED-/nix/store/bbbb-nixos-system-neptun-1}" ;;
+*" readlink -f /run/current-system/kernel "*)
+    printf '%s\n' ${MOCK_CUR_TRIPLET-/nix/store/k1/Image /nix/store/i1/initrd /nix/store/m1} ;;
+*" readlink -f /run/booted-system/kernel "*)
+    printf '%s\n' ${MOCK_BOOTED_TRIPLET-/nix/store/k1/Image /nix/store/i1/initrd /nix/store/m1} ;;
+*) echo "ssh mock: unexpected command: $*" >&2; exit 1 ;;
+esac
+EOF
 
-# mountpoint helper that reports "not mounted" only for <dir>/boot/firmware
-cat > "$BIN/mp-nofw" <<'MOCK'
-#!BASHPLACEHOLDER
-[[ "${@: -1}" != */boot/firmware ]]
-MOCK
-sed -i "1s|^#!BASHPLACEHOLDER$|#!$BASH_BIN|" "$BIN/mp-nofw"; chmod 755 "$BIN/mp-nofw"
-
-# by-label fixtures: a card whose labels point at $DEVDIR/mmcblk0p{1,2} (names
-# only; nothing is opened), plus the dummy "device" used by the format tests
-DEVDIR="$T/dev"; mkdir -p "$DEVDIR"; touch "$DEVDIR/mmcblk0p1" "$DEVDIR/mmcblk0p2"
-mkdir -p "$T/by-label" "$T/by-label-empty"
-ln -s $DEVDIR/mmcblk0p2 "$T/by-label/NIXOS_SD"
-ln -s $DEVDIR/mmcblk0p1 "$T/by-label/NIXOS_BOOT"
-export RPI_BYLABEL_DIR="$T/by-label"
-export RPI_ALLOW_NONBLOCK=1      # test "devices" are not real block devices
-
-# binfmt fixtures for the emulation preflight
-mkdir -p "$T/bmf-ok" "$T/bmf-empty"
-# a registration as NixOS writes it with preferStaticEmulators (F flag: works in a chroot)
-printf 'enabled\ninterpreter /run/binfmt/aarch64-linux\nflags: POCF\noffset 0\n' > "$T/bmf-ok/qemu-aarch64"
-# ... and the default one (P only): interpreter looked up inside the chroot -> must be bridged
-mkdir -p "$T/bmf-nof" "$T/fake-run/binfmt"
-ln -s "$(readlink -f "$BASH_BIN")" "$T/fake-run/binfmt/aarch64-linux"
-printf 'enabled\ninterpreter %s/fake-run/binfmt/aarch64-linux\nflags: P\noffset 0\n' "$T" > "$T/bmf-nof/aarch64-linux"
-export RPI_BINMFT_DIR="$T/bmf-ok"
-export RPI_MOUNTPOINT_CMD=true          # card layout: pretend root and /boot/firmware are mounted
-export RPI_BINMFT_RUN="$T/bmf-run"   # does not exist: exercises the OR branch
-EMUL_OK=( MOCK_PLATFORMS="x86_64-linux aarch64-linux" )
-EMUL_BAD=( MOCK_PLATFORMS="x86_64-linux" "RPI_BINMFT_DIR=$T/bmf-empty" )
-
-GIT_ID=( -c user.email=test@example.com -c user.name=test )
-
-new_flake() {  # $1 = name; echoes the path; git repo with a flake.nix
-  local d="$T/flake-$1"
-  mkdir -p "$d"
-  echo "test flake" > "$d/flake.nix"
-  # same ignore as the real repo: build state must not count as dirty
-  echo ".rpi-build/" > "$d/.gitignore"
-  git -C "$d" init -q
-  git -C "$d" "${GIT_ID[@]}" add flake.nix .gitignore
-  git -C "$d" "${GIT_ID[@]}" commit -qm init
-  printf '%s\n' "$d"
+# the flake: subdir nixos/ of a git repo (like the real checkout)
+REPO="$T/repo" FL="$T/repo/nixos"
+mkdir -p "$FL"
+echo '{ }' >"$FL/flake.nix"
+git -C "$REPO" init -q -b main
+git -C "$REPO" add -A
+git -C "$REPO" commit -qm init
+# set_auto_update AHEAD: branch auto-update = HEAD (+ one lock commit if AHEAD=1)
+set_auto_update() {
+    local c
+    c="$(git -C "$REPO" rev-parse HEAD)"
+    [[ "$1" == 1 ]] && c="$(git -C "$REPO" commit-tree -p HEAD -m "auto-update: lock" 'HEAD^{tree}')"
+    git -C "$REPO" branch -f auto-update "$c"
 }
 
-new_card() {  # $1 = name; echoes the path; looks like a NixOS flake install
-  local d="$T/card-$1"
-  mkdir -p "$d/etc/nixos"
-  echo x > "$d/etc/nixos/flake.nix"
-  printf '%s\n' "$d"
-}
+dep() { RPI_NIXOS_REBUILD="$BIN/nr-mock" rd deploy --flake "$FL" "$@"; }
+no_poison() { expect_eq "$1: d8 host nixos-rebuild never used" 0 "$(log_count POISON)"; }
 
-# --- tiny test harness -------------------------------------------------------
-pass=0; fail=0
-OUT="$T/last.out"
-LAST_EXIT=0
+reset_log
+run_cmd d1 -- dep
+expect_exit "d1 deploy succeeds" 0
+expect_eq "d1 default action switch, pinned argv" 1 \
+    "$(log_count "^nr-mock switch --no-reexec --flake $FL#rpi --target-host root@neptun\$")"
+expect_true "d1 guards before nixos-rebuild" test "$(first_line ' --dry-run ')" -lt "$(first_line '^nr-mock ')"
+no_poison d1
 
-run_cmd() {
-  "$@" > "$OUT" 2>&1
-  LAST_EXIT=$?
-}
+for action in boot test; do
+    reset_log
+    run_cmd d2 -- dep "$action" --attr neptun
+    expect_exit "d2 deploy $action succeeds" 0
+    expect_eq "d2 $action passed through" 1 \
+        "$(log_count "^nr-mock $action --no-reexec --flake $FL#neptun --target-host root@neptun\$")"
+    no_poison "d2 $action"
+done
 
-expect_exit() {  # name expected
-  if [[ "$LAST_EXIT" -eq "$2" ]]; then
-    pass=$((pass + 1)); echo "PASS: $1 (exit $LAST_EXIT)"
-  else
-    fail=$((fail + 1)); echo "FAIL: $1 (expected exit $2, got $LAST_EXIT)"
-    sed 's/^/    | /' "$OUT"
-  fi
-}
+reset_log
+run_cmd d3 -- dep dry-activate
+expect_exit "d3 dry-activate -> exit 2" 2
+expect_eq "d3 no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
 
-expect_grep() {  # name pattern [file]
-  local f="${3:-$OUT}"
-  if grep -q "$2" "$f" 2>/dev/null; then
-    pass=$((pass + 1)); echo "PASS: $1"
-  else
-    fail=$((fail + 1)); echo "FAIL: $1 (pattern '$2' not found in $f)"
-    sed 's/^/    | /' "$f" 2>/dev/null | head -20
-  fi
-}
+reset_log
+run_cmd d4 -- dep
+expect_grep "d4 NIX_SSHOPTS starts with -p 2222" "^NIX_SSHOPTS=-p 2222( |$)" "$MOCK_LOG"
+reset_log
+RPI_SSH_OPTS="-F cfg" run_cmd d4 -- dep --port 22 --target root@h
+expect_grep "d4 --port and RPI_SSH_OPTS reach NIX_SSHOPTS" "^NIX_SSHOPTS=-p 22 -F cfg$" "$MOCK_LOG"
+expect_grep "d4 --target honoured" "^nr-mock switch .*--target-host root@h$" "$MOCK_LOG"
+expect_grep "d4 status uses --port/--target" "^ssh -p 22 -F cfg root@h " "$MOCK_LOG"
+no_poison d4
 
-expect_grepf() {  # name fixed-string [file]
-  local f="${3:-$OUT}"
-  if grep -qF -- "$2" "$f" 2>/dev/null; then
-    pass=$((pass + 1)); echo "PASS: $1"
-  else
-    fail=$((fail + 1)); echo "FAIL: $1 (string '$2' not found in $f)"
-    sed 's/^/    | /' "$f" 2>/dev/null | head -20
-  fi
-}
+for fail in "MOCK_CACHED=" "MOCK_DRY=$KER" "MOCK_DRY_RC=1" "MOCK_EVAL_RC=1"; do
+    reset_log
+    run_cmd d5 -- env "$fail" RPI_NIXOS_REBUILD="$BIN/nr-mock" bash "$RPI_DEPLOY_SRC" deploy --flake "$FL"
+    expect_true "d5 guard failure ($fail) -> non-zero" test "$RC" -ne 0
+    expect_eq "d5 guard failure ($fail) -> Pi untouched (no nixos-rebuild, no ssh)" 0 "$(log_count '^(nr-mock|ssh) ')"
+    no_poison "d5 $fail"
+done
+reset_log
+MOCK_DRY="$HYB" run_cmd d5 -- dep --max-builds 100
+expect_exit "d5 --max-builds honoured -> RL_E_TOO_MANY" 12
 
-expect_not_grep() {  # name fixed-string [file]
-  local f="${3:-$OUT}"
-  if ! grep -qF -- "$2" "$f" 2>/dev/null; then
-    pass=$((pass + 1)); echo "PASS: $1"
-  else
-    fail=$((fail + 1)); echo "FAIL: $1 (string '$2' unexpectedly found)"
-  fi
-}
+reset_log
+set_auto_update 1
+run_cmd d6 -- dep
+expect_exit "d6 auto-update ahead -> RL_E_DOWNGRADE" 15
+expect_grepf "d6 says would downgrade" "would downgrade" "$ERR"
+expect_eq "d6 no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
+expect_eq "d6 checked before the guards" 0 "$(log_count '^nix ')"
+no_poison d6
 
-expect_true() {  # name test-cmd args...
-  local name="$1"; shift
-  if "$@"; then
-    pass=$((pass + 1)); echo "PASS: $name"
-  else
-    fail=$((fail + 1)); echo "FAIL: $name"
-  fi
-}
+reset_log
+run_cmd d7 -- dep --force
+expect_exit "d7 --force deploys anyway" 0
+expect_eq "d7 --force -> nixos-rebuild ran" 1 "$(log_count '^nr-mock switch ')"
+expect_grepf "d7 still warns" "auto-update" "$ERR"
+no_poison d7
 
-record_val() {  # file key -> value (empty if absent)
-  sed -n "s/^$2=//p" "$1" | tail -1
-}
+reset_log
+set_auto_update 0
+run_cmd d11 -- dep
+expect_exit "d11 auto-update merged into HEAD -> deploys" 0
 
-# --- tests -------------------------------------------------------------------
+reset_log
+NOGIT="$T/nogit"
+mkdir -p "$NOGIT"
+RPI_NIXOS_REBUILD="$BIN/nr-mock" run_cmd d12 -- rd deploy --flake "$NOGIT"
+expect_exit "d12 flake outside git -> no downgrade check, deploys" 0
 
-# 1. help
-run_cmd bash "$SCRIPT" --help
-expect_exit "help: exit 0" 0
-expect_grep "help: prints usage" "Usage: rpi-deploy"
+reset_log
+RPI_FLAKE="$FL" run_cmd d9 -- rd deploy
+expect_exit "d9 deploy with the flake's pinned tool succeeds" 0
+expect_grep "d9 runs the flake's nixos-rebuild" \
+    "^nix run --accept-flake-config $FL#nixos-rebuild -- switch --no-reexec --flake $FL#rpi --target-host root@neptun$" "$MOCK_LOG"
+no_poison d9
 
-# 2. unknown argument
-run_cmd bash "$SCRIPT" --bogus
-expect_exit "unknown arg: exit 2" 2
-expect_grep "unknown arg: message" "unknown argument"
+reset_log
+MOCK_NR_RC=1 run_cmd d10 -- dep
+expect_exit "d10 nixos-rebuild failure -> RL_E_DEPLOY" 14
+expect_eq "d10 no status after a failed deploy" 0 "$(log_count '^ssh ')"
 
-# 3. two subcommands
-run_cmd bash "$SCRIPT" build install
-expect_exit "double subcommand: exit 2" 2
-expect_grep "double subcommand: message" "multiple subcommands"
+reset_log
+run_cmd d13 -- dep
+expect_grep "d13 switch prints the status" "^reboot pending: (yes|no)$" "$OUT"
+expect_true "d13 status after the switch" test "$(first_line '^nr-mock ')" -lt "$(first_line '^ssh ')"
+reset_log
+run_cmd d13 -- dep boot
+expect_eq "d13 boot: no status query" 0 "$(log_count '^ssh ')"
+reset_log
+MOCK_SSH_FAIL=1 run_cmd d13 -- dep
+expect_exit "d13 status failing after a good switch -> still 0" 0
 
-# 4. nonexistent flake path
-run_cmd bash "$SCRIPT" show --flake "$T/does-not-exist"
-expect_exit "bad flake path: exit 1" 1
-expect_grep "bad flake path: message" "flake path does not exist"
+# =============================================================================
+# T5.8 status
+# =============================================================================
+reset_log
+MOCK_CUR=/nix/store/c-sys MOCK_BOOTED=/nix/store/b-sys run_cmd s1 -- rd status
+expect_exit "s1 status succeeds" 0
+expect_grep "s1 current line" "^current: /nix/store/c-sys$" "$OUT"
+expect_grep "s1 booted line" "^booted: /nix/store/b-sys$" "$OUT"
+expect_grep "s1 default target and port" "^ssh -p 2222 root@neptun " "$MOCK_LOG"
 
-# 5. show with no record
-F5="$(new_flake t5)"
-run_cmd bash "$SCRIPT" show --flake "$F5"
-expect_exit "show (no record): exit 0" 0
-expect_grep "show: no record message" "no build record"
-expect_grep "show: git head resolved" "git head: [0-9a-f]\{40\}"
+run_cmd s2 -- rd status
+expect_grep "s2 equal triplets -> reboot pending: no" "^reboot pending: no$" "$OUT"
 
-# 6. install with no record (real mode)
-F6="$(new_flake t6)"; C6="$(new_card t6)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F6" --mount "$C6"
-expect_exit "install without record: exit 1" 1
-expect_grep "install without record: message" "no build record at"
+for diff in "/nix/store/k2/Image /nix/store/i1/initrd /nix/store/m1" \
+    "/nix/store/k1/Image /nix/store/i2/initrd /nix/store/m1" \
+    "/nix/store/k1/Image /nix/store/i1/initrd /nix/store/m2"; do
+    MOCK_CUR_TRIPLET="$diff" run_cmd s3 -- rd status
+    expect_grep "s3 current ($diff) != booted -> reboot pending: yes" "^reboot pending: yes$" "$OUT"
+done
 
-# 7. build with broken emulation preflight
-F7="$(new_flake t7)"
-run_cmd env "${EMUL_BAD[@]}" bash "$SCRIPT" build --flake "$F7"
-expect_exit "build (no emulation): exit 1" 1
-expect_grep "build (no emulation): preflight failure" "emulation preflight failed"
-expect_grep "build (no emulation): shows module hint" "emulatedSystems"
+reset_log
+RPI_SSH_OPTS="-F cfg" run_cmd s3 -- rd status --target pi@x --port 22
+expect_grep "s3 --target/--port/RPI_SSH_OPTS honoured" "^ssh -p 22 -F cfg pi@x " "$MOCK_LOG"
 
-# 8. build --dry-run with working emulation
-F8="$(new_flake t8)"
-run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --dry-run --flake "$F8"
-expect_exit "build --dry-run: exit 0" 0
-expect_grep "build --dry-run: prints eval" "dry-run: nix eval --raw"
-expect_grep "build --dry-run: prints build" "dry-run: nix build"
-expect_true "build --dry-run: state dir created" test -d "$F8/.rpi-build"
-expect_true "build --dry-run: no record written" test ! -f "$F8/.rpi-build/last"
+MOCK_SSH_FAIL=1 run_cmd s4 -- rd status
+expect_true "s4 ssh failure -> non-zero" test "$RC" -ne 0
+expect_grepf "s4 cannot reach root@neptun" "cannot reach root@neptun" "$ERR"
+expect_not_grep "s4 no half status" "reboot pending" "$OUT"
 
-# 9. real build (mocked nix) writes a complete record
-F9="$(new_flake t9)"
-run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --flake "$F9"
-expect_exit "build (real, mocked nix): exit 0" 0
-LAST="$F9/.rpi-build/last"
-[[ -f "$LAST" ]] || { fail=$((fail + 1)); echo "FAIL: build: no record written"; }
-if [[ -f "$LAST" ]]; then
-  [[ "$(record_val "$LAST" flake)" == "$F9" ]] \
-    && { pass=$((pass + 1)); echo "PASS: record.flake"; } \
-    || { fail=$((fail + 1)); echo "FAIL: record.flake"; cat "$LAST"; }
-  [[ "$(record_val "$LAST" attr)" == "rpi" ]] \
-    && { pass=$((pass + 1)); echo "PASS: record.attr"; } \
-    || { fail=$((fail + 1)); echo "FAIL: record.attr"; cat "$LAST"; }
-  [[ "$(record_val "$LAST" sys)" == "$MOCK_SYS" ]] \
-    && { pass=$((pass + 1)); echo "PASS: record.sys"; } \
-    || { fail=$((fail + 1)); echo "FAIL: record.sys"; cat "$LAST"; }
-  [[ "$(record_val "$LAST" drv)" == "$MOCK_DRV" ]] \
-    && { pass=$((pass + 1)); echo "PASS: record.drv"; } \
-    || { fail=$((fail + 1)); echo "FAIL: record.drv"; cat "$LAST"; }
-  [[ "$(record_val "$LAST" dirty)" == "clean" ]] \
-    && { pass=$((pass + 1)); echo "PASS: record.dirty"; } \
-    || { fail=$((fail + 1)); echo "FAIL: record.dirty"; cat "$LAST"; }
-  if [[ "$(record_val "$LAST" rev)" =~ ^[0-9a-f]{40}$ ]]; then
-    pass=$((pass + 1)); echo "PASS: record.rev (40-hex git sha)"
-  else
-    fail=$((fail + 1)); echo "FAIL: record.rev"; cat "$LAST"
-  fi
-  if [[ -n "$(record_val "$LAST" built)" ]]; then
-    pass=$((pass + 1)); echo "PASS: record.built"
-  else
-    fail=$((fail + 1)); echo "FAIL: record.built"; cat "$LAST"
-  fi
-fi
-
-# 10. show after a build prints the record
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" show --flake "$F9"
-expect_exit "show (with record): exit 0" 0
-expect_grep "show: record header" "last build record"
-expect_grepf "show: prints recorded system" "$MOCK_SYS"
-
-# 11. install --dry-run with record
-C11="$(new_card t11)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C11"
-expect_exit "install --dry-run: exit 0" 0
-expect_grep "install --dry-run: store copy" "dry-run: sudo nix copy --no-check-sigs --to"
-expect_grepf "install --dry-run: nixos-install args" "dry-run: sudo nixos-install --root $C11 --flake $F9#rpi"
-
-# 12. real install with missing card
-run_cmd env RPI_BYLABEL_DIR="$T/by-label-empty" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$T/no-card"
-expect_exit "install (card missing): exit 1" 1
-expect_grep "install (card missing): message" "mount point does not exist"
-
-# 13. real install (mocked): copies, runs nixos-install, verifies
-C13="$(new_card t13)"
-: > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" MOCK_COPY=1 bash "$SCRIPT" install --flake "$F9" --mount "$C13"
-expect_exit "install (real, mocked): exit 0" 0
-expect_grepf "install: success message" "installed $(basename "$MOCK_SYS")"
-expect_grepf "install: nixos-install got --root" "--root $C13" "$MOCK_LOG"
-expect_grepf "install: nixos-install got host flake" "--flake $F9#rpi" "$MOCK_LOG"
-sysname="$(basename "$MOCK_SYS")"; drvname="$(basename "$MOCK_DRV")"
-expect_true "install: system path landed on card" \
-  test -d "$C13/nix/store/$sysname"
-expect_true "install: drv path landed on card" \
-  test -f "$C13/nix/store/$drvname"
-
-# 14. real install fails verification when the copy produced nothing
-C14="$(new_card t14)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" MOCK_COPY=0 bash "$SCRIPT" install --flake "$F9" --mount "$C14"
-expect_exit "install (copy no-op): exit 1" 1
-expect_grep "install (copy no-op): verification failure" "verification failed"
-
-# 15. attr mismatch between record and request
-F15="$(new_flake t15)"
-run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --attr foo --flake "$F15"
-expect_exit "build --attr foo: exit 0" 0
-C15="$(new_card t15)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F15" --mount "$C15"
-expect_exit "install (attr mismatch): exit 1" 1
-expect_grep "install (attr mismatch): message" "recorded build is for attr"
-
-# 16. divergence warning: checkout HEAD moved after the recorded build
-echo change >> "$F9/flake.nix"
-git -C "$F9" "${GIT_ID[@]}" add -A
-git -C "$F9" "${GIT_ID[@]}" commit -qm second
-C16="$(new_card t16)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C16"
-expect_exit "install (HEAD moved): exit 0" 0
-expect_grep "install (HEAD moved): divergence warning" "differs from recorded build"
-
-# 17. dirty-tree warning
-touch "$F9/untracked"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C16"
-expect_exit "install (dirty tree): exit 0" 0
-expect_grep "install (dirty tree): warning" "uncommitted changes"
-
-# 18. install --from without any build record (dry-run)
-F18="$(new_flake t18)"; C18="$(new_card t18)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --from "$MOCK_SYS" --dry-run --flake "$F18" --mount "$C18"
-expect_exit "install --from (dry-run, no record): exit 0" 0
-expect_grepf "install --from: nixos-install args" "dry-run: sudo nixos-install --root $C18 --flake $F18#rpi"
-
-# 19. install --from without any build record (real mode, drv via eval mock)
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" MOCK_COPY=1 bash "$SCRIPT" install --from "$MOCK_SYS" --flake "$F18" --mount "$C18"
-expect_exit "install --from (real, no record): exit 0" 0
-expect_grepf "install --from: success message" "installed $(basename "$MOCK_SYS")"
-
-# 20. no subcommand defaults to `all` (dry-run, both phases)
-F20="$(new_flake t20)"; C20="$(new_card t20)"
-run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" --dry-run --flake "$F20" --mount "$C20"
-expect_exit "default subcommand (all --dry-run): exit 0" 0
-expect_grep "all: ran build phase" "dry-run: nix build"
-expect_grepf "all: ran install phase" "dry-run: sudo nixos-install --root $C20 --flake $F20#rpi"
-
-# 21. positional target path (same as --mount); a second one is rejected
-F21="$(new_flake t21)"; C21="$(new_card t21)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F21" "$C21"
-expect_exit "positional target: exit 0" 0
-expect_grepf "positional target: nixos-install root" "dry-run: sudo nixos-install --root $C21 --flake $F21#rpi"
-run_cmd bash "$SCRIPT" install --flake "$F21" "$C21" /other
-expect_exit "two targets: exit 2" 2
-expect_grep "two targets: message" "multiple target paths"
-
-# 22. build failure shows log tail + hint, writes no record
-F22="$(new_flake t22)"
-run_cmd env "${EMUL_OK[@]}" MOCK_BUILD_FAIL=255 bash "$SCRIPT" build --flake "$F22"
-expect_exit "build failure (255): exit 1" 1
-expect_grep "build failure (255): hint" "could not be exec'd under qemu"
-expect_grep "build failure: message" "build failed"
-expect_true "build failure: no record written" test ! -f "$F22/.rpi-build/last"
-run_cmd env "${EMUL_OK[@]}" MOCK_BUILD_FAIL=oom bash "$SCRIPT" build --flake "$F22"
-expect_exit "build failure (oom): exit 1" 1
-expect_grep "build failure (oom): hint" "out of memory"
-
-# 23. install warns when the card lacks etc/NIXOS and the firmware files
-C23="$(new_card t23)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C23"
-expect_exit "install (incomplete card): exit 0" 0
-expect_grep "install: warns missing etc/NIXOS" "etc/NIXOS"
-expect_grep "install: warns missing config.txt" "firmware/config.txt"
-expect_grep "install: warns missing u-boot" "u-boot-rpi-arm64.bin"
-
-# 24. firmware partition must be a mount point (real install dies, dry-run warns)
-C24="$(new_card t24)"
-run_cmd env RPI_MOUNTPOINT_CMD=mp-nofw RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C24"
-expect_exit "install (firmware not mounted): exit 1" 1
-expect_grep "install (firmware not mounted): message" "boot/firmware is not a mount point"
-run_cmd env RPI_MOUNTPOINT_CMD=mp-nofw RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C24"
-expect_exit "install --dry-run (firmware not mounted): exit 0" 0
-expect_grep "install --dry-run (firmware not mounted): warns" "boot/firmware is not a mount point"
-
-# 25. nvmd binary cache: flake config accepted for build + install; warn if cache missing
-F25="$(new_flake t25)"
-run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --dry-run --flake "$F25"
-expect_grep "build: passes --accept-flake-config (eval)" "nix eval --raw .*--accept-flake-config"
-expect_grep "build: passes --accept-flake-config (build)" "nix build --accept-flake-config"
-expect_grep "build: trusted user -> cache enabled via flake" "enabled through the flake (you are a trusted nix user)"
-expect_grep "build: kernel comes from the cache" "available from the binary cache"
-expect_not_grep "build: no cache warning for a trusted user" "not a trusted nix user"
-run_cmd env "${EMUL_OK[@]}" MOCK_CACHE=1 bash "$SCRIPT" build --dry-run --flake "$F25"
-expect_grep "build: cache configured is reported" "nixos-raspberrypi.cachix.org is configured on this host"
-run_cmd env "${EMUL_OK[@]}" MOCK_TRUSTED=nobody-here bash "$SCRIPT" build --dry-run --flake "$F25"
-expect_grep "build: untrusted user is told how to fix it" "not a trusted nix user"
-expect_grep "build: untrusted: suggests trusted-users" "trusted-users"
-run_cmd env "${EMUL_OK[@]}" MOCK_TRUSTED="@$(id -gn)" bash "$SCRIPT" build --dry-run --flake "$F25"
-expect_grep "build: trusted through a group" "you are a trusted nix user"
-
-# 25b. the authoritative cache test: would the vendor kernel be compiled?
-F25B="$(new_flake t25b)"
-run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build bash "$SCRIPT" build --flake "$F25B"
-expect_exit "kernel not cached (no tty): exit 1" 1
-expect_grep "kernel not cached: explains" "would be compiled locally under qemu"
-expect_grep "kernel not cached: names the kernel" "linux_rpi-bcm2711-6.18.34.drv"
-expect_grep "kernel not cached: aborts, offers --yes" "aborted. Fix the cache setup, or pass --yes"
-expect_true "kernel not cached: nothing built" test ! -f "$F25B/.rpi-build/last"
-run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build bash "$SCRIPT" build --flake "$F25B" --yes
-expect_exit "kernel not cached (--yes): exit 0" 0
-expect_grep "kernel not cached (--yes): continues" "continuing because of --yes"
-run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build RPI_ASSUME_TTY=1 bash "$SCRIPT" build --flake "$F25B" <<< "n"
-expect_exit "kernel not cached (answer n): exit 1" 1
-expect_grep "kernel not cached: question asked" "Compile the kernel locally anyway?"
-run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build RPI_ASSUME_TTY=1 bash "$SCRIPT" build --flake "$F25B" <<< "y"
-expect_exit "kernel not cached (answer y): exit 0" 0
-run_cmd env "${EMUL_OK[@]}" MOCK_KERNEL=build bash "$SCRIPT" build --dry-run --flake "$F25B"
-expect_exit "kernel not cached (--dry-run): warns only, exit 0" 0
-expect_grep "kernel not cached (--dry-run): still reported" "would be compiled locally"
-run_cmd env "${EMUL_OK[@]}" MOCK_PLAN_FAIL=1 bash "$SCRIPT" build --flake "$F25B"
-expect_exit "build plan unavailable: exit 0" 0
-expect_grep "build plan unavailable: skipped with a note" "skipping the kernel cache check"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C24"
-expect_grep "install: nixos-install accepts flake config" "nixos-install --root $C24 --flake $F9#rpi --option accept-flake-config true"
-
-# 26. install copies the configuration checkout to <mount>/etc/nixos
-F26="$(new_flake t26)"; C26="$(mktemp -d "$T/card-t26.XXXX")"
-mkdir -p "$C26/etc/nixos"; echo stale > "$C26/etc/nixos/stale-file"
-mkdir -p "$F26/secrets" "$F26/.rpi-build" "$F26/.nixcache"
-echo "MY_WIFI_PASSWORD=x" > "$F26/secrets/wireless.env"
-echo junk > "$F26/.rpi-build/last"; echo junk > "$F26/.nixcache/x"; echo junk > "$F26/.rpi-build.log"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" config --flake "$F26" --mount "$C26"
-expect_exit "config: exit 0" 0
-expect_true "config: flake.nix copied" test -f "$C26/etc/nixos/flake.nix"
-expect_true "config: secrets copied" test -f "$C26/etc/nixos/secrets/wireless.env"
-expect_true "config: .git copied (secrets stay untracked on the pi)" test -d "$C26/etc/nixos/.git"
-expect_true "config: stale file removed (mirror)" test ! -e "$C26/etc/nixos/stale-file"
-expect_true "config: .rpi-build not copied" test ! -e "$C26/etc/nixos/.rpi-build"
-expect_true "config: .nixcache not copied" test ! -e "$C26/etc/nixos/.nixcache"
-expect_true "config: .rpi-build.log not copied" test ! -e "$C26/etc/nixos/.rpi-build.log"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" config --dry-run --flake "$F26" --mount "$C26"
-expect_exit "config --dry-run: exit 0" 0
-expect_grep "config --dry-run: prints the copy" "dry-run: tar -C"
-# a failed/absent mount must not be written to
-run_cmd env RPI_MOUNTPOINT_CMD=false bash "$SCRIPT" config --flake "$F26" --mount "$C26"
-expect_exit "config (not a mount point): exit 1" 1
-expect_grep "config (not a mount point): message" "is not a mount point"
-# real install ends with the config on the card
-C26B="$(new_card t26b)"; rm -rf "$C26B/etc/nixos"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C26B"
-expect_exit "install (fresh card, no etc/nixos): exit 0" 0
-expect_true "install: configuration copied to etc/nixos" test -f "$C26B/etc/nixos/flake.nix"
-expect_not_grep "install: no 'configuration was not copied' warning" "was not copied"
-
-# 27. prepare: mount an existing card by its labels
-: > "$MOCK_LOG"; rm -f "$MOCK_MNT"/*
-C27="$T/card-t27"
-run_cmd bash "$SCRIPT" prepare --dry-run --mount "$C27"
-expect_exit "prepare (by label, dry-run): exit 0" 0
-expect_grepf "prepare: mounts root" "dry-run: sudo mount $DEVDIR/mmcblk0p2 $C27" 
-expect_grepf "prepare: creates firmware dir" "mkdir -p $C27/boot/firmware"
-expect_grepf "prepare: mounts firmware partition" "mount $DEVDIR/mmcblk0p1 $C27/boot/firmware"
-run_cmd bash "$SCRIPT" prepare --mount "$C27"
-expect_exit "prepare (by label, real): exit 0" 0
-expect_grepf "prepare real: mount root recorded" "mount $DEVDIR/mmcblk0p2 $C27" "$MOCK_LOG"
-expect_grepf "prepare real: mount firmware recorded" "mount $DEVDIR/mmcblk0p1 $C27/boot/firmware" "$MOCK_LOG"
-expect_not_grep "prepare (by label) never formats" "mkfs" "$MOCK_LOG"
-# already mounted -> nothing mounted twice
-: > "$MOCK_LOG"
-echo $DEVDIR/mmcblk0p2 > "$MOCK_MNT/$(printf '%s' "$C27" | tr / _)"
-echo $DEVDIR/mmcblk0p1 > "$MOCK_MNT/$(printf '%s' "$C27/boot/firmware" | tr / _)"
-run_cmd bash "$SCRIPT" prepare --mount "$C27"
-expect_exit "prepare (already mounted): exit 0" 0
-expect_not_grep "prepare (already mounted): no second mount" "mount /dev" "$MOCK_LOG"
-# old layout: FAT mounted at <mount>/boot is moved to boot/firmware
-: > "$MOCK_LOG"; rm -f "$MOCK_MNT"/*
-echo $DEVDIR/mmcblk0p2 > "$MOCK_MNT/$(printf '%s' "$C27" | tr / _)"
-echo $DEVDIR/mmcblk0p1 > "$MOCK_MNT/$(printf '%s' "$C27/boot" | tr / _)"
-run_cmd bash "$SCRIPT" prepare --mount "$C27"
-expect_exit "prepare (old layout): exit 0" 0
-expect_grepf "prepare (old layout): FAT unmounted from /boot" "umount $C27/boot" "$MOCK_LOG"
-expect_grepf "prepare (old layout): FAT remounted at boot/firmware" "mount $DEVDIR/mmcblk0p1 $C27/boot/firmware" "$MOCK_LOG"
-# wrong device already at the mount point
-rm -f "$MOCK_MNT"/*; echo /dev/sdz9 > "$MOCK_MNT/$(printf '%s' "$C27" | tr / _)"
-run_cmd bash "$SCRIPT" prepare --mount "$C27"
-expect_exit "prepare (mount point busy): exit 1" 1
-expect_grep "prepare (mount point busy): message" "already mounted from /dev/sdz9"
-rm -f "$MOCK_MNT"/*
-# no labelled card at all
-
-run_cmd env RPI_BYLABEL_DIR="$T/by-label-empty" bash "$SCRIPT" prepare --mount "$C27"
-expect_exit "prepare (no card): exit 1" 1
-expect_grep "prepare (no card): hint to format" "prepare /dev/sdX --format"
-
-# 28. prepare DEVICE --format
-: > "$MOCK_LOG"
-run_cmd bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
-expect_exit "format (labels not matching afterwards): exit 1" 1
-expect_grep "format: verifies the labels afterwards" "does not have the expected layout"
-expect_grepf "format: wipes the device" "wipefs -a /dev/sdq" "$MOCK_LOG"
-expect_grepf "format: MBR table" "sfdisk-script: label: dos" "$MOCK_LOG"
-expect_grepf "format: 256MiB FAT32 boot partition, bootable" "sfdisk-script: ,256MiB,c,*" "$MOCK_LOG"
-expect_grepf "format: root takes the rest" "sfdisk-script: ,,83" "$MOCK_LOG"
-expect_grepf "format: FAT32 label" "mkfs.vfat -F 32 -n NIXOS_BOOT /dev/sdq1" "$MOCK_LOG"
-expect_grepf "format: ext4 label" "mkfs.ext4 -q -F -L NIXOS_SD /dev/sdq2" "$MOCK_LOG"
-# the same with matching labels (mmcblk0 -> p1/p2) ends mounted correctly
-: > "$MOCK_LOG"
-run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --format --yes --mount "$C27"
-expect_exit "format mmcblk0: exit 0" 0
-expect_grepf "format mmcblk0: partition names use the p suffix" "mkfs.vfat -F 32 -n NIXOS_BOOT $DEVDIR/mmcblk0p1" "$MOCK_LOG"
-expect_grepf "format mmcblk0: root mounted" "mount $DEVDIR/mmcblk0p2 $C27" "$MOCK_LOG"
-expect_grepf "format mmcblk0: firmware mounted" "mount $DEVDIR/mmcblk0p1 $C27/boot/firmware" "$MOCK_LOG"
-# custom boot size
-: > "$MOCK_LOG"
-run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --format --yes --boot-size 512MiB --mount "$C27"
-expect_grepf "format: custom boot size" "sfdisk-script: ,512MiB,c,*" "$MOCK_LOG"
-run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --format --yes --boot-size lots --mount "$C27"
-expect_exit "format: bad --boot-size: exit 1" 1
-expect_grep "format: bad --boot-size: message" "boot-size must look like"
-# dry-run changes nothing
-: > "$MOCK_LOG"
-run_cmd bash "$SCRIPT" prepare /dev/sdq --format --dry-run --mount "$C27"
-expect_exit "format --dry-run: exit 0" 0
-expect_grep "format --dry-run: prints sfdisk (under flock)" "dry-run: sudo flock /dev/sdq sfdisk --quiet /dev/sdq"
-expect_grep "format --dry-run: warns about data loss" "DESTROY ALL DATA on /dev/sdq"
-expect_true "format --dry-run: runs nothing" test ! -s "$MOCK_LOG"
-# safety
-run_cmd env MOCK_HOST_SRC=/dev/sdq1 bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
-expect_exit "format (host disk): exit 1" 1
-expect_grep "format (host disk): message" "holds the host's"
-run_cmd env MOCK_LSBLK_TYPE=part bash "$SCRIPT" prepare /dev/sdq1 --format --yes --mount "$C27"
-expect_exit "format (partition given): exit 1" 1
-expect_grep "format (partition given): message" "not a whole disk"
-: > "$MOCK_LOG"
-run_cmd env MOCK_DEV_MOUNTS=/run/media/u/NIXOS_SD bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
-expect_grep "format (automounted): announced" "will be unmounted"
-expect_grepf "format (automounted): unmounted before partitioning" "umount -R /run/media/u/NIXOS_SD" "$MOCK_LOG"
-run_cmd env MOCK_DEV_MOUNTS="[SWAP]" bash "$SCRIPT" prepare /dev/sdq --format --yes --mount "$C27"
-expect_exit "format (swap): exit 1" 1
-expect_grep "format (swap): message" "used as swap"
-run_cmd env MOCK_RM=0 bash "$SCRIPT" prepare /dev/sdq --format --dry-run --mount "$C27"
-expect_grep "format (non-removable): warns" "not a removable device"
-run_cmd env RPI_ALLOW_NONBLOCK=0 bash "$SCRIPT" prepare /tmp/not-a-device --format --yes --mount "$C27"
-expect_exit "format (not a block device): exit 1" 1
-expect_grep "format (not a block device): message" "not a block device"
-run_cmd bash "$SCRIPT" prepare /dev/sdq --format --mount "$C27" < /dev/null
-expect_exit "format (no tty, no --yes): exit 1" 1
-expect_grep "format (no tty, no --yes): message" "pass --yes"
-run_cmd bash "$SCRIPT" prepare --format --mount "$C27"
-expect_exit "format without device: exit 2" 2
-run_cmd bash "$SCRIPT" build --format
-expect_exit "--format on build: exit 2" 2
-# an explicit DEVICE without --format must carry the labels
-run_cmd bash "$SCRIPT" prepare /dev/sdq --mount "$C27"
-expect_exit "prepare DEVICE (foreign card, no --format): exit 1" 1
-expect_grep "prepare DEVICE (foreign card): hint" "prepare /dev/sdq --format"
-
-# 28b. labels: an existing card with missing/wrong labels is repaired, nothing is formatted
-: > "$MOCK_LOG"
-run_cmd env MOCK_LABEL_BOOT= MOCK_LABEL_ROOT=old bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
-expect_exit "labels repaired: exit 0" 0
-expect_grepf "labels: FAT label set" "fatlabel $DEVDIR/mmcblk0p1 NIXOS_BOOT" "$MOCK_LOG"
-expect_grepf "labels: ext4 label set" "e2label $DEVDIR/mmcblk0p2 NIXOS_SD" "$MOCK_LOG"
-expect_grepf "labels: udev refreshed" "udevadm trigger --action=change --settle" "$MOCK_LOG"
-expect_not_grep "labels: never formats" "mkfs" "$MOCK_LOG"
-expect_grep "labels: reported" "setting label of"
-: > "$MOCK_LOG"
-run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
-expect_exit "labels correct: exit 0" 0
-expect_not_grep "labels correct: nothing relabelled" "label" "$MOCK_LOG"
-run_cmd env MOCK_FS_ROOT=btrfs bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
-expect_exit "labels: foreign fs: exit 1" 1
-expect_grep "labels: foreign fs: message" "expected ext4"
-run_cmd env MOCK_FS_BOOT= bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
-expect_exit "labels: unformatted partition: exit 1" 1
-expect_grep "labels: unformatted: message" "unformatted"
-: > "$MOCK_LOG"
-run_cmd env MOCK_LABEL_ROOT=old MOCK_PART_MNT=/mnt/x bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --mount "$C27"
-expect_exit "labels: mounted partition not relabelled: exit 1" 1
-expect_grep "labels: mounted partition: message" "unmount it first"
-expect_not_grep "labels: mounted partition untouched" "e2label" "$MOCK_LOG"
-: > "$MOCK_LOG"
-run_cmd env MOCK_LABEL_ROOT=old bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --dry-run --mount "$C27"
-expect_exit "labels dry-run: exit 0" 0
-expect_grep "labels dry-run: prints e2label" "dry-run: sudo e2label"
-expect_true "labels dry-run: runs nothing" test ! -s "$MOCK_LOG"
-
-# 28c. regression: sfdisk runs exactly once, under flock, after wipefs + settle
-: > "$MOCK_LOG"
-run_cmd bash "$SCRIPT" prepare $DEVDIR/mmcblk0 --format --yes --mount "$C27"
-expect_exit "format (sfdisk once): exit 0" 0
-expect_true "format: sfdisk invoked exactly once" test "$(grep -c '^sfdisk ' "$MOCK_LOG")" = 1
-expect_grepf "format: partition table written under flock" "flock $DEVDIR/mmcblk0" "$MOCK_LOG"
-expect_true "format: wipefs before sfdisk" test "$(grep -n '^wipefs' "$MOCK_LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n '^sfdisk' "$MOCK_LOG" | head -1 | cut -d: -f1)"
-expect_true "format: mkfs once per partition" test "$(grep -c '^mkfs' "$MOCK_LOG")" = 2
-
-# 31. devices: candidates + card status
-run_cmd bash "$SCRIPT" devices
-expect_exit "devices: exit 0" 0
-expect_grep "devices: lists removable disk" "/dev/sdq .*29.8G.*usb.*Card Reader"
-expect_grep "devices: card present hint" "NIXOS_SD / NIXOS_BOOT is present"
-run_cmd env RPI_BYLABEL_DIR="$T/by-label-empty" bash "$SCRIPT" devices
-expect_grep "devices: no card hint" "prepare /dev/sdX --format"
-run_cmd env RPI_BYLABEL_DIR="$T/by-label-empty" bash "$SCRIPT" prepare --mount "$C27"
-expect_exit "prepare (no card): exit 1 (still)" 1
-expect_grep "prepare (no card): lists candidates" "removable / MMC disks"
-
-# 32. install mounts a labelled but unmounted card by itself
-: > "$MOCK_LOG"
-run_cmd env RPI_MOUNTPOINT_CMD=false RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C27"
-expect_grep "install: auto-mount announced" "mounting the card found by its labels"
-expect_grepf "install: auto-mount mounted the root" "mount $DEVDIR/mmcblk0p2 $C27" "$MOCK_LOG"
-
-# 33. install: card summary, space check, login check, next steps
-C33="$(new_card t33)"; F34B="$(new_flake t34b)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
-expect_exit "install (ux): exit 0" 0
-expect_grep "install: card summary" "target card: .* total, .* free"
-expect_grep "install: duration reported" "in [0-9][0-9]*s"
-expect_grep "install: next steps" "next: rpi-deploy eject"
-expect_not_grep "install: no login warning when a key exists" "could not log in"
-run_cmd env MOCK_CLOSURE=99999999999999999 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
-expect_exit "install (closure too big): exit 1" 1
-expect_grep "install (closure too big): message" "does not fit on the card"
-run_cmd env MOCK_LOGIN="pi 0 0" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
-expect_exit "install (no login, no tty): refuses" 1
-expect_grep "install (no login): warns" "could not log in to the pi"
-expect_grep "install (no login): aborted with advice" "aborted: add an ssh key to configuration.nix"
-run_cmd env MOCK_LOGIN="pi 0 0" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33" --yes
-expect_exit "install (no login, --yes): installs" 0
-expect_grep "install (no login, --yes): says so" "continuing because of --yes: Continue without any way to log in?"
-run_cmd env MOCK_LOGIN="pi 0 0" RPI_ASSUME_TTY=1 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33" <<< "n"
-expect_exit "install (no login, answer n): refuses" 1
-expect_grep "install (no login): question asked" "Continue without any way to log in?"
-expect_not_grep "install (no login, answer n): nothing installed" "installed mock-sys"
-run_cmd env MOCK_LOGIN="pi 0 0" RPI_ASSUME_TTY=1 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33" <<< "y"
-expect_exit "install (no login, answer y): installs" 0
-run_cmd env "${EMUL_OK[@]}" MOCK_LOGIN="pi 0 0" bash "$SCRIPT" build --flake "$F34B"
-expect_exit "build (no login, no tty): asks before the long build -> refuses" 1
-expect_true "build (no login): nothing built" test ! -f "$F34B/.rpi-build/last"
-run_cmd env "${EMUL_OK[@]}" MOCK_LOGIN="pi 0 0" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" all --flake "$F34B" --mount "$C33" --yes
-expect_exit "all (no login, --yes): exit 0" 0
-expect_true "all (no login): asked only once" test "$(grep -c 'Continue without any way to log in' "$OUT")" = 1
-run_cmd env MOCK_LOGIN="pi 0 1" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
-expect_not_grep "install (password set): no warning" "could not log in"
-run_cmd env MOCK_LOGIN="garbage" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C33"
-expect_not_grep "install (unparsable login info): silent" "could not log in"
-
-# 34. build: next steps; no colour codes when not on a terminal
-F34="$(new_flake t34)"
-run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --flake "$F34"
-expect_exit "build (ux): exit 0" 0
-expect_grep "build: duration reported" "built in [0-9][0-9]*s"
-expect_grep "build: next steps" "next: insert the SD card"
-expect_not_grep "no ANSI colours off a tty" $'\033'
-run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" all --flake "$F34" --mount "$C33"
-expect_not_grep "all: no premature next-step hint after build" "next: insert the SD card"
-
-# 37. real install compares the derivation, not git revisions
-C37="$(new_card t37)"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C37"
-expect_exit "drift (same drv, HEAD moved + dirty tree): exit 0" 0
-expect_grep "drift: unchanged system reported" "still evaluates to the recorded system"
-expect_not_grep "drift: no git-revision noise when the drv is identical" "differs from recorded build"
-expect_not_grep "drift: no dirty-tree noise when the drv is identical" "uncommitted changes"
-run_cmd env MOCK_EVAL_DRV=/nix/store/changed.drv RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C37"
-expect_exit "drift (changed drv, no tty): refuses" 1
-expect_grep "drift (changed): explains" "configuration changed since the recorded build"
-expect_grep "drift (changed): advice" "run 'rpi-deploy build'"
-run_cmd env MOCK_EVAL_DRV=/nix/store/changed.drv RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C37" --yes
-expect_exit "drift (changed, --yes): installs" 0
-run_cmd env MOCK_EVAL_DRV=/nix/store/changed.drv RPI_ASSUME_TTY=1 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C37" <<< "n"
-expect_exit "drift (changed, answer n): refuses" 1
-expect_grep "drift (changed): question asked" "Install anyway (slow)?"
-run_cmd env MOCK_EVAL_DRV=/nix/store/changed.drv RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C37"
-expect_exit "drift (dry-run): never asks" 0
-
-# 29a. two cards with the same labels: ambiguous, never guess
-run_cmd env MOCK_DUP_LABELS='/dev/sdx2 NIXOS_SD\n/dev/sdy2 NIXOS_SD\n/dev/sdx1 NIXOS_BOOT' bash "$SCRIPT" prepare --mount "$C27"
-expect_exit "duplicate labels: exit 1" 1
-expect_grep "duplicate labels: explained" "label is ambiguous"
-expect_grep "duplicate labels: lists the partitions" "NIXOS_SD: /dev/sdx2 /dev/sdy2"
-run_cmd env MOCK_DUP_LABELS='/dev/sdx2 NIXOS_SD\n/dev/sdx1 NIXOS_BOOT' bash "$SCRIPT" prepare --mount "$C27"
-expect_exit "unique labels: exit 0" 0
-run_cmd env MOCK_DUP_LABELS='/dev/sdx2 NIXOS_SD\n/dev/sdy2 NIXOS_SD' bash "$SCRIPT" prepare /dev/sdq --mount "$C27"
-expect_exit "duplicate labels + foreign DEVICE: exit 1" 1
-expect_grep "duplicate labels + DEVICE: hint to unplug" "unplug it"
-
-# 35. nixos-install runs `activate` and the bootloader installer through
-#     nixos-enter (a chroot in a fresh mount namespace). A binfmt handler
-#     without the F flag is not found there ("cannot execute: required file not
-#     found", "chroot: failed to run command ... No such file or directory"). The
-#     script tests the chroot (incl. a program started by an emulated program)
-#     BEFORE nixos-install and registers a temporary F-flag handler if needed.
-C35="$(new_card t35)"
-export MOCK_BINFMT_FILE="$T/rpi-binfmt-register"
-printf ':rpi-deploy-aarch64:M::\\x7fELF:\\xff\\xff\\xff\\xff:/nix/store/q-qemu/bin/qemu-aarch64:PF' > "$MOCK_BINFMT_FILE"
-# each case gets its own binfmt directory (the script writes to <dir>/register)
-fresh_bmf() { local d; d="$(mktemp -d "$T/bmfcase.XXXX")"; cp "$1"/* "$d"/ 2>/dev/null || true; echo "$d"; }
-
-# (a) the chroot works: nothing to do, whatever the flags say
-B="$(fresh_bmf "$T/bmf-nof")"; : > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$B" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (works): exit 0" 0
-expect_grep "chroot emu (works): reported" "aarch64 programs run (emulation works inside the chroot)"
-expect_not_grep "chroot emu (works): no registration" "temporary aarch64 binfmt handler"
-expect_true "chroot emu (works): nothing written to binfmt_misc" test ! -e "$B/register"
-expect_true "chroot emu (works): tested before nixos-install" test "$(grep -n '^chroot ' "$MOCK_LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n '^nixos-install' "$MOCK_LOG" | tail -1 | cut -d: -f1)"
-expect_grepf "chroot emu (works): the test starts a program from the emulated bash" "chroot $C35 $T/mock-sys/sw/bin/bash -c $T/mock-sys/sw/bin/true && $T/mock-sys/sw/bin/true" "$MOCK_LOG"
-
-# (b) no F flag: chroot fails -> temporary F handler registered, retested, installed, removed
-B="$(fresh_bmf "$T/bmf-nof")"; : > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$B" MOCK_CHROOT_NEEDS_F=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (F handler needed): exit 0" 0
-expect_grep "chroot emu (F handler needed): says it does not run" "do not run inside a chroot of the card"
-expect_grep "chroot emu (F handler needed): explains the missing F flag" "has no F flag"
-expect_grep "chroot emu (F handler needed): names the permanent fix" "preferStaticEmulators"
-expect_grep "chroot emu (F handler needed): registering" "registering a temporary aarch64 binfmt handler with the F flag"
-expect_grep "chroot emu (F handler needed): works afterwards" "run now (temporary F-flag handler)"
-expect_true "chroot emu (F handler needed): the registration line was written" grep -q '^:rpi-deploy-aarch64:M::.*:PF$' "$B/register"
-expect_grepf "chroot emu (F handler needed): registered before nixos-install, active during it" "f-handler-active-during-install" "$MOCK_LOG"
-expect_true "chroot emu (F handler needed): handler unregistered afterwards (-1)" test "$(cat "$B/rpi-deploy-aarch64")" = "-1"
-expect_grep "chroot emu (F handler needed): install finished" "installed "
-
-# (c) the registration cannot be built (offline): stop with the reason, nothing installed
-B="$(fresh_bmf "$T/bmf-nof")"; : > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$B" MOCK_CHROOT_NEEDS_F=1 MOCK_BINFMT_BUILD_FAIL=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (registration unbuildable): exit 1" 1
-expect_grep "chroot emu (registration unbuildable): message" "could not build the binfmt registration"
-expect_grep "chroot emu (registration unbuildable): shows the real nix error" "Failure when receiving data from the peer"
-expect_grep "chroot emu (registration unbuildable): names the network cause" "large downloads are cut off"
-expect_not_grep "chroot emu (registration unbuildable): nixos-install not started" "^nixos-install" "$MOCK_LOG"
-
-# (d) even the F handler does not help: stop BEFORE nixos-install, with facts
-B="$(fresh_bmf "$T/bmf-nof")"; : > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$B" MOCK_CHROOT_FAIL=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (hopeless): exit 1" 1
-expect_grep "chroot emu (hopeless): refuses to run a doomed install" "would fail. Nothing was installed"
-expect_grep "chroot emu (hopeless): prints the binfmt entry" "binfmt entry  :"
-expect_grep "chroot emu (hopeless): prints the chroot error" "chroot output : chroot: failed to run command"
-expect_grep "chroot emu (hopeless): host fix" "emulatedSystems"
-expect_not_grep "chroot emu (hopeless): nixos-install not started" "^nixos-install" "$MOCK_LOG"
-expect_true "chroot emu (hopeless): handler unregistered" test "$(cat "$B/rpi-deploy-aarch64")" = "-1"
-expect_not_grep "chroot emu (hopeless): no success claim" "installed mock-sys"
-
-# (e) nixos-install itself fails: handler removed, advice printed
-B="$(fresh_bmf "$T/bmf-nof")"; : > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$B" MOCK_CHROOT_NEEDS_F=1 MOCK_NIXOS_INSTALL_RC=3 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "nixos-install failure: exit 1" 1
-expect_true "nixos-install failure: handler still removed" test "$(cat "$B/rpi-deploy-aarch64")" = "-1"
-expect_grep "nixos-install failure: safe to re-run" "re-run 'rpi-deploy install'"
-expect_not_grep "nixos-install failure: no success claim" "installed mock-sys"
-
-# (f) a handler left over from a crashed run is removed before registering
-B="$(fresh_bmf "$T/bmf-nof")"; echo enabled > "$B/rpi-deploy-aarch64"
-run_cmd env RPI_BINMFT_DIR="$B" MOCK_CHROOT_NEEDS_F=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "stale handler: exit 0" 0
-expect_true "stale handler: ends unregistered" test "$(cat "$B/rpi-deploy-aarch64")" = "-1"
-
-# (g) dry-run shows the steps without touching anything
-B="$(fresh_bmf "$T/bmf-nof")"; : > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$B" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C35"
-expect_exit "chroot emu dry-run: exit 0" 0
-expect_grep "chroot emu dry-run: prints the registration" "dry-run: sudo tee .*/register"
-expect_true "chroot emu dry-run: runs nothing" test ! -s "$MOCK_LOG"
-expect_true "chroot emu dry-run: writes nothing" test ! -e "$B/register"
-
-# (h) no readable binfmt entry at all, chroot fails: still registers (and says so)
-B="$(fresh_bmf "$T/bmf-empty")"
-run_cmd env RPI_BINMFT_DIR="$B" RPI_BINMFT_RUN="$T/bmf-ok" MOCK_CHROOT_NEEDS_F=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (no entry, F handler fixes it): exit 0" 0
-B="$(fresh_bmf "$T/bmf-empty")"
-run_cmd env RPI_BINMFT_DIR="$B" MOCK_CHROOT_FAIL=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (no entry, hopeless): exit 1" 1
-expect_grep "chroot emu (no entry, hopeless): facts show the temporary handler" "binfmt entry  : .*rpi-deploy-aarch64"
-run_cmd env RPI_BINMFT_DIR="$T/no-such-dir" MOCK_CHROOT_NEEDS_F=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "chroot emu (binfmt_misc not mounted): exit 1" 1
-expect_grep "chroot emu (binfmt_misc not mounted): message" "binfmt_misc is not mounted"
-
-# (i) show reports it
-run_cmd env RPI_BINMFT_DIR="$T/bmf-nof" bash "$SCRIPT" show --flake "$F9"
-expect_grep "show: chroot emulation needs the temporary handler" "chroot emu .*temporary F-flag handler"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" show --flake "$F9"
-expect_grep "show: chroot emulation ok" "chroot emu .*ok"
-
-# (j) the temporary handler is removed when the script is interrupted
-#     (SIGTERM here: an async job ignores SIGINT in a non-interactive shell;
-#     Ctrl-C uses the same `exit` + EXIT-trap path). The mock reports its own
-#     and its parent's (= the script's) pid, so no pgrep/pkill is needed.
-B="$(fresh_bmf "$T/bmf-nof")"; rm -f "$T/rc35" "$T/pids35"
-mv "$BIN/nixos-install" "$BIN/nixos-install.real"
-printf '#!%s\necho "$PPID $$" > "%s/pids35"\nexec sleep 30\n' "$BASH_BIN" "$T" > "$BIN/nixos-install"; chmod 755 "$BIN/nixos-install"
-( RPI_BINMFT_DIR="$B" MOCK_CHROOT_NEEDS_F=1 bash "$SCRIPT" install --flake "$F9" --mount "$C35" >/dev/null 2>&1; echo $? > "$T/rc35" ) &
-for _ in $(seq 1 80); do [[ -s "$T/pids35" ]] && break; sleep 0.25; done
-read -r spid cpid < "$T/pids35"
-kill -TERM "$spid"; sleep 0.3; kill -TERM "$cpid" 2>/dev/null
-for _ in $(seq 1 80); do [[ -f "$T/rc35" ]] && break; sleep 0.25; done
-expect_true "interrupted: script exits 143 (trap ran)" test "$(cat "$T/rc35" 2>/dev/null)" = 143
-expect_true "interrupted: handler unregistered" test "$(cat "$B/rpi-deploy-aarch64")" = "-1"
-mv "$BIN/nixos-install.real" "$BIN/nixos-install"
-
-# 36. sudo: authenticate once up front (the copy outlasts the sudo timeout)
-: > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_grepf "sudo: authenticated up front" "sudo -v" "$MOCK_LOG"
-expect_true "sudo: authenticated before the card copy" test "$(grep -n '^sudo -v' "$MOCK_LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n 'nix copy' "$MOCK_LOG" | head -1 | cut -d: -f1)"
-run_cmd env MOCK_SUDO_FAIL=1 RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --flake "$F9" --mount "$C35"
-expect_exit "sudo refused: exit 1" 1
-expect_grep "sudo refused: message" "sudo authentication failed"
-: > "$MOCK_LOG"
-run_cmd env RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" install --dry-run --flake "$F9" --mount "$C35"
-expect_true "sudo: no password prompt in dry-run" test ! -s "$MOCK_LOG"
-: > "$MOCK_LOG"
-run_cmd env "${EMUL_OK[@]}" RPI_BINMFT_DIR="$T/bmf-ok" bash "$SCRIPT" all --flake "$(new_flake t36)" --mount "$C35" --yes
-expect_true "sudo (all): password asked once, before the long build" test "$(grep -c '^sudo -v' "$MOCK_LOG")" = 1
-run_cmd env "${EMUL_OK[@]}" bash "$SCRIPT" build --flake "$(new_flake t36b)"
-expect_not_grep "sudo: build never asks for it" "root access is needed"
-: > "$MOCK_LOG"
-run_cmd bash "$SCRIPT" show --flake "$F9"
-expect_true "sudo: show does not ask" test ! -s "$MOCK_LOG"
-
-# 29. eject
-: > "$MOCK_LOG"
-run_cmd bash "$SCRIPT" eject --mount "$C27"
-expect_exit "eject: exit 0" 0
-expect_grepf "eject: syncs" "sync" "$MOCK_LOG"
-expect_grepf "eject: unmounts recursively" "umount -R $C27" "$MOCK_LOG"
-: > "$MOCK_LOG"
-run_cmd env RPI_MOUNTPOINT_CMD=false bash "$SCRIPT" eject --mount "$C27"
-expect_exit "eject (not mounted): exit 0" 0
-expect_not_grep "eject (not mounted): nothing unmounted" "umount" "$MOCK_LOG"
-
-# 30. show reports card + firmware state
-run_cmd env RPI_MOUNTPOINT_CMD=mp-nofw bash "$SCRIPT" show --flake "$F26" --mount "$C27"
-expect_exit "show: exit 0" 0
-expect_grep "show: firmware not mounted" "firmware: NOT mounted"
-
-# --- summary -----------------------------------------------------------------
-echo
-echo "rpi-deploy unit tests: $pass passed, $fail failed"
-[[ "$fail" -eq 0 ]]
+summary
