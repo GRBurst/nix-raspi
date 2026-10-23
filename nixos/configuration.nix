@@ -81,7 +81,7 @@ in {
       ports = [2222];
       settings = {
         PasswordAuthentication = false;
-        # root: key-only; used by `rpi-deploy deploy` and rpi-autoupdate
+        # root: key-only; used by `rpi-deploy deploy`
         PermitRootLogin = "prohibit-password";
       };
       #  usePAM = false;
@@ -152,14 +152,8 @@ in {
     openssh.authorizedKeys.keys = [keys.user];
   };
 
-  # Push deploys log in as root (no sudo, no trusted-users needed). The
-  # auto-update key may only log in from the build host, and `restrict`
-  # drops forwarding and the pty (nix copy and systemd-run --pipe need
-  # neither).
-  users.users.root.openssh.authorizedKeys.keys =
-    [keys.user]
-    ++ lib.optional (keys.autoUpdate != null)
-    ''from="${keys.hostAddress}",restrict ${keys.autoUpdate}'';
+  # Push deploys log in as root (no sudo, no trusted-users needed).
+  users.users.root.openssh.authorizedKeys.keys = [keys.user];
 
   # NixOS requires the login shell to be an enabled shell program (see the
   # users.users.<name>.shell assertion); the actual zsh configuration comes

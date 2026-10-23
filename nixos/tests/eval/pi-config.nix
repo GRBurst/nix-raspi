@@ -24,28 +24,12 @@ in
 
   "root has the user key" = lib.elem keys.user rootKeys;
 
-  # P3: the user key is the only unrestricted root key.
-  "every non-user root key is from= restricted" =
-    lib.all (k: k == keys.user || lib.hasPrefix "from=\"" k) rootKeys;
+  # Spec §3.5: the host auto-update key is gone; the user key is the only
+  # root key (manual `rpi-deploy deploy`).
+  "root has exactly the user key" = rootKeys == [ keys.user ];
 
-  # N3: with an auto-update key set (keys.nix has none yet), the key line
-  # is from=-limited and `restrict`ed (no forwarding, no pty).
-  "auto-update key line is from=...,restrict" =
-    let
-      withKey = rpi.extendModules {
-        modules = [ {
-          _module.args.rpiKeys = keys // {
-            autoUpdate = "ssh-ed25519 AAAAtest rpi-autoupdate";
-            hostAddress = "192.0.2.1";
-          };
-        } ];
-      };
-      r = builtins.tryEval withKey.config.users.users.root.openssh.authorizedKeys.keys;
-    in
-    r.success && r.value == [ keys.user ''from="192.0.2.1",restrict ssh-ed25519 AAAAtest rpi-autoupdate'' ];
-
-  "an auto-update key needs hostAddress" =
-    keys.autoUpdate == null || keys.hostAddress != null;
+  "keys.nix has no auto-update key or host address" =
+    !(keys ? autoUpdate) && !(keys ? hostAddress);
 
   "pi has exactly the user key" =
     cfg.users.users.pi.openssh.authorizedKeys.keys == [ keys.user ];
