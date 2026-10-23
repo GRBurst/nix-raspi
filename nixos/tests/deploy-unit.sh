@@ -18,6 +18,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export RPI_DEPLOY_SRC="${RPI_DEPLOY_SRC:-$HERE/../rpi-deploy.sh}"
 export RPI_LIB="${RPI_LIB:-$HERE/../rpi-lib.sh}"
+export RPI_FP_LIB="${RPI_FP_LIB:-$HERE/../rpi-fp.sh}"
 FIXTURES="${FIXTURES:-$HERE/fixtures}"
 
 # shellcheck source=tests/harness.sh
@@ -255,6 +256,13 @@ EOF
 reset_log
 RPI_SSH_OPTS="-F x -o A=b" run_cmd r7 -- lib rl_ssh true
 expect_eq "r7 rl_ssh argv" "ssh -p 2222 -F x -o A=b root@neptun true" "$(cat "$MOCK_LOG")"
+
+# x1: rpi-fp.sh is the Pi-safe half of the lib (D1, P12): the fingerprint
+# functions and nothing host-only. Sourced alone, in a fresh shell.
+run_cmd x1 -- bash -c 'source "$1" && declare -F rl_fp_local rl_needs_reboot rl_fp_changed' _ "$RPI_FP_LIB"
+expect_exit "x1 rpi-fp.sh alone defines the fingerprint functions" 0
+run_cmd x1 -- bash -c 'source "$1" || exit 2; for f in rl_ssh rl_guard rl_nixos_rebuild rl_fp_remote; do declare -F "$f" && exit 1; done; exit 0' _ "$RPI_FP_LIB"
+expect_exit "x1 rpi-fp.sh defines no host functions" 0
 
 # =============================================================================
 # T5.4 CLI skeleton

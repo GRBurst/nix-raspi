@@ -24,6 +24,10 @@ in
   "rpi-deploy package ships rpi-lib.sh" =
     lib.hasInfix "rpi-lib.sh" install;
 
+  # rpi-lib.sh sources its fingerprint half from its own directory (D1)
+  "rpi-deploy package ships rpi-fp.sh next to rpi-lib.sh" =
+    lib.hasInfix "$out/libexec/rpi-deploy/rpi-fp.sh" install;
+
   "rpi-deploy wrapper points RPI_LIB at the packaged lib" =
     lib.hasInfix "--set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh" install;
 

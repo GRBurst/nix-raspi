@@ -73,6 +73,7 @@
         mkdir -p $out/bin $out/libexec/rpi-deploy
         cp ${./rpi-deploy.sh} $out/bin/rpi-deploy
         cp ${./rpi-lib.sh} $out/libexec/rpi-deploy/rpi-lib.sh
+        cp ${./rpi-fp.sh} $out/libexec/rpi-deploy/rpi-fp.sh
         chmod 755 $out/bin/rpi-deploy
         wrapProgram $out/bin/rpi-deploy \
           --set RPI_LIB $out/libexec/rpi-deploy/rpi-lib.sh \
