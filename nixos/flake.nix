@@ -247,16 +247,26 @@
             # merged into checks.x86_64-linux, not replace it (a shallow `//`
             # dropped rpi-deploy-syntax there).
             checks = lib.recursiveUpdate (forSystem [ "aarch64-linux" "x86_64-linux" ] (system: {
-              # bash syntax check of the wrapper script.
-              # Note: the script must come in as `src`, not
+              # bash syntax + shellcheck (warnings and up) of the host
+              # scripts; shellcheck follows rpi-deploy.sh's `source` of the
+              # lib (-x), so the lib's globals count as assigned there.
+              # Note: the scripts must come in as `src`, not
               # `nativeBuildInputs` — stdenv *sources* every regular file in
               # nativeBuildInputs as a setup hook, which would execute the
               # script (with `$pkg -1 0` as positional args) before the check
               # even starts.
               rpi-deploy-syntax = (pkgsFor system).runCommand "rpi-deploy-syntax-check" {
-                src = ./rpi-deploy.sh;
+                src = lib.fileset.toSource {
+                  root = ./.;
+                  fileset = lib.fileset.unions [ ./rpi-deploy.sh ./rpi-lib.sh ];
+                };
+                nativeBuildInputs = [ (pkgsFor system).shellcheck ];
               } ''
-                ${(pkgsFor system).bash}/bin/bash -n $src
+                cd $src
+                for f in rpi-deploy.sh rpi-lib.sh; do
+                  ${(pkgsFor system).bash}/bin/bash -n $f
+                done
+                shellcheck -x -S warning rpi-deploy.sh rpi-lib.sh
                 touch $out
               '';
             }))
@@ -334,10 +344,9 @@
                       host.succeed("grep -qF /tmp/rpi-nixos $(cat /tmp/wrapper)")
                       # an aarch64 binary actually runs via binfmt (the module's core job)
                       host.succeed("${aarch64Pkgs.hello}/bin/hello")
-                      # the installed tool runs its dry-run flows end-to-end
-                      host.succeed("mkdir -p /tmp/fake-flake && touch /tmp/fake-flake/flake.nix")
-                      host.succeed("rpi-deploy build --dry-run --flake /tmp/fake-flake")
-                      host.succeed("rpi-deploy show --flake /tmp/fake-flake | grep -q 'no build record'")
+                      # the installed tool is the image/flash/deploy/status CLI
+                      host.succeed("rpi-deploy --help | grep -q 'flash IMAGE DEVICE'")
+                      host.fail("rpi-deploy install")
                     '';
                   };
                 }
