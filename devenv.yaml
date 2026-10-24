@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+# Same release branch as the Pi's flake (nixos/flake.nix `nixpkgs`), so the
+# tools here match `nix flake check` and CI. The exact commit is pinned in
+# devenv.lock (`devenv update` moves it).
+inputs:
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixos-26.05
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs

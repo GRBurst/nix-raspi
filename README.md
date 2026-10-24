@@ -67,11 +67,26 @@ nixos/
   ci/                  the scripts the workflow calls: cache-name, build, publish, pointer, commit-push
   deploy/neptun.json   the pointer, written by CI (absent until the first successful run)
   tests/               unit tests, eval checks, qemu smoke tests (see "Testing")
+devenv.nix, devenv.yaml local dev shell: cachix, lint tools, qemu, rpi-deploy/rpi-unit/rpi-check, git hooks
 docs/superpowers/      specs and plans
 ```
 
 All commands below run in `nixos/` of your checkout unless noted; with
 `rpi.buildHost.flakePath` set (below) `rpi-deploy` works from anywhere.
+
+### Local dev shell (devenv)
+
+At the repo root, `devenv shell` (or devenv's automatic activation) provides
+everything besides nix itself: `cachix` (section 4 setup), `shellcheck` and
+`actionlint`, and the qemu smoke-test tools (`qemu-system-aarch64` with
+`raspi3b`, `debugfs`, `mcopy`, `sfdisk`, `zstd`). nixpkgs is `nixos-26.05`, the
+same release as the flake, pinned in `devenv.lock` (`devenv update` moves it).
+
+- `rpi-deploy`: the working tree's `nixos/rpi-deploy.sh`.
+- `rpi-unit` (also `devenv test`): `tests/*-unit.sh`, about 1 min.
+- `rpi-check [--no-build]`: `nix flake check` in `nixos/`.
+- Git pre-commit hooks: shellcheck (`-x -P SCRIPTDIR -S warning`; not the
+  vendored `tests/fixtures/`) and actionlint on staged files.
 
 ## 1. Build host setup
 
