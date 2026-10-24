@@ -204,6 +204,17 @@ Open points (documented, not fixed):
   matters: compare the local toplevel's label date (`26.05.YYYYMMDD.<rev>`) with
   the Pi's `/var/lib/rpi-pull/store-path`, which `status` already reads over
   ssh (no fetch needed).
+- *`status` age* (final review N5): the age in `pull applied: seq N … (3h ago)` is
+  the mtime of `$STATE/seq`, i.e. when the Pi applied it, not the pointer's age
+  that A5 asked for; a stale pointer shows only as `pull last run: stale (exit
+  39)`. Documented in README section 3. Deferred: `rpi-pull` records `built`
+  in its state dir and `status` prints it.
+- *Staleness means "no new system"* (final review N8): `ci/pointer.sh` keeps the
+  pointer (and its `built`) when the toplevel is unchanged, so a lock-only
+  commit or a frozen channel trips exit 39 after 21 days although CI is
+  healthy. Accepted and documented (README section 4, step 7): after the 26.05
+  end of life this is the wanted alarm. If the channel is quiet for long
+  stretches, raise `rpi.pull.maxAgeDays`.
 
 ## 5. Hardware and CI acceptance checklist (manual, ~1 h plus the CI setup)
 

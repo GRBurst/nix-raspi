@@ -356,6 +356,11 @@ A run without a new pointer is one HTTP request. Each run:
 7. if the pointer was built more than `maxAgeDays` (default 21) ago: exit 39,
    `pointer is N days old (CI stalled?)` -- CI stopped publishing (also catches
    GitHub disabling the schedule after 60 days without repository activity).
+   `built` is only rewritten when the toplevel changes, so a healthy CI that
+   builds the same system for 21 days (a frozen channel, e.g. after the 26.05
+   end of life, or only lock changes that leave the toplevel equal) trips it
+   too: then the alarm means "no new system", which after the end of life is
+   the reminder to bump the release.
 
 Every run that got the lock writes `/var/lib/rpi-pull/last-run`
 (`time=… exit=… result=…`); the unit fails visibly (`systemctl status
