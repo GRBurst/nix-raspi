@@ -193,6 +193,14 @@ make_sys "$T/sysA"
 make_sys "$T/sysA2"
 run_cmd fp1 -- lib rl_fp_local "$T/sysA"
 expect_exit "fp1 rl_fp_local succeeds" 0
+# The Pi's rpi-pull unit has no bash on PATH: rl_fp_local must use the running bash.
+mkdir -p "$T/onlyreadlink" && ln -sf "$(command -v readlink)" "$T/onlyreadlink/readlink"
+fp_full=$(cat "$OUT")
+# shellcheck disable=SC2016
+run_cmd fp1b -- env PATH="$T/onlyreadlink" "$BASH" -c 'source "$1" && rl_fp_local "$2"' _ "$HERE/../rpi-fp.sh" "$T/sysA"
+expect_exit "fp1b rl_fp_local works without bash on PATH" 0
+expect_eq "fp1b same fingerprint without bash on PATH" "$fp_full" "$(cat "$OUT")"
+run_cmd fp1 -- lib rl_fp_local "$T/sysA"
 expect_grep "fp1 kernel" "^kernel: $FX_STORE/fx-kernel-1/Image$" "$OUT"
 expect_grep "fp1 initrd" "^initrd: $FX_STORE/fx-initrd-1/initrd$" "$OUT"
 expect_grep "fp1 kernel-modules" "^kernel-modules: $FX_STORE/fx-modules-1$" "$OUT"

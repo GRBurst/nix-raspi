@@ -83,7 +83,7 @@ fi
 
 # rl_fp_local SYSTEM: the boot fingerprint of a local system (a toplevel).
 # RL_STORE_DIR: the local store (/nix/store; tests use a fake one).
-rl_fp_local() { bash -c "$RL_FP_SCRIPT" rl_fp "$1" "${RL_STORE_DIR:-/nix/store}"; }
+rl_fp_local() { "${BASH:-bash}" -c "$RL_FP_SCRIPT" rl_fp "$1" "${RL_STORE_DIR:-/nix/store}"; }
 
 # rl_needs_reboot FP_A FP_B: 0 iff the boot fingerprints differ (the change
 # only takes effect after a reboot).
