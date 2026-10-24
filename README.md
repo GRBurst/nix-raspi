@@ -315,7 +315,10 @@ digits); `built` must have exactly that UTC form or the Pi rejects the pointer.
 
 **The Pi** (`modules/pull-update.nix`, unit `rpi-pull`, `rpi-pull.sh`): the
 timer runs **daily at 05:00** (`*-*-* 05:00`, up to 30 min random delay,
-`Persistent=true`: a Pi that was off catches up at boot, after `time-sync`).
+`Persistent=true`: a Pi that was off catches up at boot, once the clock is
+NTP-synchronized: the unit waits for `systemd-time-wait-sync`, which only it
+pulls in, so boot never waits for NTP; after 30 min without a sync it runs
+anyway).
 A run without a new pointer is one HTTP request. Each run:
 
 1. fetches the pointer (HTTPS, size and time limits); HTTP 404 → `no pointer

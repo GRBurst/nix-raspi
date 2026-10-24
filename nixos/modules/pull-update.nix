@@ -149,11 +149,19 @@ in {
         };
       };
 
+      # Persistent catch-up may fire at boot, before NTP (no RTC), and
+      # time-sync.target alone is reached once timesyncd has started, synced
+      # or not. systemd-time-wait-sync waits for the kernel clock to be
+      # synchronized; installed but not enabled, so only rpi-pull waits for
+      # it (boot never does), and bounded: without NTP for 30 min it fails
+      # and rpi-pull runs anyway, as before (final review N1).
+      systemd.additionalUpstreamSystemUnits = [ "systemd-time-wait-sync.service" ];
+      systemd.services.systemd-time-wait-sync.serviceConfig.TimeoutStartSec = "30min";
+
       systemd.services.rpi-pull = {
         description = "Apply the system CI published for this Pi (rpi-pull)";
-        # Persistent catch-up may fire at boot, before NTP (no RTC).
-        after = [ "network-online.target" "time-sync.target" ];
-        wants = [ "network-online.target" "time-sync.target" ];
+        after = [ "network-online.target" "time-sync.target" "systemd-time-wait-sync.service" ];
+        wants = [ "network-online.target" "time-sync.target" "systemd-time-wait-sync.service" ];
         # D15: switch-to-configuration runs inside this unit; a switch that
         # changes the unit must neither restart nor stop it.
         restartIfChanged = false;

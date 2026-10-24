@@ -132,6 +132,24 @@ in
     lib.all (t: lib.elem t (svc.after or [ ]) && lib.elem t (svc.wants or [ ]))
       [ "network-online.target" "time-sync.target" ];
 
+  # Final review N1: time-sync.target alone is reached once timesyncd has
+  # started, synced or not. systemd-time-wait-sync (upstream unit, installed
+  # but not enabled: boot never waits for NTP) is pulled in by rpi-pull only,
+  # with a bounded wait (no NTP within 30 min: rpi-pull runs anyway).
+  "service waits for systemd-time-wait-sync; boot does not; bounded" =
+    let
+      tws = "systemd-time-wait-sync.service";
+      u = oc.systemd.services.systemd-time-wait-sync or { };
+    in
+    lib.elem tws oc.systemd.additionalUpstreamSystemUnits
+    && lib.elem tws (svc.after or [ ]) && lib.elem tws (svc.wants or [ ])
+    && !(lib.elem tws (svc.requires or [ ]))
+    && (u.wantedBy or [ ]) == [ ] && (u.requiredBy or [ ]) == [ ]
+    && (u.serviceConfig.TimeoutStartSec or null) == "30min";
+
+  "disabled: no systemd-time-wait-sync" =
+    !(lib.elem "systemd-time-wait-sync.service" off.config.systemd.additionalUpstreamSystemUnits);
+
   "service runs the packaged rpi-pull" =
     pkg != null && lib.hasPrefix "${noCtx (toString pkg)}/bin/rpi-pull " (noCtx exec);
 
