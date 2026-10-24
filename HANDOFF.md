@@ -3,7 +3,7 @@
 > **Maintain this file.** Update it at the end of every work step: status,
 > decisions, open problems, what was verified vs. assumed. A new session should
 > be able to start from this file alone.
-> Last updated: milestone M9 (docs and final acceptance of the CI pull addendum). Full docs: `README.md`.
+> Last updated: fixes of the final whole-branch review (plan T9.3), after milestone M9. Full docs: `README.md`.
 > Spec: `docs/superpowers/specs/2026-10-19-image-push-deploy-design.md`;
 > addendum (CI builds, the Pi pulls; amends its §3.3, §3.4, §5, §8, §10):
 > `docs/superpowers/specs/2026-10-23-ci-pull-updates-design.md`.
@@ -46,7 +46,38 @@ Image/push-deploy milestones M1–M7 (first plan) are done and were accepted on
 | M6 | `modules/pull-update.nix` (`rpi.pull.*`), `keys.cache` → substituter and key, production pointer URL | `64f7ac3`, `d34fea6`, `79f0268` | done, **[M]** 23 assertions; unit **[V]** in pull-smoke |
 | M7 | `ci/{build,cache-name,publish,pointer,commit-push}.sh`, `.github/workflows/neptun.yml`, `actionlint` check | `5596d42` … `a3e68cc` (5) | done, **[M]** 159 assertions + actionlint; a real GitHub run **[?]** |
 | M8 | `tests/pull-smoke.sh` (qemu, signed local cache over HTTP) + a bug it found (`f9dc426`) | `3b84a3d`, `f9dc426` | done, **[V]** |
-| M9 | README and HANDOFF; final acceptance | `8fa8299` (docs), the acceptance commit after it | docs and acceptance done (below); final review (T9.3) **open** |
+| M9 | README and HANDOFF; final acceptance | `8fa8299` (docs), the acceptance commit after it | docs and acceptance done (below) |
+| T9.3 | final whole-branch review (`nixos/.scratch/ci/final-review.md`) and its fixes | `00eaea7` … `b4a4b47` (13), this HANDOFF commit | done except S2 (user decision), see below |
+
+### Final whole-branch review (plan T9.3): findings
+
+One commit per finding, test first where a test is possible (each test of a
+code fix was red before the fix; the N7 tests pin existing behaviour). Re-checked after the fixes, on `b4a4b47` (only this
+HANDOFF commit follows): `nix eval` of the toplevel `drvPath` rc 0 (8 s);
+`nix flake check --no-build` rc 0 (34 s); full `nix flake check` rc 0 (56 s:
+the four unit/syntax checks rebuilt, every other check was the identical,
+already passed derivation); `rpi-pull-unit` 608, `rpi-ci-unit` 162,
+`rpi-deploy-unit` 314 assertions, `eval-pull-update` 25; the aarch64-linux unit
+checks (what CI now runs) built under binfmt: rc 0, 309 s, same counts;
+`nixos/.scratch/ci/final-fix/aarch64.log`. Logs: `nixos/.scratch/ci/final-fix/`
+(untracked), report `nixos/.scratch/ci/final-fix-report.md`.
+
+| finding | fix | commit |
+|---|---|---|
+| **S1** CA toplevel passes "our key only" (nix accepts a CA path without a signature) | before the realise `rpi-pull` reads the narinfo (`nix path-info --json --store <cache>`): content-addressed or no signature by our key name → 32, `nix store verify` with our key only → 32, narinfo narHash ≠ pointer → 34, not in the cache → 38; after the realise the local path must be input-addressed (32) and its narHash equal (34). Unit tests with mock narinfo (`ca` set: unsigned, signed by another key, by ours), real-nix check against `fr-ca` (`.scratch/ci/s1-real/results.txt`). `--help`, README, A6/A12, plan G4 | `00eaea7` |
+| **S2** reboot about 23 h after the run (`rebootTime` 04:30 vs. the 05:00 run) | **deferred: user decision**; `rebootTime` unchanged. The review recommends `rebootTime = "06:30"` plus an `eval-pull-update` row | — |
+| **S3** 404 after an applied seq exits 0 | 404 with an applied seq → exit 30 `pointer disappeared`; before any apply still 0 | `2251768` |
+| **S4** actions pinned by tag; secrets handed to cachix-action | full commit SHAs with the tag as comment (resolved over HTTPS: `git ls-remote`, GitHub API); cachix-action gets no token or signing key (`skipPush`, public cache: it only runs `cachix use`); `.github/dependabot.yml` (github-actions, weekly); `actionlint` check asserts all three | `ff93e29` |
+| **S5** CI publishes without running any check | step `unit tests` between build and push: `nix build .#checks.aarch64-linux.rpi-{deploy-syntax,pull-unit,ci-unit,deploy-unit}` (unit checks are now defined for both systems; sandboxed with the pinned tools, as on the host, no apt on the runner); `actionlint` check asserts build < checks < publish | `01bc0f1` |
+| **N1** `time-sync.target` was a no-op | `systemd-time-wait-sync.service` installed (not enabled), `rpi-pull` wants and orders after it, `TimeoutStartSec=30min`: only rpi-pull waits for NTP, boot does not (qemu VM test `.scratch/ci/n1-vm.nix`, untracked) | `0ce554a` |
+| **N2** unusable state dir exits 37 | exit 1 `state dir not writable` | `579b48b` |
+| **N3** manual deploy and the pull share no lock | documented (README §4, §4 below); `flock` in `rpi-deploy` deferred | `1e9f78e` |
+| **N4** downgrade check freshness | documented below (intended, D14) | `5db1c22` |
+| **N5** `status` age is the apply time | documented (README §3, below) | `2a15f11` |
+| **N6** publish not main-guarded | job-level `if: github.ref == 'refs/heads/main'`, asserted by the `actionlint` check | `a4f6a06` |
+| **N7** pin overclaim; run_number reset; bad `$STATE/seq` | README wording (pin exempts the toplevels; closure protection unverified) and the two recoveries (README §5), pinned by ci-unit w11 and pull-unit p7 | `066c4d4` |
+| **N8** `built` only refreshes with a new toplevel | documented (README §4 step 7, below) | `cd171e7` |
+| **N9** dependency trust (A12 residual risk) | documented (README Trust box, below) | `b4a4b47` |
 
 ### Acceptance of the CI pull addendum (addendum §5)
 
@@ -175,8 +206,6 @@ The agent cannot do these (addendum §6, plan A5/A13):
 
 Open points (documented, not fixed):
 
-- **Final whole-branch review (plan T9.3) is open**: findings get their own fix
-  commit (test first) and a line here; unfixed ones are listed here with the reason.
 - *Release bump (26.05 → 26.11)*: the pinned deploy tool is the flake's release, so
   the first deploy after the bump runs the 26.11 nixos-rebuild against the Pi's
   26.05 systemd (E3). Re-check the pinned tool then; for that one deploy set
@@ -186,8 +215,12 @@ Open points (documented, not fixed):
   means agents running as `pi` have root. Accepted; revisit if agents run unattended.
 - *Fresh flash*: a Pi without `/var/lib/rpi-pull/seq` applies the current pointer at
   its first run, even over a newer local image (pinned by `rpi-pull-unit` p20).
-- *Reboot timing*: after a boot-affecting update `shutdown -r 04:30` schedules the
-  next 04:30, about 23 h after the 05:00 run. Cancel with `shutdown -c`.
+- *Reboot timing* (final review S2, **your decision**): after a boot-affecting
+  update `shutdown -r 04:30` schedules the next 04:30, about 23 h after the
+  05:00 run, and `switch-to-configuration boot` activates nothing until then.
+  Cancel with `shutdown -c`. The review recommends `rpi.pull.rebootTime =
+  "06:30"` (after the run window) with an `eval-pull-update` row; left at
+  04:30 until you decide.
 - *Pointer trust*: the pointer is not signed (HTTPS from GitHub); write access to
   the repo or the secrets means deploy access to the Pi (same level as the root key).
 - *Boot + reboot path of `rpi-pull`* is covered by unit tests only; pull-smoke
