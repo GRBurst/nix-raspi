@@ -2,7 +2,11 @@
 # activation). Everything the README's workflows need besides nix itself:
 # cachix (cache setup, README §4), the lint tools `nix flake check` runs,
 # and the tools the qemu smoke tests check for (tests/qemu-pi.sh qp_need).
-{pkgs, ...}: {
+{
+  pkgs,
+  config,
+  ...
+}: {
   packages = with pkgs; [
     # binary cache setup (README §4: create the cache, signing key)
     cachix
@@ -21,6 +25,30 @@
     e2fsprogs # debugfs
     mtools # mcopy
   ];
+
+  # rpi-deploy needs no --flake (what rpi.buildHost.flakePath does on a host).
+  env.RPI_FLAKE = "${config.devenv.root}/nixos";
+
+  # The two things only the host can provide (README section 1); warns, never
+  # blocks the shell.
+  scripts.rpi-doctor = {
+    exec = ''
+      ok=0
+      if [[ "$(uname -m)" != aarch64 ]] &&
+        ! nix config show extra-platforms 2>/dev/null | grep -qw aarch64-linux; then
+        echo 'rpi: no aarch64 emulation: add  boot.binfmt.emulatedSystems = [ "aarch64-linux" ];  to the host NixOS config (README section 1)' >&2
+        ok=1
+      fi
+      if ! nix store info 2>&1 | grep -q '^Trusted: 1'; then
+        echo "rpi: $USER is not a trusted nix user: the nvmd cache is ignored and the kernel gets compiled; add  nix.settings.trusted-users = [ \"$USER\" ];  (README section 1)" >&2
+        ok=1
+      fi
+      exit "$ok"
+    '';
+    description = "check the host prerequisites (aarch64 emulation, trusted nix user)";
+  };
+
+  enterShell = "rpi-doctor || true";
 
   # The working tree's rpi-deploy (the build host's packaged one is the
   # committed version).

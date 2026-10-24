@@ -2,9 +2,10 @@
 
 Headless NixOS system (no display server) for a Raspberry Pi 3 Model B V1.2
 (hostname `neptun`, `aarch64-linux`, 1 GiB RAM, SD card, wired LAN only), plus
-everything the x86_64 NixOS build host needs for it (aarch64 emulation and the
-`rpi-deploy` tool). Security updates are built by GitHub Actions and pulled by
-the Pi itself, so they arrive without the host being on.
+everything the x86_64 build host needs for it (a devenv shell with the
+`rpi-deploy` tool; the host itself needs only aarch64 emulation and a trusted
+nix user). Security updates are built by GitHub Actions and pulled by the Pi
+itself, so they arrive without the host being on.
 
 ```
 host (x86_64, binfmt aarch64, caches)                Pi 3B (aarch64)
@@ -67,32 +68,66 @@ nixos/
   ci/                  the scripts the workflow calls: cache-name, build, publish, pointer, commit-push
   deploy/neptun.json   the pointer, written by CI (absent until the first successful run)
   tests/               unit tests, eval checks, qemu smoke tests (see "Testing")
-devenv.nix, devenv.yaml local dev shell: cachix, lint tools, qemu, rpi-deploy/rpi-unit/rpi-check, git hooks
+devenv.nix, devenv.yaml local dev shell (section 1 B): rpi-deploy, cachix, lint tools, qemu, rpi-unit/rpi-check/rpi-doctor, git hooks
 docs/superpowers/      specs and plans
 ```
 
-All commands below run in `nixos/` of your checkout unless noted; with
-`rpi.buildHost.flakePath` set (below) `rpi-deploy` works from anywhere.
-
-### Local dev shell (devenv)
-
-At the repo root, `devenv shell` (or devenv's automatic activation) provides
-everything besides nix itself: `cachix` (section 4 setup), `shellcheck` and
-`actionlint`, and the qemu smoke-test tools (`qemu-system-aarch64` with
-`raspi3b`, `debugfs`, `mcopy`, `sfdisk`, `zstd`). nixpkgs is `nixos-26.05`, the
-same release as the flake, pinned in `devenv.lock` (`devenv update` moves it).
-
-- `rpi-deploy`: the working tree's `nixos/rpi-deploy.sh`.
-- `rpi-unit` (also `devenv test`): `tests/*-unit.sh`, about 1 min.
-- `rpi-check [--no-build]`: `nix flake check` in `nixos/`.
-- Git pre-commit hooks: shellcheck (`-x -P SCRIPTDIR -S warning`; not the
-  vendored `tests/fixtures/`) and actionlint on staged files.
+All commands below run in `nixos/` of your checkout unless noted. Inside the
+devenv shell (section 1) `rpi-deploy` finds the flake from anywhere.
 
 ## 1. Build host setup
 
-### A. NixOS build host (module)
+Two things need root on the host, once; everything else comes from the repo's
+devenv shell.
 
-In your host flake:
+### A. Host prerequisites (once)
+
+On a NixOS host, in its configuration:
+
+```nix
+boot.binfmt.emulatedSystems = [ "aarch64-linux" ];  # aarch64 emulation (qemu user mode)
+nix.settings.trusted-users = [ "root" "pallon" ];   # honour the flake's nvmd cache
+```
+
+- **aarch64 emulation.** The nixpkgs binfmt module registers the qemu handler,
+  exposes it to the nix sandbox (`extra-sandbox-paths`) and adds `aarch64-linux`
+  to `extra-platforms`. Without it every aarch64 derivation fails with
+  `builder failed with exit code 255`. Kernel registration and daemon settings
+  need root, so devenv cannot provide this.
+- **Trusted nix user.** The flake declares the nixos-raspberrypi cache in its
+  `nixConfig` and `rpi-deploy` accepts it, but the nix daemon honours a flake's
+  substituters only for trusted users. Otherwise the kernel gets compiled
+  (hours). Alternative: add the cache to the host's `nix.settings.substituters`
+  and `trusted-public-keys` (the values are in `nixos/flake.nix`).
+
+On a non-NixOS host: `binfmt-support` + `qemu-user-static`,
+`extra-platforms = aarch64-linux` and `trusted-users` in `/etc/nix/nix.conf`.
+
+### B. devenv shell (repo root)
+
+`devenv shell` (or devenv's automatic activation) checks both prerequisites
+with `rpi-doctor` and warns with the fix if one is missing. It provides
+everything else besides nix itself:
+
+- `rpi-deploy`: the working tree's `nixos/rpi-deploy.sh`. `RPI_FLAKE` is set,
+  so it needs no `--flake`.
+- `cachix` (section 4 setup), `shellcheck` and `actionlint`, and the qemu
+  smoke-test tools (`qemu-system-aarch64` with `raspi3b`, `debugfs`, `mcopy`,
+  `sfdisk`, `zstd`).
+- `rpi-unit` (also `devenv test`): `tests/*-unit.sh`, about 1 min.
+- `rpi-check [--no-build]`: `nix flake check` in `nixos/`.
+- `rpi-doctor`: the prerequisite check above.
+- Git pre-commit hooks: shellcheck (`-x -P SCRIPTDIR -S warning`; not the
+  vendored `tests/fixtures/`) and actionlint on staged files.
+
+nixpkgs is `nixos-26.05`, the same release as the flake, pinned in
+`devenv.lock` (`devenv update` moves it). The host runs no update job: security
+updates come from CI (section 4).
+
+### C. Optional: host modules (rpi-deploy outside the repo)
+
+If you want `rpi-deploy` on the system PATH (outside the devenv shell) and the
+section A settings in one place, import the host module in your host flake:
 
 ```nix
 inputs.pi = {
@@ -112,27 +147,14 @@ modules = [
 ];
 ```
 
-then `nixos-rebuild switch`. That gives you:
+then `nixos-rebuild switch`. That gives you `boot.binfmt.emulatedSystems =
+[ "aarch64-linux" ]`, the `nix` features `nix-command` and `flakes`, the
+nixos-raspberrypi binary cache as a host substituter (`rpi.buildHost.nvmdCache`,
+so no trusted user needed) and `rpi-deploy` on the PATH (the committed version,
+not the working tree's).
 
-- `boot.binfmt.emulatedSystems = [ "aarch64-linux" ]` (qemu user mode). The
-  nixpkgs binfmt module also exposes the handler to the nix sandbox
-  (`extra-sandbox-paths`) and adds `aarch64-linux` to `extra-platforms`, so
-  aarch64 builds work out of the box. Nothing runs in a chroot any more, so no
-  static emulator / binfmt F flag is needed;
-- `nix` features `nix-command` and `flakes`, and the nixos-raspberrypi binary
-  cache (`rpi.buildHost.nvmdCache`);
-- `rpi-deploy` on the PATH.
-
-The host runs no update job: security updates come from CI (section 4).
-
-Without aarch64 emulation every aarch64 derivation fails with
-`builder failed with exit code 255` (an emulation problem, not a configuration
-problem).
-
-### B. Non-NixOS host (Home Manager module)
-
-For the script only (you manage binfmt yourself, e.g. `binfmt-support` plus
-`extra-platforms = aarch64-linux` in `nix.conf`):
+On a non-NixOS host, the Home Manager module puts only the script on the PATH
+(binfmt and `nix.conf` as in section A):
 
 ```nix
 home-manager.users.alice = {
@@ -142,7 +164,7 @@ home-manager.users.alice = {
 };
 ```
 
-### C. ssh access to the Pi
+### D. ssh access to the Pi
 
 The tools address the Pi as `root@neptun`, port 2222. Add to `~/.ssh/config`
 on the host:
