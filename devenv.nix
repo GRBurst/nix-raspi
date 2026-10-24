@@ -2,9 +2,7 @@
 # activation). Everything the README's workflows need besides nix itself:
 # cachix (cache setup, README §4), the lint tools `nix flake check` runs,
 # and the tools the qemu smoke tests check for (tests/qemu-pi.sh qp_need).
-{ pkgs, ... }:
-
-{
+{pkgs, ...}: {
   packages = with pkgs; [
     # binary cache setup (README §4: create the cache, signing key)
     cachix
@@ -63,9 +61,9 @@
   git-hooks.hooks = {
     shellcheck = {
       enable = true;
-      args = [ "-x" "-P" "SCRIPTDIR" "-S" "warning" ];
+      args = ["-x" "-P" "SCRIPTDIR" "-S" "warning"];
       # vendored nvmd builder templates, not ours
-      excludes = [ "^nixos/tests/fixtures/" ];
+      excludes = ["^nixos/tests/fixtures/"];
     };
     actionlint.enable = true;
   };
