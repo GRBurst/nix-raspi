@@ -19,8 +19,10 @@ usage: rpi-pull --pointer-url URL --cache-url URL --cache-key KEY
                 [--max-age-days N]
 
 Applies the system in the pointer at URL if its seq is newer than the last
-applied one, its store path is HOST's system, it is signed by KEY in the
-cache at --cache-url and its narHash matches the pointer. A change the
+applied one, its store path is HOST's system, its narinfo in the cache at
+--cache-url is input-addressed, signed by KEY and has the pointer's narHash
+(all checked before anything is realised), and the realised path has that
+narHash and is input-addressed. A change the
 booted system's boot fingerprint does not cover is switched to; any other
 is activated for the next boot, with a reboot scheduled at --reboot-time.
 A pointer built more than --max-age-days ago means CI has stalled: exit 39
@@ -35,9 +37,12 @@ A pointer built more than --max-age-days ago means CI has stalled: exit 39
 
 exit: 0 applied, up to date, already current or no pointer published yet
       1 state dir not writable   2 usage   30 fetch
-      31 pointer invalid or older   32 untrusted   33 realise   34 narHash mismatch
+      31 pointer invalid or older
+      32 untrusted (not signed by KEY, or content-addressed)
+      33 realise   34 narHash mismatch (narinfo or realised path)
       35 profile   36 activation (switch-to-configuration, shutdown)
-      37 busy   38 cache unavailable   39 pointer stale (CI stalled?)
+      37 busy   38 cache unavailable, or the system is not in it
+      39 pointer stale (CI stalled?)
 EOF
 }
 
@@ -136,11 +141,30 @@ rp_parse() {
         die 31 "pointer built is not a UTC time YYYY-MM-DDTHH:MM:SSZ: $P_BUILT"
 }
 
-# rp_verify_sig: P_PATH is signed by our key (and only ours: --trusted-public-keys
-# replaces the configured keys) in the cache. nix exits 2 for an untrusted
-# path; anything else is an unreachable cache or a missing path.
+# rp_verify_sig: before anything is realised, P_PATH's narinfo in our cache
+# must be input-addressed (nix accepts a content-addressed path without any
+# signature, in `store verify` and in the realise), name a signature by our
+# key, pass `nix store verify` with our key only (--trusted-public-keys
+# replaces the configured keys; nix exits 2 for an untrusted path, anything
+# else is an unreachable cache) and carry the pointer's narHash.
 rp_verify_sig() {
-    local rc=0
+    local info verdict rc=0 name="${CACHE_KEY%%:*}"
+    info=$(nix --extra-experimental-features nix-command path-info --json --json-format 1 \
+        --store "$CACHE_URL" "$P_PATH") ||
+        die 38 "cache unavailable: cannot read the narinfo of $P_PATH in $CACHE_URL (nix exit $?)"
+    verdict=$(jq -r --arg p "$P_PATH" --arg k "$name:" '
+        .[$p] | if . == null then "absent"
+        elif .ca != null then "content-addressed"
+        elif (any(.signatures[]?; type == "string" and startswith($k)) | not) then "unsigned"
+        else "narHash \(.narHash | tojson)" end' <<<"$info" 2>/dev/null) ||
+        die 38 "cache unavailable: unreadable narinfo of $P_PATH in $CACHE_URL"
+    case "$verdict" in
+    absent) die 38 "cache unavailable: $P_PATH is not in $CACHE_URL (not pushed, or evicted)" ;;
+    content-addressed) die 32 "untrusted: $P_PATH is content-addressed in $CACHE_URL (our systems never are)" ;;
+    unsigned) die 32 "untrusted: $P_PATH is not signed by $name in $CACHE_URL" ;;
+    "narHash "*) ;;
+    *) die 38 "cache unavailable: unreadable narinfo of $P_PATH in $CACHE_URL" ;;
+    esac
     nix --extra-experimental-features nix-command store verify --no-contents \
         --store "$CACHE_URL" --trusted-public-keys "$CACHE_KEY" "$P_PATH" || rc=$?
     case "$rc" in
@@ -148,11 +172,15 @@ rp_verify_sig() {
     2) die 32 "untrusted: $P_PATH is not signed by $CACHE_KEY in $CACHE_URL" ;;
     *) die 38 "cache unavailable: cannot verify $P_PATH in $CACHE_URL (nix exit $rc)" ;;
     esac
+    [[ "${verdict#narHash }" == "\"$P_NAR\"" ]] ||
+        die 34 "narHash mismatch: the narinfo of $P_PATH in $CACHE_URL says ${verdict#narHash }, the pointer $P_NAR"
 }
 
 # rp_realise: P_PATH's closure from the substituters, then P_PATH's narHash
 # (SRI, D5) must equal the pointer's -- the binding between pointer and
-# content, since the realise trusts every configured key.
+# content, since the realise trusts every configured key -- and P_PATH must
+# be input-addressed in the local store too (a narinfo that changed after
+# rp_verify_sig read it).
 rp_realise() {
     local hash sri
     nix-store --realise "$P_PATH" --option max-substitution-jobs 2 >/dev/null ||
@@ -161,6 +189,9 @@ rp_realise() {
         sri=$(nix --extra-experimental-features nix-command hash convert --to sri "$hash") ||
         die 34 "narHash mismatch: cannot read the narHash of $P_PATH"
     [[ "$sri" == "$P_NAR" ]] || die 34 "narHash mismatch: $P_PATH is $sri, pointer says $P_NAR"
+    nix --extra-experimental-features nix-command path-info --json --json-format 1 "$P_PATH" |
+        jq -e --arg p "$P_PATH" '.[$p] | type == "object" and .ca == null' >/dev/null 2>&1 ||
+        die 32 "untrusted: $P_PATH is content-addressed in the local store (or its path info is unreadable)"
 }
 
 # rp_activation: ACTION=boot if P_PATH's boot fingerprint differs from the

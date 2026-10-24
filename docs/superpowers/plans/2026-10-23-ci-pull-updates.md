@@ -89,7 +89,7 @@ The Pi 3B cannot evaluate its flake (1.10 GB RSS, ~700 MB live heap vs ~869 MiB 
 | G1 | The Pi never evaluates or builds (only realises store paths) | PASS | `rpi-pull-unit` p19 (0 `nix eval`/`nix build`/`nixos-rebuild` in the mock log), D6 |
 | G2 | No local kernel/toolchain build in CI; ≤ 500 builds | PASS | `ci/build.sh` → `rl_guard toplevel 500`; `rpi-ci-unit` b4/b5 |
 | G3 | Failures before `nix-env --set` leave the Pi untouched | PASS | `rpi-pull-unit` P1 over p3–p13 |
-| G4 | Trust = our key only + name regex + monotonic seq + narHash | PASS | `rpi-pull-unit` p5–p10, p13; `pull-smoke` tamper path |
+| G4 | Trust = our key only + name regex + monotonic seq + narHash. Before the realise the toplevel's narinfo in our cache is input-addressed, signed by our key and has the pointer's narHash (a content-addressed path passes `nix store verify` unsigned: final review S1); after it the realised path has that narHash and is input-addressed | PASS (FAIL in the final review, fixed by S1) | `rpi-pull-unit` p5–p10, p10c–p10h, p13, p13c; `pull-smoke` tamper path |
 | G5 | Pointer written only after a successful push + pin; any failing step leaves it unchanged | PASS | workflow step order asserted by the `actionlint` check; `rpi-ci-unit` u2/u3, w3 |
 | G6 | Manual `rpi-deploy deploy` keeps working; pull applies only newer seq | PASS | `rpi-deploy-unit` (unchanged d1–d14 except the downgrade source), p6 |
 | G7 | Host auto-update fully removed | PASS | `eval-build-host` row, grep in T1.1 verify |

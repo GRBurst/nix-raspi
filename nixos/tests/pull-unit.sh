@@ -115,17 +115,46 @@ printf '%s' "${MOCK_HTTP:-200}"
 exit "${MOCK_CURL_RC:-0}"
 EOF
 
-# nix: store verify (rc 0 iff the signer is ours and the argv trusts $KEY;
-# else "untrusted" rc 2; MOCK_VERIFY_RC: another failure), hash convert
-# (prints ${MOCK_NAR:-$GOOD_NAR}); anything else is logged only.
+# nix:
+# - store verify: rc 0 iff the signer is ours and the argv trusts $KEY, or
+#   the path is content-addressed (MOCK_CA: like nix, a CA path needs no
+#   signature); else "untrusted" rc 2; MOCK_VERIFY_RC: another failure.
+# - path-info --store URL (the narinfo in the cache, --json-format 1):
+#   ca ${MOCK_CA:-null}, narHash ${MOCK_INFO_NAR:-$GOOD_NAR}, signatures by
+#   MOCK_SIGNER (ours (default) | forged (our key's name, not by our
+#   key) | other | none); MOCK_ABSENT: not in the
+#   cache (null); MOCK_PATHINFO_RC: another failure.
+# - path-info without --store (the local store, after the realise): ca
+#   ${MOCK_LOCAL_CA:-null}.
+# - hash convert: prints ${MOCK_NAR:-$GOOD_NAR}.
+# Anything else is logged only.
 mock nix <<'EOF'
 case " $* " in
 *" store verify "*)
     if [[ -n "${MOCK_VERIFY_RC:-}" ]]; then echo "error: cannot reach the cache" >&2; exit "$MOCK_VERIFY_RC"; fi
     case " $* " in *" --trusted-public-keys $KEY "*) trusts_ours=1 ;; *) trusts_ours="" ;; esac
+    [[ -n "${MOCK_CA:-}" ]] && exit 0
     [[ "${MOCK_SIGNER:-ours}" == ours && -n "$trusts_ours" ]] && exit 0
     echo "error: path '${!#}' is untrusted" >&2
     exit 2 ;;
+*" path-info "*)
+    p="${!#}"
+    case " $* " in
+    *" --store "*)
+        if [[ -n "${MOCK_PATHINFO_RC:-}" ]]; then echo "error: cannot reach the cache" >&2; exit "$MOCK_PATHINFO_RC"; fi
+        if [[ -n "${MOCK_ABSENT:-}" ]]; then jq -nc --arg p "$p" '{($p): null}'; exit 0; fi
+        ca="${MOCK_CA:-}" nar="${MOCK_INFO_NAR:-$GOOD_NAR}"
+        case "${MOCK_SIGNER:-ours}" in
+        ours) sigs="[\"${KEY%%:*}:c2lnbmF0dXJlLW9mLW91cnM=\"]" ;;
+        forged) sigs="[\"${KEY%%:*}:Zm9yZ2Vk\"]" ;;
+        other) sigs='["other.cachix.org-1:c2lnbmF0dXJlLW9mLW90aGVy"]' ;;
+        *) sigs='[]' ;;
+        esac ;;
+    *) ca="${MOCK_LOCAL_CA:-}" nar="$GOOD_NAR" sigs='[]' ;;
+    esac
+    jq -nc --arg p "$p" --arg ca "$ca" --arg nar "$nar" --argjson sigs "$sigs" \
+        '{($p): {ca: (if $ca == "" then null else $ca end), narHash: $nar, narSize: 520,
+            references: [], signatures: $sigs, storeDir: "/nix/store", version: 1}}' ;;
 *" hash convert "*) echo "${MOCK_NAR:-$GOOD_NAR}" ;;
 esac
 exit 0
@@ -176,7 +205,8 @@ fresh() {
     reset_log
     rm -rf "$STATE"
     unset MOCK_HTTP MOCK_CURL_RC MOCK_SIGNER MOCK_VERIFY_RC MOCK_NAR MOCK_QHASH_RC \
-        MOCK_REALISE_RC MOCK_NIXENV_RC MOCK_STC_RC MOCK_SHUTDOWN_RC
+        MOCK_REALISE_RC MOCK_NIXENV_RC MOCK_STC_RC MOCK_SHUTDOWN_RC \
+        MOCK_CA MOCK_INFO_NAR MOCK_ABSENT MOCK_PATHINFO_RC MOCK_LOCAL_CA
     pi "$A" "$A" "$A"
     pointer 1 "$NEXT"
 }
@@ -207,6 +237,7 @@ expect_exit "p1 --help exits 0" 0
 for o in --pointer-url --cache-url --cache-key; do
     expect_grepf "p1 usage names $o" "$o" "$OUT"
 done
+expect_grepf "p1 usage: exit 32 covers content-addressed" "content-addressed" "$OUT"
 
 for missing in --pointer-url --cache-url --cache-key; do
     fresh
@@ -351,11 +382,20 @@ MOCK_SIGNER=other rp p10
 expect_exit "p10 signed by another key -> 32" 32
 expect_grepf "p10 says untrusted" "untrusted" "$ERR"
 untouched "p10 untrusted"
+expect_eq "p10 untrusted: nothing realised" 0 "$(log_count '^nix-store ')"
+
+# A signature that names our key but is not by it: only `store verify`
+# (the cryptographic check) catches it.
+fresh
+MOCK_SIGNER=forged rp p10-forged
+expect_exit "p10 forged signature under our key's name -> 32" 32
+expect_grepf "p10 forged: says untrusted" "untrusted" "$ERR"
+untouched "p10 forged"
 expect_grepf "p10 verify uses --trusted-public-keys only" \
     "nix --extra-experimental-features nix-command store verify --no-contents --store $CACHE --trusted-public-keys $KEY $NEXT" \
     "$MOCK_LOG"
 expect_eq "p10 never --extra-trusted-public-keys" 0 "$(log_count 'extra-trusted-public-keys')"
-expect_eq "p10 untrusted: nothing realised" 0 "$(log_count '^nix-store ')"
+expect_eq "p10 forged: nothing realised" 0 "$(log_count '^nix-store ')"
 
 for rc in 1 4; do
     fresh
@@ -365,6 +405,65 @@ for rc in 1 4; do
     untouched "p10 verify rc $rc"
     expect_eq "p10 verify rc $rc: nothing realised" 0 "$(log_count '^nix-store ')"
 done
+
+# The narinfo in our cache, read before anything is realised (final review
+# S1). nix treats a content-addressed path as valid without any signature
+# (`store verify` passes it, the realise substitutes it), so the toplevel
+# must be input-addressed, carry a signature by our key and have the
+# pointer's narHash.
+CA_SUM=fixed:r:sha256:1ygsiqb6j4bhgz23zaiifq0j4vm38dsdis5gh540amg857hwbsvb
+OTHER_NAR="sha256-$(printf 'A%.0s' {1..43})="
+for signer in none other ours; do
+    fresh
+    MOCK_CA=$CA_SUM MOCK_SIGNER=$signer rp "p10c ca, signer $signer"
+    expect_exit "p10c content-addressed, signer $signer -> 32" 32
+    expect_grepf "p10c ca, signer $signer: says content-addressed" "content-addressed" "$ERR"
+    untouched "p10c ca, signer $signer"
+    expect_eq "p10c ca, signer $signer: nothing realised" 0 "$(log_count '^nix-store ')"
+done
+
+fresh
+pi "$NEXT" "$A" "$NEXT"
+MOCK_CA=$CA_SUM MOCK_SIGNER=none rp p10c-current
+expect_exit "p10c content-addressed, already current -> 32" 32
+expect_eq "p10c already current: nothing recorded" none "$(cat "$STATE/seq" 2>/dev/null || echo none)"
+
+fresh
+MOCK_INFO_NAR=$OTHER_NAR rp p10d
+expect_exit "p10d narinfo narHash differs from the pointer's -> 34" 34
+expect_grepf "p10d says narHash mismatch" "narHash mismatch" "$ERR"
+untouched "p10d narinfo narHash"
+expect_eq "p10d nothing realised" 0 "$(log_count '^nix-store ')"
+
+fresh
+MOCK_SIGNER=none rp p10e
+expect_exit "p10e unsigned -> 32" 32
+expect_grepf "p10e says not signed by our key" "not signed by ${KEY%%:*}" "$ERR"
+untouched "p10e unsigned"
+expect_eq "p10e nothing realised" 0 "$(log_count '^nix-store ')"
+
+fresh
+MOCK_ABSENT=1 rp p10f
+expect_exit "p10f not in our cache -> 38" 38
+expect_grepf "p10f says not in the cache" "$NEXT is not in $CACHE" "$ERR"
+untouched "p10f absent"
+expect_eq "p10f nothing realised" 0 "$(log_count '^nix-store ')"
+
+fresh
+MOCK_PATHINFO_RC=1 rp p10g
+expect_exit "p10g narinfo unreadable -> 38" 38
+expect_grepf "p10g says cache unavailable" "cache unavailable" "$ERR"
+untouched "p10g narinfo unreadable"
+expect_eq "p10g nothing realised" 0 "$(log_count '^nix-store ')"
+
+fresh
+rp p10h
+expect_exit "p10h signed by ours, input-addressed, same narHash -> 0" 0
+expect_grepf "p10h reads the narinfo from our cache" \
+    "nix --extra-experimental-features nix-command path-info --json --json-format 1 --store $CACHE $NEXT" \
+    "$MOCK_LOG"
+expect_true "p10h narinfo read before the realise" \
+    test "$(first_line ' path-info .*--store ')" -lt "$(first_line '^nix-store --realise ')"
 
 # --- 5.3 already current ------------------------------------------------------
 
@@ -412,6 +511,18 @@ fresh
 MOCK_QHASH_RC=1 rp p13-query
 expect_exit "p13 narHash unreadable -> 34" 34
 untouched "p13 narHash unreadable"
+
+# A narinfo that changed between the check and the realise (S1): the
+# realised path must be input-addressed in the local store too.
+fresh
+MOCK_LOCAL_CA=$CA_SUM rp p13c
+expect_exit "p13c realised path content-addressed -> 32" 32
+expect_grepf "p13c says content-addressed" "content-addressed" "$ERR"
+untouched "p13c realised path content-addressed"
+expect_grepf "p13c reads the local path info" \
+    "nix --extra-experimental-features nix-command path-info --json --json-format 1 $NEXT" "$MOCK_LOG"
+expect_true "p13c local path info read after the realise" \
+    test "$(first_line '^nix-store --realise ')" -lt "$(first_line "path-info --json --json-format 1 $NEXT\$")"
 
 # --- 5.5 decision, profile, activation, state -----------------------------------
 
@@ -672,6 +783,8 @@ fresh; MOCK_NAR="sha256-${GOOD_NAR:8}" l5 nar 34 narhash-mismatch
 fresh; MOCK_NIXENV_RC=1 l5 profile 35 profile-failed
 fresh; MOCK_STC_RC=1 l5 activation 36 activation-failed
 fresh; MOCK_VERIFY_RC=1 l5 cache 38 cache-unavailable
+fresh; MOCK_CA=$CA_SUM MOCK_SIGNER=none l5 ca 32 untrusted
+fresh; MOCK_ABSENT=1 l5 absent 38 cache-unavailable
 fresh; built_ago $((22 * DAY)); l5 stale 39 stale
 
 fresh

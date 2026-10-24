@@ -311,11 +311,16 @@ A run without a new pointer is one HTTP request. Each run:
    published yet`, exit 0;
 2. validates it: `seq` equal to the applied one → `up to date`, exit 0; older →
    exit 31; the store path must match `nixos-system-neptun-…` in `/nix/store`;
-3. `nix store verify --no-contents --store <cacheUrl> --trusted-public-keys
-   <our key>` (exit 32 `untrusted`, 38 cache unreachable);
+3. reads the store path's narinfo from our cache (`nix path-info --store
+   <cacheUrl> --json`) *before anything is realised*: it must be
+   input-addressed, name a signature by our key and carry the pointer's
+   narHash; `nix store verify --no-contents --store <cacheUrl>
+   --trusted-public-keys <our key>` checks that signature (exit 32
+   `untrusted`, 34 narHash mismatch, 38 cache unreachable or the path not in it);
 4. already the running system → record the seq and stop; otherwise
-   `nix-store --realise` (two substitution jobs, ~80 MB RSS) and compare the
-   narHash with the pointer's (exit 33 / 34);
+   `nix-store --realise` (two substitution jobs, ~80 MB RSS), compare the
+   narHash with the pointer's and require the realised path to be
+   input-addressed (exit 33 / 34 / 32);
 5. compares the boot fingerprint of the new system with the booted one (the
    `status` logic, section 3), *before* touching the profile: equal →
    `nix-env --set` + `switch-to-configuration switch`; different (kernel, initrd,
@@ -332,19 +337,27 @@ A run without a new pointer is one HTTP request. Each run:
 Every run that got the lock writes `/var/lib/rpi-pull/last-run`
 (`time=… exit=… result=…`); the unit fails visibly (`systemctl status
 rpi-pull`) on any non-zero exit. Exit codes of `rpi-pull`: 0 ok, 1 state dir,
-2 usage, 30 fetch, 31 pointer invalid or older, 32 untrusted, 33 realise,
-34 narHash mismatch, 35 profile, 36 activation, 37 busy (another run), 38 cache
-unavailable, 39 pointer stale. The service is `Type=oneshot` with
+2 usage, 30 fetch, 31 pointer invalid or older, 32 untrusted (not signed by
+our key, or content-addressed), 33 realise, 34 narHash mismatch, 35 profile,
+36 activation, 37 busy (another run), 38 cache unavailable or the system not
+in it, 39 pointer stale. The service is `Type=oneshot` with
 `restartIfChanged = false` (a switch that changes the unit must not stop the
 run that performs it), `MemoryMax=384M`, nice/ionice/CPU idle, `TimeoutStartSec=2h`.
 
-> **Trust.** The signature check is ours-only: `--trusted-public-keys` replaces
-> the Pi's configured keys, so only a toplevel signed by *our* cache key
-> passes (a system from cache.nixos.org or nvmd's cachix does not). That check
-> covers the toplevel path only. The binding that carries the trust is the
-> **pointer's narHash, compared with the realised path after the realise**
-> (a foreign or tampered system fails with 34). The dependencies of the closure
-> are substituted with `require-sigs` and the three configured keys
+> **Trust.** Before anything is realised, the toplevel's narinfo in our cache
+> must be **input-addressed, signed by *our* cache key and carry the pointer's
+> narHash**. The signature check is ours-only: `--trusted-public-keys` replaces
+> the Pi's configured keys, so a system signed by cache.nixos.org or nvmd's
+> cachix does not pass. A content-addressed toplevel is refused (exit 32): nix
+> treats a content-addressed path as valid **without any signature** (in
+> `nix store verify` and when substituting), so whoever can write to the
+> cache (the auth token, or Cachix itself) could otherwise publish an
+> unsigned system of their own. These checks cover the toplevel path only.
+> After the realise the **realised path's narHash must equal the pointer's**
+> (and so the signed narinfo's), and the path must be input-addressed in the
+> local store too: that binds the activated content to our signature (a
+> foreign or tampered system fails with 32 or 34). The dependencies of the
+> closure are substituted with `require-sigs` and the three configured keys
 > (cache.nixos.org, nvmd's cachix, ours). The pointer itself is not signed:
 > it is only as trustworthy as write access to the repo. A compromised GitHub
 > account or secrets means a deploy to the Pi, the same level as the root SSH key.
