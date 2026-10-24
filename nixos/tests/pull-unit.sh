@@ -827,13 +827,18 @@ exec 8>&-
 expect_exit "p18 lock held -> 37" 37
 expect_eq "p18 nothing fetched" 0 "$(log_count '^curl ')"
 
+# An unusable state dir is exit 1 ("state dir", usage and README), not 37
+# "busy" (final review N2).
 fresh
 : >"$T/not-a-dir"
-run_cmd p18-statefile -- bash "$RPI_PULL_SRC" --pointer-url https://x/neptun.json \
-    --cache-url "$CACHE" --cache-key "$KEY" --state-dir "$T/not-a-dir"
-expect_exit "p18 state dir unusable -> 37" 37
-expect_grepf "p18 state dir unusable: says why" "cannot open $T/not-a-dir/lock" "$ERR"
-expect_eq "p18 state dir unusable: nothing fetched" 0 "$(log_count '^curl ')"
+for sd in "$T/not-a-dir" /proc/rpi-pull-unit-x; do
+    fresh
+    run_cmd "p18 state dir $sd" -- bash "$RPI_PULL_SRC" --pointer-url https://x/neptun.json \
+        --cache-url "$CACHE" --cache-key "$KEY" --state-dir "$sd"
+    expect_exit "p18 state dir $sd unusable -> 1" 1
+    expect_grepf "p18 state dir $sd unusable: says why" "cannot open $sd/lock" "$ERR"
+    expect_eq "p18 state dir $sd unusable: nothing fetched" 0 "$(log_count '^curl ')"
+done
 
 fresh
 # p19 (G1): no evaluation or build on the Pi, in any case of this file

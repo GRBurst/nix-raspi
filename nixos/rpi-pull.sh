@@ -92,11 +92,12 @@ rp_parse_args() {
         die 2 "invalid --max-age-days: '$MAX_AGE_DAYS' (1-9999)"
 }
 
-# rp_lock: hold $STATE/lock for the rest of the run (exit 37 if taken)
+# rp_lock: hold $STATE/lock for the rest of the run (exit 37 if taken, 1 if
+# the state dir is unusable)
 rp_lock() {
     local fd
     { mkdir -p "$STATE" && exec {fd}>"$STATE/lock"; } 2>/dev/null ||
-        die 37 "cannot open $STATE/lock"
+        die 1 "state dir not writable: cannot open $STATE/lock"
     flock -n "$fd" || die 37 "busy: another rpi-pull holds $STATE/lock"
 }
 

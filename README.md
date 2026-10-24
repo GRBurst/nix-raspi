@@ -349,7 +349,7 @@ A run without a new pointer is one HTTP request. Each run:
 
 Every run that got the lock writes `/var/lib/rpi-pull/last-run`
 (`time=… exit=… result=…`); the unit fails visibly (`systemctl status
-rpi-pull`) on any non-zero exit. Exit codes of `rpi-pull`: 0 ok, 1 state dir,
+rpi-pull`) on any non-zero exit. Exit codes of `rpi-pull`: 0 ok, 1 state dir unusable,
 2 usage, 30 fetch, 31 pointer invalid or older, 32 untrusted (not signed by
 our key, or content-addressed), 33 realise, 34 narHash mismatch, 35 profile,
 36 activation, 37 busy (another run), 38 cache unavailable or the system not
