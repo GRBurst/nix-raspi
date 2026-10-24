@@ -192,6 +192,12 @@ Open points (documented, not fixed):
   the repo or the secrets means deploy access to the Pi (same level as the root key).
 - *Boot + reboot path of `rpi-pull`* is covered by unit tests only; pull-smoke
   exercises the switch path (qemu skips U-Boot).
+- *Manual deploy vs. a running pull* (final review N3): `rpi-deploy deploy` does
+  not take `/var/lib/rpi-pull/lock`, so a manual deploy and a running `rpi-pull`
+  can interleave `nix-env --set` and the pull may replace the manual deploy.
+  Documented (README section 4: not while `rpi-pull` is active). Deferred fix:
+  wrap `deploy`'s remote steps in `flock -n /var/lib/rpi-pull/lock` (refuse when
+  busy), with a deploy-unit test of the busy case.
 
 ## 5. Hardware and CI acceptance checklist (manual, ~1 h plus the CI setup)
 

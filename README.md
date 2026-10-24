@@ -449,6 +449,12 @@ URL is accepted for the qemu smoke test only (warning).
   only if its `seq` is newer than the last one applied, so `rpi-deploy deploy`
   stays in place; the next CI run replaces it with `main`'s system. Push
   before the run you want it to survive.
+- *Do not deploy manually while `rpi-pull` runs* (from 05:00, up to 30 min
+  delay plus the run itself, or after `systemctl start rpi-pull`; check with
+  `ssh -p 2222 root@neptun systemctl is-active rpi-pull`). `rpi-deploy deploy`
+  does not take `rpi-pull`'s lock: the two can interleave `nix-env --set`
+  (`switch-to-configuration` serializes only the activation), and the pull
+  may replace the manual deploy.
 - *A freshly flashed Pi has no applied seq.* At its first run it applies the
   current pointer, even if the flashed image is newer (built locally, not
   pushed): push to `main` before flashing, or expect the downgrade.
