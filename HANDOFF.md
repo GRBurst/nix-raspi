@@ -32,8 +32,9 @@ chroot and no binfmt tricks during install, any failure leaves the Pi untouched.
 
 Image/push-deploy milestones M1–M7 (first plan) are done and were accepted on
 2026-10-23. The addendum plan (CI pull) is implemented on
-`feat/image-push-deploy` as 27 linear, unsigned commits on top of `aae02b2`
-(re-sign when merging; no merge commits, `git log --merges aae02b2..HEAD` is empty).
+`feat/image-push-deploy` as linear, unsigned commits on top of `aae02b2`
+(`git log --oneline aae02b2..HEAD`; re-sign when merging; no merge commits:
+`git log --merges feat/image-push-deploy ^aae02b2` is empty).
 
 | milestone | content | commits | state |
 |---|---|---|---|
@@ -45,20 +46,22 @@ Image/push-deploy milestones M1–M7 (first plan) are done and were accepted on
 | M6 | `modules/pull-update.nix` (`rpi.pull.*`), `keys.cache` → substituter and key, production pointer URL | `64f7ac3`, `d34fea6`, `79f0268` | done, **[M]** 23 assertions; unit **[V]** in pull-smoke |
 | M7 | `ci/{build,cache-name,publish,pointer,commit-push}.sh`, `.github/workflows/neptun.yml`, `actionlint` check | `5596d42` … `a3e68cc` (5) | done, **[M]** 159 assertions + actionlint; a real GitHub run **[?]** |
 | M8 | `tests/pull-smoke.sh` (qemu, signed local cache over HTTP) + a bug it found (`f9dc426`) | `3b84a3d`, `f9dc426` | done, **[V]** |
-| M9 | README and HANDOFF; final acceptance | this commit and the acceptance commit | docs done; acceptance below; final review (T9.3) **open** |
+| M9 | README and HANDOFF; final acceptance | `8fa8299` (docs), the acceptance commit after it | docs and acceptance done (below); final review (T9.3) **open** |
 
 ### Acceptance of the CI pull addendum (addendum §5)
 
 Run on 2026-10-24 (andromeda), on commit `3b84a3d` (code-complete tree; the later
-commits only touch `README.md` and `HANDOFF.md`). Logs: `nixos/.scratch/ci/` (untracked).
+commits only touch `README.md` and `HANDOFF.md`): the flake check in the clean
+main tree, deploy-smoke in a clean detached worktree of that commit. Logs:
+`nixos/.scratch/ci/` (untracked), summary in `nixos/.scratch/ci/m9-report.md`.
 
 | # | criterion | result | evidence |
 |---|---|---|---|
-| 1 | `nix flake check` passes (incl. actionlint, unit tests, eval tests) | _pending_ | |
-| 2 | `tests/pull-smoke.sh`: switch path and refused tamper | _pending_ | |
+| 1 | `nix flake check` passes (incl. actionlint, unit tests, eval tests) | **[V] pass**, rc 0, 131 s, every check built fresh. The toplevel `drvPath` evaluated first (rc 0). 15 x86_64 checks: `rpi-deploy-syntax`, `actionlint`, `rpi-host-vm` (VM test script 28.6 s), `rpi-deploy-unit` 314 assertions, `rpi-pull-unit` 525, `rpi-ci-unit` 159, and 9 × `eval-*` with 103 assertions (build-host 6, external-storage 14, headless 8, image 9, kernel 5, pi-config 18, pull-update 23, sd-wear 14, tools 6). aarch64-linux checks are omitted by nix as an incompatible system. | `flake-check.log`, `ac1-drvpath.txt`, `ac1-commit.txt` |
+| 2 | `tests/pull-smoke.sh`: switch path and refused tamper | **[V] pass**, 1656 s total (image rebuilt ~12 min, boot and settle ~9 min, pull ~5 min, tamper ~1 min): `PASS (pull applied seq 1 by switch; foreign-key pointer refused with exit 32; …)`, with the unit-changing delta (`SMOKE=next`) switched without restarting the running unit, `pull applied: seq 1` and `reboot pending: no` in `status`, seq 2 to a foreign-key system refused (exit 32, `pull last run: untrusted (exit 32)`, the system never realised). Planted violation (`RPI_PULL_SMOKE_PLANT=1`: smoke-next signed with the foreign key) → `FAIL: rpi-pull did not apply smoke-next` (guest journal `untrusted`, ExecMainStatus 32). The first GREEN run failed with exit 36 (the `bash` PATH bug, `f9dc426`, §2). | `pull-smoke-green.log`, `pull-smoke-red.log`, `pull-smoke-red-guest.log`, `m8-report.md` |
 | 3 | after user setup: `workflow_dispatch` pushes, pins, commits the pointer; the Pi applies it | **open, manual**: §4 and §5 | |
-| — | regression: `tests/deploy-smoke.sh` (optional) | _pending_ | |
-| — | linear history: `git log --merges feat/image-push-deploy ^aae02b2` | _pending_ | |
+| — | regression: `tests/deploy-smoke.sh` (optional) | **[V] pass on the re-run**, 841 s (image rebuilt for the new toplevel name; deploy 147 s): `PASS (deploy switch applied smoke-next: marker 'next', new system running, no reboot pending; rollback restored the image system)`. `status` ends with `pull: disabled` (the smoke image has no cache key). The **first run failed** at 375 s of the deploy: `Failed to start local-fs.target` during the switch, and the guest serial log ends with `sdhost-bcm2835 3f202000.mmc: fsm 1, hsts 00000101`, the qemu SD flake (no `EXT4-fs error` line; the script's note did not match this variant). One re-run on an idle host passed, as the plan prescribes. | `deploy-smoke-run2.log`, `deploy-smoke-run1-fail.log`, `deploy-smoke-run1-serial.log`, `deploy-smoke-run1-switch.log` |
+| — | linear history: `git log --merges feat/image-push-deploy ^aae02b2` | **[V] pass**: prints nothing; `git rev-list --min-parents=2 --count aae02b2..feat/image-push-deploy` = 0 (28 commits at the time of the check) | |
 
 Findings during the CI pull work (the full list is in `nixos/.scratch/ci/`):
 
