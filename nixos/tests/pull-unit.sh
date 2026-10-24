@@ -270,6 +270,18 @@ expect_exit "p2 HTTP 404 -> 0" 0
 expect_grepf "p2 says no pointer published yet" "no pointer published yet" "$ERR"
 expect_eq "p2 no nix calls" 0 "$(log_count '^nix')"
 
+# A pointer that disappears after one was applied (repo private, renamed or
+# deleted; pointer file removed) is a failure, not "nothing yet" (final
+# review S3): the Pi would otherwise stop updating silently.
+fresh
+state 5
+MOCK_HTTP=404 rp p2b
+expect_exit "p2b HTTP 404 after seq 5 was applied -> 30" 30
+expect_grepf "p2b says the pointer disappeared" "pointer disappeared (HTTP 404) after seq 5" "$ERR"
+expect_not_grep "p2b not 'no pointer published yet'" "no pointer published yet" "$ERR"
+untouched "p2b pointer disappeared"
+expect_eq "p2b no nix calls" 0 "$(log_count '^nix')"
+
 fresh
 MOCK_CURL_RC=6 rp p3-curl
 expect_exit "p3 curl error -> 30" 30
@@ -774,6 +786,7 @@ l5() {
     last_run "l5 $1" "$2" "$3"
 }
 fresh; MOCK_CURL_RC=6 l5 fetch 30 fetch-failed
+fresh; state 5; MOCK_HTTP=404 l5 disappeared 30 fetch-failed
 fresh; printf 'not json\n' >"$MOCK_BODY"; l5 invalid 31 pointer-invalid
 fresh; state 5; pointer 4 "$NEXT"; l5 older 31 pointer-invalid
 fresh; state abc; l5 state-seq 31 pointer-invalid

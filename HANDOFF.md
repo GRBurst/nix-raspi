@@ -124,7 +124,7 @@ CI pull addendum (plan §3 D1–D18; amendments A1–A13):
 - **D5** narHash = `nix-store --query --hash` → `nix hash convert --to sri` (not `path-info --json`).
 - **D6** every new-CLI `nix` call on the Pi passes `--extra-experimental-features nix-command`.
 - **D7** switch-vs-boot is decided **before** `nix-env --set` (a fingerprint failure leaves the profile untouched; deviates from spec order).
-- **D8** pointer 404 → exit 0 `no pointer published yet`; seq equal → `up to date`; seq older → exit 31.
+- **D8** pointer 404 → exit 0 `no pointer published yet` (only while no seq was applied; afterwards exit 30 `pointer disappeared`, final review S3); seq equal → `up to date`; seq older → exit 31.
 - **D9** `pointerUrl`/`cacheUrl` accept `https?://`; `http://` warns (qemu smoke only); curl `--proto-redir =https`.
 - **D10** CI keeps the nixpkgs-only fallback on a kernel cache miss.
 - **D11** CI scripts print `key=value` on stdout for `$GITHUB_OUTPUT`, logs on stderr.

@@ -36,7 +36,9 @@ A pointer built more than --max-age-days ago means CI has stalled: exit 39
   --max-age-days N    the pointer's maximum age, 1-9999 (default 21)
 
 exit: 0 applied, up to date, already current or no pointer published yet
-      1 state dir not writable   2 usage   30 fetch
+        (HTTP 404 before any pointer was applied)
+      1 state dir not writable   2 usage
+      30 fetch (also HTTP 404 once a pointer was applied)
       31 pointer invalid or older
       32 untrusted (not signed by KEY, or content-addressed)
       33 realise   34 narHash mismatch (narinfo or realised path)
@@ -106,7 +108,9 @@ rp_last_seq() {
     [[ "$LAST" =~ $SEQ_RE ]] || die 31 "$STATE/seq is not a seq number: '$LAST'"
 }
 
-# rp_fetch FILE: the pointer into FILE; exits 0 if none is published yet
+# rp_fetch FILE: the pointer into FILE; HTTP 404 exits 0 if none was ever
+# applied (LAST 0: none published yet), else 30 -- a pointer that
+# disappeared must not stop the updates silently (final review S3)
 rp_fetch() {
     local code
     code=$(curl -sS --proto-redir =https --max-time 60 --retry 3 --retry-delay 20 \
@@ -114,7 +118,9 @@ rp_fetch() {
         die 30 "cannot fetch $POINTER_URL (curl exit $?)"
     case "$code" in
     200) ;;
-    404) log "no pointer published yet ($POINTER_URL)"; RESULT=no-pointer; exit 0 ;;
+    404)
+        ((LAST == 0)) || die 30 "pointer disappeared (HTTP 404) after seq $LAST was applied: $POINTER_URL"
+        log "no pointer published yet ($POINTER_URL)"; RESULT=no-pointer; exit 0 ;;
     *) die 30 "cannot fetch $POINTER_URL (HTTP $code)" ;;
     esac
 }

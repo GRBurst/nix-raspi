@@ -308,7 +308,10 @@ timer runs **daily at 05:00** (`*-*-* 05:00`, up to 30 min random delay,
 A run without a new pointer is one HTTP request. Each run:
 
 1. fetches the pointer (HTTPS, size and time limits); HTTP 404 → `no pointer
-   published yet`, exit 0;
+   published yet`, exit 0, but only while no pointer was ever applied: once
+   one was, a 404 is exit 30 (`pointer disappeared`: the repo was made
+   private, renamed or deleted, or the pointer file removed), so the Pi
+   cannot stop updating silently;
 2. validates it: `seq` equal to the applied one → `up to date`, exit 0; older →
    exit 31; the store path must match `nixos-system-neptun-…` in `/nix/store`;
 3. reads the store path's narinfo from our cache (`nix path-info --store
