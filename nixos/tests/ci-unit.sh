@@ -367,6 +367,23 @@ run_cmd w6c -- pointer --seq 14 --rev x --file "$QF" "$TOP"
 expect_eq "w6 origin/main already points at TOP -> changed=false" "changed=false" "$(cat "$OUT")"
 expect_true "w6 origin/main already points at TOP -> file unchanged" cmp -s "$T/w6c.json" "$QF"
 
+# w11 (final review N7, README section 5): the run_number-reset recovery. A
+# reset counter (seq 2) is refused while origin/main has seq 12; after the
+# pointer is removed from main and fetched, seq 2 is written.
+clone w11
+WF="$T/w11/nixos/deploy/neptun.json"
+run_cmd w11a -- pointer --seq 2 --rev x --file "$WF" "$TOP2"
+expect_exit "w11 reset run_number (2 < 12 on origin/main) refused" 1
+git -C "$T/w11" rm -q nixos/deploy/neptun.json
+git -C "$T/w11" commit -q -m "drop pointer" && git -C "$T/w11" push -q origin main
+run_cmd w11b -- pointer --seq 2 --rev x --file "$WF" "$TOP2"
+expect_exit "w11 pointer removed from main -> seq 2 written" 0
+expect_eq "w11 seq 2 in the file" 2 "$(jq -r .seq "$WF")"
+# restore origin/main's pointer 12 for the later tests
+git -C "$T/o" pull -q --rebase origin main
+put_pointer "$T/o/nixos/deploy/neptun.json" 12 "$TOP"
+git -C "$T/o" add -A && git -C "$T/o" commit -q -m "pointer 12 again" && git -C "$T/o" push -q origin main
+
 # w8: outside a git repo (pull-smoke writes its pointer into a web root).
 run_cmd w8 -- pointer --seq 1 --rev smoke --file "$T/www/neptun.json" "$TOP"
 expect_exit "w8 no git repo -> written" 0

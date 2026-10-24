@@ -341,6 +341,13 @@ for bad in abc '' 05 1.5; do
     expect_exit "p7 non-numeric state seq '$bad' -> 31" 31
     untouched "p7 state seq '$bad'"
 done
+# README section 5 (final review N7): removing the bad seq is the recovery.
+rp p7-again
+expect_exit "p7 bad seq: the next run fails again" 31
+rm "$STATE/seq"
+rp p7-recovered
+expect_exit "p7 bad seq removed -> applies like a fresh flash" 0
+expect_eq "p7 bad seq removed: seq recorded" 1 "$(cat "$STATE/seq" 2>/dev/null)"
 
 for path in \
     "$FX_STORE/$H_NEXT-nixos-system-mars-26.05" \

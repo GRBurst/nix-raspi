@@ -300,8 +300,11 @@ read what changed before merging one. Steps:
    (`checks.aarch64-linux.rpi-{deploy-syntax,pull-unit,ci-unit,deploy-unit}`):
    a broken `rpi-pull.sh` or CI script is never published;
 5. `cachix push` the closure to **our** cache and
-   `cachix pin <cache> neptun --keep-revisions 4` (the last four systems are
-   safe from LRU eviction);
+   `cachix pin <cache> neptun --keep-revisions 4` (Cachix exempts the last
+   four pinned store paths from garbage collection; that the pin also keeps
+   their closures is not documented and not verified (s8). An evicted path
+   shows up on the Pi as exit 38 or 33, and the next CI run re-uploads it:
+   `cachix push` runs on every run and uploads what is missing);
 6. only after push and pin, only on `main`: write the pointer
    `nixos/deploy/neptun.json`, then commit `flake.lock` and the pointer to
    `main` as `github-actions[bot]` (unsigned; one rebase and retry if `main`
@@ -412,7 +415,7 @@ URL is accepted for the qemu smoke test only (warning).
    Commit and push to `main`. The workflow reads the cache name from here.
 4. **First CI run.** Actions → `neptun` → *Run workflow* (`main`). The first push
    uploads ~340 MiB, later runs ~150 MiB (the free tier has 5 GB and evicts by
-   LRU; the pin protects the last four systems). It pushes, pins and commits
+   LRU; the pin exempts the last four toplevels, see CI step 5). It pushes, pins and commits
    `nixos/deploy/neptun.json`; `git pull` it.
 5. **Dispatch a second time** and confirm that it produces **no** pointer
    commit (same store path, `pushed=false`). If it commits a new pointer every
@@ -533,6 +536,22 @@ sudo losetup -d "$LOOP"
 The next deploy writes the firmware of whatever it deploys again; deploy the
 good commit (or fix the cause on `main`) before the next CI build (a push to
 `main`, or the Sunday run) is pulled.
+
+**Pull stuck on a seq** (every run fails with exit 31):
+
+- *The workflow's `run_number` was reset* (the workflow file was renamed, or
+  the workflow or repo recreated): the new runs count from 1 again, so
+  `ci/pointer.sh` refuses every run (`seq N is not newer than seq M`) until
+  the counter passes the published seq, and the Pi would refuse the lower seq
+  (exit 31) as well. Recovery: remove the pointer from `main` (`git rm
+  nixos/deploy/neptun.json`, commit, push; this push does not start a run),
+  reset the Pi's seq (`ssh -p 2222 root@neptun rm /var/lib/rpi-pull/seq`),
+  then dispatch the workflow. Until the new pointer exists the Pi's runs say
+  `no pointer published yet` (exit 0); afterwards it applies the new pointer
+  like a freshly flashed Pi.
+- *`/var/lib/rpi-pull/seq` is not a seq number* (`… is not a seq number`):
+  every run exits 31 until it is removed (`rm /var/lib/rpi-pull/seq`); the next
+  run applies the current pointer like a freshly flashed Pi.
 
 **Dead card or re-flash**: section 7. State on the Pi is disposable by design.
 
