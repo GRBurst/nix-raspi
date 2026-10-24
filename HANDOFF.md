@@ -65,7 +65,7 @@ checks (what CI now runs) built under binfmt: rc 0, 309 s, same counts;
 | finding | fix | commit |
 |---|---|---|
 | **S1** CA toplevel passes "our key only" (nix accepts a CA path without a signature) | before the realise `rpi-pull` reads the narinfo (`nix path-info --json --store <cache>`): content-addressed or no signature by our key name → 32, `nix store verify` with our key only → 32, narinfo narHash ≠ pointer → 34, not in the cache → 38; after the realise the local path must be input-addressed (32) and its narHash equal (34). Unit tests with mock narinfo (`ca` set: unsigned, signed by another key, by ours), real-nix check against `fr-ca` (`.scratch/ci/s1-real/results.txt`). `--help`, README, A6/A12, plan G4 | `00eaea7` |
-| **S2** reboot about 23 h after the run (`rebootTime` 04:30 vs. the 05:00 run) | **deferred: user decision**; `rebootTime` unchanged. The review recommends `rebootTime = "06:30"` plus an `eval-pull-update` row | — |
+| **S2** reboot about 23 h after the run (`rebootTime` 04:30 vs. the 05:00 run) | user chose 06:30: default `rebootTime` (module and `rpi-pull`) is now 06:30, so a boot-affecting update reboots the same morning; `eval-pull-update` and `pull-unit` p15 assert it | S2COMMIT |
 | **S3** 404 after an applied seq exits 0 | 404 with an applied seq → exit 30 `pointer disappeared`; before any apply still 0 | `2251768` |
 | **S4** actions pinned by tag; secrets handed to cachix-action | full commit SHAs with the tag as comment (resolved over HTTPS: `git ls-remote`, GitHub API); cachix-action gets no token or signing key (`skipPush`, public cache: it only runs `cachix use`); `.github/dependabot.yml` (github-actions, weekly); `actionlint` check asserts all three | `ff93e29` |
 | **S5** CI publishes without running any check | step `unit tests` between build and push: `nix build .#checks.aarch64-linux.rpi-{deploy-syntax,pull-unit,ci-unit,deploy-unit}` (unit checks are now defined for both systems; sandboxed with the pinned tools, as on the host, no apt on the runner); `actionlint` check asserts build < checks < publish | `01bc0f1` |
@@ -215,12 +215,11 @@ Open points (documented, not fixed):
   means agents running as `pi` have root. Accepted; revisit if agents run unattended.
 - *Fresh flash*: a Pi without `/var/lib/rpi-pull/seq` applies the current pointer at
   its first run, even over a newer local image (pinned by `rpi-pull-unit` p20).
-- *Reboot timing* (final review S2, **your decision**): after a boot-affecting
-  update `shutdown -r 04:30` schedules the next 04:30, about 23 h after the
-  05:00 run, and `switch-to-configuration boot` activates nothing until then.
-  Cancel with `shutdown -c`. The review recommends `rpi.pull.rebootTime =
-  "06:30"` (after the run window) with an `eval-pull-update` row; left at
-  04:30 until you decide.
+- *Reboot timing* (final review S2, decided): after a boot-affecting update
+  `shutdown -r 06:30` schedules the next 06:30, normally about an hour after
+  the 05:00 run (a late catch-up run reboots the following morning).
+  `switch-to-configuration boot` activates nothing until then; cancel with
+  `shutdown -c`.
 - *Pointer trust*: the pointer is not signed (HTTPS from GitHub); write access to
   the repo or the secrets means deploy access to the Pi (same level as the root key).
 - *Boot + reboot path of `rpi-pull`* is covered by unit tests only; pull-smoke
@@ -306,7 +305,7 @@ CI pull (after §4 steps 1–5):
       `pull last run: applied (exit 0) at …` (or `already-current`). Read
       `journalctl -u rpi-pull` and `systemctl show rpi-pull -p MemoryPeak` (limit 384M **[?]**).
 - [ ] A CI build that changes the kernel, kernel params or firmware: after the run
-      `shutdown --show` lists the reboot at 04:30, `status` says `reboot pending: yes`;
+      `shutdown --show` lists the reboot at 06:30, `status` says `reboot pending: yes`;
       after the reboot (U-Boot, new kernel) `no` **[?]**.
 - [ ] Staleness (optional): `rpi-pull --max-age-days 1 …` against an old pointer prints
       `pointer is N days old (CI stalled?)` and exits 39.

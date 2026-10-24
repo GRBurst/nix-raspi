@@ -60,11 +60,11 @@ in
   "enable follows pointerUrl, cacheUrl and cachePublicKey" =
     p.enable == (p.pointerUrl != null && p.cacheUrl != null && p.cachePublicKey != null);
 
-  "option defaults: URLs and key null, daily 05:00, reboot 04:30, 21 days" =
+  "option defaults: URLs and key null, daily 05:00, reboot 06:30 (after the 05:00 run window), 21 days" =
     opts.pointerUrl.default == null && opts.cacheUrl.default == null
     && opts.cachePublicKey.default == null
     && opts.onCalendar.default == "*-*-* 05:00"
-    && opts.rebootTime.default == "04:30"
+    && opts.rebootTime.default == "06:30"
     && opts.maxAgeDays.default == 21;
 
   # shutdown -r accepts 00:00-23:59 only (rpi-pull --reboot-time: HH:MM)

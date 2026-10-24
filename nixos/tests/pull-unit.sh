@@ -576,16 +576,16 @@ for part in kernel initrd modules dtbs params fw cfg uboot; do
     pointer 1 "$N"
     rp "p15 $part"
     expect_exit "p15 $part change -> 0" 0
-    expect_true "p15 $part change -> boot + shutdown -r 04:30" \
+    expect_true "p15 $part change -> boot + shutdown -r 06:30" \
         grep -qxF -e "stc $N boot" "$MOCK_LOG"
-    expect_grepf "p15 $part change: shutdown -r 04:30" "shutdown -r 04:30" "$MOCK_LOG"
+    expect_grepf "p15 $part change: shutdown -r 06:30" "shutdown -r 06:30" "$MOCK_LOG"
     expect_eq "p15 $part change: no switch" 0 "$(log_count '^stc .* switch$')"
     expect_true "p15 $part change: stc boot < shutdown" \
         test "$(first_line '^stc ')" -lt "$(first_line '^shutdown ')"
     expect_eq "p15 $part change: one sync" 1 "$(log_count '^sync-state ')"
     expect_eq "p15 $part change: profile set" "$N" "$(readlink "$PROFILE")"
     expect_eq "p15 $part change: seq recorded" 1 "$(cat "$STATE/seq" 2>/dev/null)"
-    expect_grepf "p15 $part change: says reboot at 04:30" "applied seq 1 (boot, reboot at 04:30)" "$ERR"
+    expect_grepf "p15 $part change: says reboot at 06:30" "applied seq 1 (boot, reboot at 06:30)" "$ERR"
 done
 
 N=$(psys n-kernel kernel=2)

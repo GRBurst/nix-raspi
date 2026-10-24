@@ -15,7 +15,7 @@ GitHub Actions (arm64): cron | push to main | manual
  └─ [cron] lock update ─ guard ─ build toplevel ─► our Cachix cache (self-signed) + pin
  └─ pointer nixos/deploy/neptun.json ─ commit to main
                                    │ HTTPS (raw.githubusercontent.com)
-Pi: rpi-pull.timer (daily 05:00): fetch pointer ─ verify ─ realise ─ narHash ─ switch | boot+reboot at 04:30
+Pi: rpi-pull.timer (daily 05:00): fetch pointer ─ verify ─ realise ─ narHash ─ switch | boot+reboot at 06:30
 ```
 
 - **One definition.** `nixosConfigurations.rpi` (alias `neptun`) is both the
@@ -348,9 +348,8 @@ A run without a new pointer is one HTTP request. Each run:
    `status` logic, section 3), *before* touching the profile: equal →
    `nix-env --set` + `switch-to-configuration switch`; different (kernel, initrd,
    modules, device trees, kernel parameters, firmware, `config.txt` or U-Boot) →
-   `switch-to-configuration boot` + `shutdown -r 04:30` (the next 04:30, so
-   about 23 h after the 05:00 run: `shutdown -c` cancels it; `rebootTime` is
-   an option). The Pi is not left half-applied by a fingerprint failure
+   `switch-to-configuration boot` + `shutdown -r 06:30` (the next 06:30, normally about an hour after
+   the 05:00 run; `shutdown -c` cancels it; `rebootTime` is an option). The Pi is not left half-applied by a fingerprint failure
    (exit 36 before the profile changes);
 6. `sync`, record the seq and store path in `/var/lib/rpi-pull/`;
 7. if the pointer was built more than `maxAgeDays` (default 21) ago: exit 39,
@@ -396,7 +395,7 @@ run that performs it), `MemoryMax=384M`, nice/ionice/CPU idle, `TimeoutStartSec=
 > The monotonic `seq` refuses an older pointer (a rollback attempt).
 
 **`rpi.pull` options** (`modules/pull-update.nix`): `pointerUrl`, `cacheUrl`,
-`cachePublicKey`, `onCalendar` (`*-*-* 05:00`), `rebootTime` (`04:30`),
+`cachePublicKey`, `onCalendar` (`*-*-* 05:00`), `rebootTime` (`06:30`),
 `maxAgeDays` (`21`), `enable`. `configuration.nix` sets `pointerUrl =
 https://raw.githubusercontent.com/GRBurst/nix-raspi/main/nixos/deploy/neptun.json`
 and takes `cacheUrl` (`https://<name>.cachix.org`) and `cachePublicKey` from
@@ -476,7 +475,7 @@ URL is accepted for the qemu smoke test only (warning).
   rolled back until the next CI build.
 - *Timing.* CI runs Sunday 00:17 UTC (a build takes minutes to a few hours,
   longer after a cold cache); the Pi looks daily at 05:00 local + ≤ 30 min, so
-  a fresh pointer is applied within about a day, a needed reboot at the next 04:30.
+  a fresh pointer is applied within about a day, a needed reboot at the next 06:30.
 - *Failures are loud and safe.* Cache outage between pointer and pull → exit
   33/38, profile and seq untouched, retried the next day. `rpi-pull` never
   evaluates or builds.

@@ -93,7 +93,7 @@ in {
 
     rebootTime = lib.mkOption {
       type = lib.types.strMatching "([01][0-9]|2[0-3]):[0-5][0-9]";
-      default = "04:30";
+      default = "06:30";
       description = ''
         When to reboot (`shutdown -r HH:MM`, the next such time) after
         activating a system whose boot files changed.

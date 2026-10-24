@@ -32,7 +32,7 @@ A pointer built more than --max-age-days ago means CI has stalled: exit 39
   --state-dir DIR     the lock, the applied seq and store-path, and last-run
                       ("time=<UTC> exit=<code> result=<word>", every run that
                       got the lock) (default /var/lib/rpi-pull)
-  --reboot-time HH:MM when to reboot into a new boot configuration (default 04:30)
+  --reboot-time HH:MM when to reboot into a new boot configuration (default 06:30)
   --max-age-days N    the pointer's maximum age, 1-9999 (default 21)
 
 exit: 0 applied, up to date, already current or no pointer published yet
@@ -59,7 +59,7 @@ die() {
 SEQ_RE='^[1-9][0-9]{0,9}$'
 
 POINTER_URL="" CACHE_URL="" CACHE_KEY="" HOST=neptun STATE=/var/lib/rpi-pull
-REBOOT_TIME=04:30 MAX_AGE_DAYS=21
+REBOOT_TIME=06:30 MAX_AGE_DAYS=21
 STORE="${RPI_PULL_STORE:-/nix/store}"
 
 rp_parse_args() {
