@@ -215,6 +215,12 @@ Open points (documented, not fixed):
   healthy. Accepted and documented (README section 4, step 7): after the 26.05
   end of life this is the wanted alarm. If the channel is quiet for long
   stretches, raise `rpi.pull.maxAgeDays`.
+- *Dependency trust* (final review N9, accepted residual risk of A12): the
+  closure's dependencies are substituted with any of the three trusted keys;
+  nvmd's cache is hosted by Cachix, and if its key is Cachix-managed (not
+  verified), a Cachix compromise can replace the content of dependencies not yet
+  on the Pi, though not the toplevel (narHash). One sentence in the README
+  Trust box.
 
 ## 5. Hardware and CI acceptance checklist (manual, ~1 h plus the CI setup)
 

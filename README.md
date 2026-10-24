@@ -386,7 +386,11 @@ run that performs it), `MemoryMax=384M`, nice/ionice/CPU idle, `TimeoutStartSec=
 > local store too: that binds the activated content to our signature (a
 > foreign or tampered system fails with 32 or 34). The dependencies of the
 > closure are substituted with `require-sigs` and the three configured keys
-> (cache.nixos.org, nvmd's cachix, ours). The pointer itself is not signed:
+> (cache.nixos.org, nvmd's cachix, ours): a dependency the Pi does not have
+> yet may come with any of the three signatures. Accepted residual risk: nvmd's
+> cache is hosted by Cachix, and if its key is Cachix-managed (not verified), a
+> Cachix compromise could replace such a dependency's content, though not the
+> toplevel's (its narHash is pinned). The pointer itself is not signed:
 > it is only as trustworthy as write access to the repo. A compromised GitHub
 > account or secrets means a deploy to the Pi, the same level as the root SSH key.
 > The monotonic `seq` refuses an older pointer (a rollback attempt).
