@@ -50,6 +50,16 @@ jobs:
           set -- --event "$GITHUB_EVENT_NAME"
           if [ "$UPDATE_LOCK" = true ]; then set -- "$@" --update-lock; fi
           ci/build.sh "$@" >> "$GITHUB_OUTPUT"
+      # Shellcheck and the unit tests of the scripts (rpi-pull among them)
+      # before anything is published: as nix checks they run in the sandbox
+      # with the pinned tools (the Pi's jq), like `nix flake check` on the host.
+      - name: unit tests
+        run: >-
+          nix build --no-link -L
+          .#checks.aarch64-linux.rpi-deploy-syntax
+          .#checks.aarch64-linux.rpi-pull-unit
+          .#checks.aarch64-linux.rpi-ci-unit
+          .#checks.aarch64-linux.rpi-deploy-unit
       - name: push closure and pin
         env:
           CACHE: ${{ steps.cache.outputs.name }}

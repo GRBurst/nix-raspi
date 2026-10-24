@@ -294,10 +294,14 @@ read what changed before merging one. Steps:
    cache miss after the lock update falls back to the committed lock plus a
    `nixpkgs`-only update, so an uncached nvmd `develop` HEAD does not hold back
    the userspace fixes;
-3. build the `rpi` toplevel, then `cachix push` its closure to **our** cache and
+3. build the `rpi` toplevel;
+4. run shellcheck and the unit tests as nix checks on the runner
+   (`checks.aarch64-linux.rpi-{deploy-syntax,pull-unit,ci-unit,deploy-unit}`):
+   a broken `rpi-pull.sh` or CI script is never published;
+5. `cachix push` the closure to **our** cache and
    `cachix pin <cache> neptun --keep-revisions 4` (the last four systems are
    safe from LRU eviction);
-4. only after push and pin, only on `main`: write the pointer
+6. only after push and pin, only on `main`: write the pointer
    `nixos/deploy/neptun.json`, then commit `flake.lock` and the pointer to
    `main` as `github-actions[bot]` (unsigned; one rebase and retry if `main`
    moved). A failing step leaves the pointer and the Pi untouched. Same
@@ -655,7 +659,8 @@ nix build .#checks.x86_64-linux.eval-kernel  # one check
 | eval checks (option values and their effects: kernel identity, image, access, GC/extlinux, sd-wear, headless, external storage, tools, build host, pull module) | `eval-<name>` from `tests/eval/<name>.nix` (`eval-pull-update`: defaults, timer, units, substituter and key, the disabled-until-set rule) | seconds |
 | unit tests, mocked nix/ssh/sudo/lsblk/dd/nixos-rebuild/curl/cachix, real git/zstd/flock | `rpi-deploy-unit` (host tool), `rpi-pull-unit` (every `rpi-pull` path), `rpi-ci-unit` (`ci/*.sh`: build, publish order, pointer, commit and rebase) | ~10–60 s each; auto-discovered from `tests/<n>-unit.sh` |
 | bash syntax + shellcheck (every `*.sh` outside `tests/`, incl. `ci/`) | `rpi-deploy-syntax` | seconds |
-| lint of the workflow (+ shellcheck on its `run:` steps) | `actionlint` | seconds |
+| the same unit tests and shellcheck for `aarch64-linux`: CI runs them before it publishes (on x86_64 `nix flake check` omits them as an incompatible system) | `checks.aarch64-linux.rpi-{deploy-syntax,pull-unit,ci-unit,deploy-unit}` | ~1–3 min on the arm runner [?] |
+| lint of the workflow (+ shellcheck on its `run:` steps); step order build → unit checks → push + pin → pointer → commit; actions pinned by commit SHA, no secrets handed to an action, dependabot entry | `actionlint` | seconds |
 | NixOS VM test of the build-host module (binfmt, aarch64 `hello`, the `rpi-deploy` wrapper) | `rpi-host-vm` | 1–16 min (half a minute of test script once built) |
 | qemu `raspi3b` boot of the real image + SSH banner over usb-net | `tests/boot-smoke.sh IMAGE.img.zst` | ~4–6 min |
 | qemu deploy: boot the image, `rpi-deploy deploy switch`, verify | `tests/deploy-smoke.sh` | ~20–30 min (image build ~10 min of it, cached on re-runs) |
