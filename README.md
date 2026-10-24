@@ -246,7 +246,10 @@ pull last run: applied (exit 0) at 2026-10-25T05:07:41Z
 The last two lines are the pull state (section 4): `pull applied: none` /
 `pull last run: never` before the first run, `pull: disabled` when the Pi's
 system has no `rpi-pull` unit, `pull: unknown (…)` when the query fails (it
-never fails `status`). A `pull last run` with a non-zero exit and a result
+never fails `status`). The age in `pull applied` is how long ago the Pi
+*applied* that seq (the mtime of `/var/lib/rpi-pull/seq`), not the age of the
+pointer: a pointer CI stopped refreshing shows up only as `pull last run:
+stale (exit 39)`. A `pull last run` with a non-zero exit and a result
 like `untrusted`, `fetch-failed` or `stale` is what to look at.
 
 `reboot pending: yes (…)` means a reboot would change the running system, for
@@ -438,7 +441,7 @@ URL is accepted for the qemu smoke test only (warning).
 | apply on the Pi now | `ssh -p 2222 root@neptun systemctl start rpi-pull` (blocks until done; ≤ 2 h) |
 | logs | `ssh -p 2222 root@neptun journalctl -u rpi-pull` |
 | timer | `ssh -p 2222 root@neptun systemctl list-timers rpi-pull` |
-| state | `rpi-deploy status`: `pull applied: seq N <path> (3h ago)` or `pull applied: none`; `pull last run: <result> (exit N) at <time>` or `never`; `pull: disabled` (no unit: the Pi runs a system without the timer); `pull: unknown` (query failed) |
+| state | `rpi-deploy status`: `pull applied: seq N <path> (3h ago)` (applied 3h ago) or `pull applied: none`; `pull last run: <result> (exit N) at <time>` or `never`; `pull: disabled` (no unit: the Pi runs a system without the timer); `pull: unknown` (query failed) |
 
 **Semantics worth knowing.**
 
