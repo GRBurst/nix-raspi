@@ -379,6 +379,10 @@
                         && [ "$(l ".#checks.aarch64-linux.$c")" -lt "$(l ci/publish.sh)" ] \
                         || { echo "FAIL: checks.aarch64-linux.$c does not run between build and publish"; exit 1; }
                     done
+                    # Final review N6: the whole job runs on main only (it builds and
+                    # pins main whatever the ref; elsewhere it would only rotate pins).
+                    grep -qxF "    if: github.ref == 'refs/heads/main'" $w \
+                      || { echo "FAIL: the job is not guarded to refs/heads/main"; exit 1; }
                     grep -qE '^ *(- )?uses:' $w || { echo "FAIL: no uses: lines found"; exit 1; }
                     unpinned=$(grep -nE '^ *(- )?uses:' $w | grep -vE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40} # [^ ]+$' || true)
                     [ -z "$unpinned" ] || { echo "FAIL: actions not pinned by commit SHA + '# tag':"; echo "$unpinned"; exit 1; }

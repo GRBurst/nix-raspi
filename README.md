@@ -281,7 +281,8 @@ GitHub Actions builds the system, a timer on the Pi pulls it.
 **CI** (`.github/workflows/neptun.yml`, `ubuntu-24.04-arm`, always on `main`):
 runs on cron `17 0 * * 0` (Sunday 00:17 UTC), on every push to `main` that
 touches `nixos/**` (not `nixos/deploy/**`) and on `workflow_dispatch` (input
-`update-lock`). One run at a time (`concurrency: neptun`). The third-party
+`update-lock`; dispatched on another branch the job is skipped: it would build
+`main` anyway). One run at a time (`concurrency: neptun`). The third-party
 actions are pinned by full commit SHA (tag in a trailing comment; the
 `actionlint` check enforces it) and get no secrets: the signing key and the
 auth token only reach `ci/publish.sh`, because together they are root on the

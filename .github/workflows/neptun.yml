@@ -18,6 +18,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
+    # The job builds and pins main whatever the ref: a dispatch on another
+    # branch would only rotate the pinned revisions away from the pointed
+    # system. The step-level guards below stay (A3).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 300
     defaults:
