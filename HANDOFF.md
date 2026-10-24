@@ -198,6 +198,12 @@ Open points (documented, not fixed):
   Documented (README section 4: not while `rpi-pull` is active). Deferred fix:
   wrap `deploy`'s remote steps in `flock -n /var/lib/rpi-pull/lock` (refuse when
   busy), with a deploy-unit test of the busy case.
+- *Downgrade check freshness* (final review N4): it is only as fresh as the last
+  `git fetch` and compares only the `nixpkgs` and `nixos-raspberrypi` locks
+  (D14, intended, README section 3). A cheaper, stronger alternative if it ever
+  matters: compare the local toplevel's label date (`26.05.YYYYMMDD.<rev>`) with
+  the Pi's `/var/lib/rpi-pull/store-path`, which `status` already reads over
+  ssh (no fetch needed).
 
 ## 5. Hardware and CI acceptance checklist (manual, ~1 h plus the CI setup)
 
