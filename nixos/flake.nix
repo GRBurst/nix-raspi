@@ -357,15 +357,26 @@
                   };
                   # actionlint (+ shellcheck on run: blocks) on the CI workflow, and the
                   # order invariant: the pointer is written only after push + pin.
+                  # Final review S4: every action pinned by full commit SHA with its
+                  # tag in a trailing comment, no signing key or auth token handed
+                  # to an action (ci/publish.sh gets them via env), and dependabot
+                  # keeps the pins current.
                   actionlint = x86Pkgs.runCommand "actionlint-check" {
-                    src = lib.fileset.toSource { root = ../.; fileset = ../.github/workflows; };
+                    src = lib.fileset.toSource { root = ../.; fileset = ../.github; };
                     nativeBuildInputs = [ x86Pkgs.actionlint x86Pkgs.shellcheck ];
                   } ''
                     cd $src
-                    actionlint -no-color .github/workflows/neptun.yml
-                    l() { grep -n -m1 -F -- "$1" .github/workflows/neptun.yml | cut -d: -f1; }
+                    w=.github/workflows/neptun.yml
+                    actionlint -no-color $w
+                    l() { grep -n -m1 -F -- "$1" $w | cut -d: -f1; }
                     [ "$(l ci/publish.sh)" -lt "$(l ci/pointer.sh)" ] && [ "$(l ci/pointer.sh)" -lt "$(l ci/commit-push.sh)" ] \
                       || { echo "FAIL: pointer is written after push + pin"; exit 1; }
+                    grep -qE '^ *(- )?uses:' $w || { echo "FAIL: no uses: lines found"; exit 1; }
+                    unpinned=$(grep -nE '^ *(- )?uses:' $w | grep -vE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40} # [^ ]+$' || true)
+                    [ -z "$unpinned" ] || { echo "FAIL: actions not pinned by commit SHA + '# tag':"; echo "$unpinned"; exit 1; }
+                    ! grep -nE '^ *(signingKey|authToken):' $w || { echo "FAIL: signingKey/authToken passed to an action"; exit 1; }
+                    grep -qE '^ *- package-ecosystem: "?github-actions"?$' .github/dependabot.yml \
+                      || { echo "FAIL: .github/dependabot.yml does not update github-actions"; exit 1; }
                     touch $out
                   '';
                 }

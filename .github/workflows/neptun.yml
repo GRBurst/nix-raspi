@@ -25,11 +25,11 @@ jobs:
         working-directory: nixos
     steps:
       # Always build main, whatever ref triggered the run.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # 31.11.3
         with:
           extra_nix_config: |
             accept-flake-config = true
@@ -37,11 +37,11 @@ jobs:
             extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
       - id: cache
         run: ci/cache-name.sh >> "$GITHUB_OUTPUT"
-      - uses: cachix/cachix-action@v17
+      # Only installs cachix and adds our (public) cache as a substituter:
+      # no token or signing key (ci/publish.sh gets both via env).
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: ${{ steps.cache.outputs.name }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          signingKey: ${{ secrets.CACHIX_SIGNING_KEY }}
           skipPush: true
       - id: build
         env:

@@ -43,8 +43,9 @@ Pi: rpi-pull.timer (daily 05:00): fetch pointer ─ verify ─ realise ─ narHa
 ## Repo layout
 
 ```
-.github/workflows/
-  neptun.yml           CI: build the Pi system, push it to our cache, commit the pointer (main only)
+.github/
+  workflows/neptun.yml CI: build the Pi system, push it to our cache, commit the pointer (main only)
+  dependabot.yml       weekly PRs that bump the workflow's commit-SHA action pins
 nixos/
   flake.nix            Pi system, build-host modules, rpi-deploy package, apps, checks
   flake.lock           pins: our nixpkgs + nvmd (develop) + home-manager + ...
@@ -280,7 +281,12 @@ GitHub Actions builds the system, a timer on the Pi pulls it.
 **CI** (`.github/workflows/neptun.yml`, `ubuntu-24.04-arm`, always on `main`):
 runs on cron `17 0 * * 0` (Sunday 00:17 UTC), on every push to `main` that
 touches `nixos/**` (not `nixos/deploy/**`) and on `workflow_dispatch` (input
-`update-lock`). One run at a time (`concurrency: neptun`). Steps:
+`update-lock`). One run at a time (`concurrency: neptun`). The third-party
+actions are pinned by full commit SHA (tag in a trailing comment; the
+`actionlint` check enforces it) and get no secrets: the signing key and the
+auth token only reach `ci/publish.sh`, because together they are root on the
+Pi. Dependabot (`.github/dependabot.yml`) opens weekly PRs that bump the pins:
+read what changed before merging one. Steps:
 
 1. cron (or `update-lock`): `nix flake update nixpkgs nixos-raspberrypi`;
 2. guards (`rl_guard`, the same code as `rpi-deploy`): the kernel must be in

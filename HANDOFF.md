@@ -151,6 +151,9 @@ The agent cannot do these (addendum §6, plan A5/A13):
    blocks `github-actions[bot]` (or give it a bypass). Schedules of public repos
    are disabled after 60 days without activity; the staleness alarm (exit 39 after
    21 days) catches that.
+   Dependabot (`.github/dependabot.yml`) opens weekly PRs that bump the
+   actions' commit-SHA pins (final review S4): review each one, the workflow
+   holds the signing key.
 2. **Cachix.** Create a cache with **your own signing key** (self-signed;
    `cachix generate-keypair <cache>`), secret key only as the GitHub secret
    `CACHIX_SIGNING_KEY`, a write token as `CACHIX_AUTH_TOKEN`.
