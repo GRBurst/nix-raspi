@@ -1,56 +1,72 @@
-# rpi — Raspberry Pi 3 Model B (V1.2) NixOS: build here, flash once, push updates
+# rpi — Raspberry Pi 3 Model B (V1.2) NixOS: build here, flash once, CI builds, the Pi pulls
 
 Headless NixOS system (no display server) for a Raspberry Pi 3 Model B V1.2
 (hostname `neptun`, `aarch64-linux`, 1 GiB RAM, SD card, wired LAN only), plus
-everything the x86_64 NixOS build host needs: aarch64 emulation, the
-`rpi-deploy` tool and a weekly security-update job.
+everything the x86_64 NixOS build host needs for it (aarch64 emulation and the
+`rpi-deploy` tool). Security updates are built by GitHub Actions and pulled by
+the Pi itself, so they arrive without the host being on.
 
 ```
 host (x86_64, binfmt aarch64, caches)                Pi 3B (aarch64)
  flake nixos/  ──eval+build──► toplevel ──┬─ image ─► .img.zst ─flash─► SD (once)
-                                          └─ push ─► nixos-rebuild 26.05 --target-host root@neptun
- systemd timer rpi-autoupdate (weekly): lock update ─ guard ─ build ─ boot/switch ─ reboot if kernel changed
+                                          └─ push ─► nixos-rebuild 26.05 --target-host root@neptun   (manual)
+
+GitHub Actions (arm64): cron | push to main | manual
+ └─ [cron] lock update ─ guard ─ build toplevel ─► our Cachix cache (self-signed) + pin
+ └─ pointer nixos/deploy/neptun.json ─ commit to main
+                                   │ HTTPS (raw.githubusercontent.com)
+Pi: rpi-pull.timer (daily 05:00): fetch pointer ─ verify ─ realise ─ narHash ─ switch | boot+reboot at 04:30
 ```
 
 - **One definition.** `nixosConfigurations.rpi` (alias `neptun`) is both the
-  flashed image (`config.system.build.sdImage`) and every later deploy.
+  flashed image (`config.system.build.sdImage`) and every later update, manual
+  or from CI.
 - **The Pi never evaluates the flake** (eval needs ~1.08 GB RSS). No
-  `/etc/nixos`, no `autoUpgrade`, no wifi secrets. Everything is built on the
-  host and pushed over SSH.
+  `/etc/nixos`, no `autoUpgrade`, no wifi secrets. The system is built on the
+  host (pushed over SSH) or by CI (pulled as a prebuilt closure, section 4).
 - **No local kernel build, ever.** The vendor kernel comes prebuilt from the
   [nvmd/nixos-raspberrypi](https://github.com/nvmd/nixos-raspberrypi) cachix;
-  `rpi-deploy` and the weekly job refuse to run when that cannot hold.
+  `rpi-deploy` and the CI build refuse to run when that cannot hold.
 - NixOS 26.05, user `pi` (wheel, login shell zsh from the
   [nix-terminal](https://github.com/grburst/nix-terminal) kit), SSH on port
   **2222**, key-only for `pi` and `root`, static IP `192.168.100.20/24`.
 - Fewer SD writes (`rpi.sdWear`: no firmware blobs, relaxed ext4 write-back,
   volatile journal, tmpfs `/tmp`), headless `config.txt` (`rpi.headless`),
   optional USB data disk (`rpi.storage.external`, off by default).
-- Design: `docs/superpowers/specs/2026-10-19-image-push-deploy-design.md`,
-  plan: `docs/superpowers/plans/2026-10-19-image-push-deploy.md`, status and
-  hardware checklist: `HANDOFF.md`.
+- Design: `docs/superpowers/specs/2026-10-19-image-push-deploy-design.md` and
+  the addendum `docs/superpowers/specs/2026-10-23-ci-pull-updates-design.md`
+  (CI builds, the Pi pulls; replaces the host's auto-update); plans:
+  `docs/superpowers/plans/2026-10-19-image-push-deploy.md` and
+  `docs/superpowers/plans/2026-10-23-ci-pull-updates.md`; status and hardware
+  checklist: `HANDOFF.md`.
 
 ## Repo layout
 
 ```
+.github/workflows/
+  neptun.yml           CI: build the Pi system, push it to our cache, commit the pointer (main only)
 nixos/
   flake.nix            Pi system, build-host modules, rpi-deploy package, apps, checks
   flake.lock           pins: our nixpkgs + nvmd (develop) + home-manager + ...
-  configuration.nix    the Pi NixOS config
-  keys.nix             ssh public keys of the Pi (user, auto-update key, host address)
+  configuration.nix    the Pi NixOS config (incl. the pointer URL of rpi.pull)
+  keys.nix             ssh public key of the user; `cache`: our Cachix cache (name, public key), null until set
   home.nix             Home Manager config of user `pi`
   modules/
     sd-image.nix         the SD image as a build output of the Pi system
     sd-wear.nix          rpi.sdWear      — fewer SD writes, no firmware blobs
     headless.nix         rpi.headless    — config.txt without display/audio/wifi/bt
     external-storage.nix rpi.storage.external — optional USB data disk
-    build-host.nix       NixOS module (host): aarch64 emulation, rpi-deploy, rpi.buildHost.autoUpdate
+    pull-update.nix      rpi.pull        — the rpi-pull timer and service, our cache as substituter
+    build-host.nix       NixOS module (host): aarch64 emulation, rpi-deploy
     build-host-home.nix  Home Manager module (host): rpi-deploy on the PATH only
-  rpi-deploy.sh        rpi-deploy: image / flash / deploy / status
-  rpi-autoupdate.sh    the weekly job (run by the systemd service)
-  rpi-lib.sh           guards, ssh helpers, reboot decision (shared by both)
+  rpi-deploy.sh        rpi-deploy: image / flash / deploy / status (host)
+  rpi-pull.sh          rpi-pull: what the Pi's timer runs (pointer, verify, realise, switch or boot)
+  rpi-fp.sh            boot fingerprint, pure bash (rpi-deploy and rpi-pull share it)
+  rpi-lib.sh           guards and ssh helpers (host; sources rpi-fp.sh)
+  ci/                  the scripts the workflow calls: cache-name, build, publish, pointer, commit-push
+  deploy/neptun.json   the pointer, written by CI (absent until the first successful run)
   tests/               unit tests, eval checks, qemu smoke tests (see "Testing")
-docs/superpowers/      spec and plan
+docs/superpowers/      specs and plans
 ```
 
 All commands below run in `nixos/` of your checkout unless noted; with
@@ -76,7 +92,6 @@ modules = [
     rpi.buildHost.enable = true;
     # optional: pre-sets RPI_FLAKE so `rpi-deploy` needs no --flake
     rpi.buildHost.flakePath = "/home/pallon/projects/raspberry-pi/nixos";
-    # weekly security updates: see section 4
   }
 ];
 ```
@@ -90,8 +105,9 @@ then `nixos-rebuild switch`. That gives you:
   static emulator / binfmt F flag is needed;
 - `nix` features `nix-command` and `flakes`, and the nixos-raspberrypi binary
   cache (`rpi.buildHost.nvmdCache`);
-- `rpi-deploy` and `rpi-autoupdate` on the PATH;
-- optionally the weekly update timer (`rpi.buildHost.autoUpdate`).
+- `rpi-deploy` on the PATH.
+
+The host runs no update job: security updates come from CI (section 4).
 
 Without aarch64 emulation every aarch64 derivation fails with
 `builder failed with exit code 255` (an emulation problem, not a configuration
@@ -110,8 +126,6 @@ home-manager.users.alice = {
 };
 ```
 
-The weekly job is a NixOS-module feature (systemd system units).
-
 ### C. ssh access to the Pi
 
 The tools address the Pi as `root@neptun`, port 2222. Add to `~/.ssh/config`
@@ -123,10 +137,8 @@ Host neptun
   Port 2222
 ```
 
-(`rpi-deploy` also passes `-p 2222` itself, `--port` changes it; the weekly
-job runs as your user and reads the same file to resolve `neptun`. If you
-would rather not rely on it, set `rpi.buildHost.autoUpdate.target =
-"root@192.168.100.20"`.)
+(`rpi-deploy` also passes `-p 2222` itself, `--port` changes it, and
+`--target root@192.168.100.20` avoids the name.)
 
 Your own key (`user` in `nixos/keys.nix`) logs in as `pi` and as `root`.
 
@@ -177,8 +189,7 @@ ssh -p 2222 pi@neptun        # or root@neptun: both with your key, no password
 ```
 
 Expect about a minute or two (first-boot expansion, host key generation; unmeasured on hardware, ~100 s under qemu, which is ~5x slower). After a
-re-flash the host key changes: `ssh-keygen -R '[192.168.100.20]:2222'` (and see
-section 4 for the weekly job's `known_hosts`).
+re-flash the host key changes: `ssh-keygen -R '[192.168.100.20]:2222'`.
 
 ## 3. Deploying changes and `status`
 
@@ -209,15 +220,16 @@ A deploy takes a few minutes: measured in qemu (TCG, ~5x slower than a Pi 3)
 137 s (every switch rewrites all firmware files), extlinux 6 s, activation
 56 s. Expect clearly less on the real Pi [?].
 
-**Downgrade protection.** If the `flake.lock` on branch `auto-update` pins a
-newer `nixpkgs` or `nixos-raspberrypi` (its `locked.lastModified`) than the
-`flake.lock` in your working tree, `deploy` refuses with `would downgrade`
-(the weekly job already deployed newer pins). It compares lock content, not
-commits: after a squash-merge, cherry-pick or your own `nix flake update` the
-lock is current and `deploy` proceeds, even though `auto-update` still has a
-commit `HEAD` lacks. If a lock cannot be read it refuses too (`cannot
-compare`). Merge the branch (`git merge auto-update`) or override with
-`--force`.
+**Downgrade protection.** CI commits lock updates to `main`. If the
+`flake.lock` in your local `origin/main` ref pins a newer `nixpkgs` or
+`nixos-raspberrypi` (its `locked.lastModified`) than the `flake.lock` in your
+working tree, `deploy` refuses with `would downgrade … run 'git pull' first`
+(CI already built newer pins). It compares lock content, not commits: after a
+squash-merge, cherry-pick or your own `nix flake update` the lock is current
+and `deploy` proceeds. If a lock cannot be read it refuses too (`cannot
+compare`). It never fetches: it reads the `refs/remotes/origin/main` you
+last fetched, so `git pull` (or `git fetch`) first; without an `origin`
+remote or that ref the check is skipped. Override with `--force`.
 
 **`status`** prints:
 
@@ -226,7 +238,15 @@ current: /nix/store/…-nixos-system-neptun-…     # running now
 booted: /nix/store/…-nixos-system-neptun-…      # running since the last boot
 default: /nix/store/…-nixos-system-neptun-…     # what the next boot starts
 reboot pending: no
+pull applied: seq 12 /nix/store/…-nixos-system-neptun-… (3h ago)
+pull last run: applied (exit 0) at 2026-10-25T05:07:41Z
 ```
+
+The last two lines are the pull state (section 4): `pull applied: none` /
+`pull last run: never` before the first run, `pull: disabled` when the Pi's
+system has no `rpi-pull` unit, `pull: unknown (…)` when the query fails (it
+never fails `status`). A `pull last run` with a non-zero exit and a result
+like `untrusted`, `fetch-failed` or `stale` is what to look at.
 
 `reboot pending: yes (…)` means a reboot would change the running system, for
 one or both reasons:
@@ -235,7 +255,8 @@ one or both reasons:
   `test`);
 - `changed since boot: kernel, fat, …`: a boot-critical part of the boot
   default differs from the booted system's (after a `switch` to a new kernel or
-  firmware). The parts (the *boot fingerprint*, `rl_fp_*` in `rpi-lib.sh`):
+  firmware). The parts (the *boot fingerprint*, `rl_fp_*` in `rpi-fp.sh`, which
+  `rpi-pull` uses too):
   `kernel`, `initrd`, `kernel-modules`, `dtbs`, `kernel-params`, and `fat` --
   the inputs of the `NIXOS_BOOT` partition (Pi firmware package, generated
   `config.txt`, U-Boot), read from the toplevel's bootloader installer.
@@ -250,105 +271,164 @@ Environment: `RPI_FLAKE` (default flake dir), `RPI_SSH_OPTS` (extra ssh
 options), `RPI_NIXOS_REBUILD` (use this `nixos-rebuild` instead of the pinned
 one), `RPI_CACHE_URL`.
 
-## 4. Automatic security updates (the weekly job)
+## 4. Automatic updates: CI builds, the Pi pulls
 
-Every Sunday 03:00 (`Persistent=true`, up to 30 min random delay) the host runs
-`rpi-autoupdate`:
+Security updates reach the Pi without the build host being on and without the
+Pi evaluating the flake (eval needs ~1.1 GB RSS; the Pi has ~870 MiB usable).
+GitHub Actions builds the system, a timer on the Pi pulls it.
 
-1. clone/reset a **dedicated work clone** in `workDir` to branch `main` of
-   your repo (your checkout is never touched), `nix flake update nixpkgs
-   nixos-raspberrypi`;
-2. cache guard: the new kernel must be in nvmd's cachix, otherwise restore the
-   lock and update `nixpkgs` only, check again; still failing → exit, the Pi
-   is untouched;
-3. build guard (no kernel/toolchain build, at most `maxBuilds`), build the
-   toplevel (4 h limit), GC-rooted in `workDir`;
-4. equal to what the Pi runs → nothing to deploy;
-5. compare the boot fingerprint of the new system with the Pi's booted one
-   (section 3, `status`): equal → `nixos-rebuild switch`, `sync`; different
-   (kernel, initrd, modules, device trees, kernel parameters, firmware,
-   `config.txt` or U-Boot) → `nixos-rebuild boot`, `sync`, `shutdown -r 04:30`
-   on the Pi. Decided before deploying, so the bootloader is installed once;
-   the reboot right after the update makes firmware breakage show up then, not
-   at some later power cut;
-6. commit `flake.lock` (`auto-update: flake.lock <date>`, unsigned, identity
-   `rpi-autoupdate`) and **force-push it to branch `auto-update`** of your repo.
+**CI** (`.github/workflows/neptun.yml`, `ubuntu-24.04-arm`, always on `main`):
+runs on cron `17 0 * * 0` (Sunday 00:17 UTC), on every push to `main` that
+touches `nixos/**` (not `nixos/deploy/**`) and on `workflow_dispatch` (input
+`update-lock`). One run at a time (`concurrency: neptun`). Steps:
 
-Every guard or build failure exits before the Pi is contacted, and nothing is
-pushed unless the whole run succeeded. A failure *after* the Pi was contacted
-is different: if the log says `installing … as the boot default`, the
-`nixos-rebuild boot` may have succeeded before the run failed (sync or
-scheduling the reboot), so the Pi activates the new system at its next
-reboot although the lock was not pushed. Check with `rpi-deploy status`
-(`reboot pending: yes`) and either reboot it or deploy your checkout. There
-is no automatic fallback after a bad kernel (section 5).
+1. cron (or `update-lock`): `nix flake update nixpkgs nixos-raspberrypi`;
+2. guards (`rl_guard`, the same code as `rpi-deploy`): the kernel must be in
+   nvmd's cachix, no kernel/toolchain build, at most 500 local builds. A kernel
+   cache miss after the lock update falls back to the committed lock plus a
+   `nixpkgs`-only update, so an uncached nvmd `develop` HEAD does not hold back
+   the userspace fixes;
+3. build the `rpi` toplevel, then `cachix push` its closure to **our** cache and
+   `cachix pin <cache> neptun --keep-revisions 4` (the last four systems are
+   safe from LRU eviction);
+4. only after push and pin, only on `main`: write the pointer
+   `nixos/deploy/neptun.json`, then commit `flake.lock` and the pointer to
+   `main` as `github-actions[bot]` (unsigned; one rebase and retry if `main`
+   moved). A failing step leaves the pointer and the Pi untouched. Same
+   toplevel as the pointer's → no commit.
 
-> **What the job deploys.** The job deploys **`main` + an updated lock**, not
-> your working branch. Anything you deployed manually from an unmerged branch
-> **is replaced by the next weekly run** (the job builds `main`'s config).
-> Merge your work into `main` before the run you want it to survive.
+The pointer: `{ "seq": N, "storePath": "/nix/store/…-nixos-system-neptun-…",
+"narHash": "sha256-…", "rev": "<git sha built>", "built": "YYYY-MM-DDTHH:MM:SSZ" }`.
+`seq` is the workflow's `run_number` (a positive integer of at most ten
+digits); `built` must have exactly that UTC form or the Pi rejects the pointer.
 
-### Setup (once)
+**The Pi** (`modules/pull-update.nix`, unit `rpi-pull`, `rpi-pull.sh`): the
+timer runs **daily at 05:00** (`*-*-* 05:00`, up to 30 min random delay,
+`Persistent=true`: a Pi that was off catches up at boot, after `time-sync`).
+A run without a new pointer is one HTTP request. Each run:
 
-1. **Key** (dedicated, passphrase-less, only usable from the host):
+1. fetches the pointer (HTTPS, size and time limits); HTTP 404 → `no pointer
+   published yet`, exit 0;
+2. validates it: `seq` equal to the applied one → `up to date`, exit 0; older →
+   exit 31; the store path must match `nixos-system-neptun-…` in `/nix/store`;
+3. `nix store verify --no-contents --store <cacheUrl> --trusted-public-keys
+   <our key>` (exit 32 `untrusted`, 38 cache unreachable);
+4. already the running system → record the seq and stop; otherwise
+   `nix-store --realise` (two substitution jobs, ~80 MB RSS) and compare the
+   narHash with the pointer's (exit 33 / 34);
+5. compares the boot fingerprint of the new system with the booted one (the
+   `status` logic, section 3), *before* touching the profile: equal →
+   `nix-env --set` + `switch-to-configuration switch`; different (kernel, initrd,
+   modules, device trees, kernel parameters, firmware, `config.txt` or U-Boot) →
+   `switch-to-configuration boot` + `shutdown -r 04:30` (the next 04:30, so
+   about 23 h after the 05:00 run: `shutdown -c` cancels it; `rebootTime` is
+   an option). The Pi is not left half-applied by a fingerprint failure
+   (exit 36 before the profile changes);
+6. `sync`, record the seq and store path in `/var/lib/rpi-pull/`;
+7. if the pointer was built more than `maxAgeDays` (default 21) ago: exit 39,
+   `pointer is N days old (CI stalled?)` -- CI stopped publishing (also catches
+   GitHub disabling the schedule after 60 days without repository activity).
 
-   ```sh
-   ssh-keygen -t ed25519 -N '' -C rpi-autoupdate@andromeda -f ~/.ssh/rpi-autoupdate
-   ```
+Every run that got the lock writes `/var/lib/rpi-pull/last-run`
+(`time=… exit=… result=…`); the unit fails visibly (`systemctl status
+rpi-pull`) on any non-zero exit. Exit codes of `rpi-pull`: 0 ok, 1 state dir,
+2 usage, 30 fetch, 31 pointer invalid or older, 32 untrusted, 33 realise,
+34 narHash mismatch, 35 profile, 36 activation, 37 busy (another run), 38 cache
+unavailable, 39 pointer stale. The service is `Type=oneshot` with
+`restartIfChanged = false` (a switch that changes the unit must not stop the
+run that performs it), `MemoryMax=384M`, nice/ionice/CPU idle, `TimeoutStartSec=2h`.
 
-2. **Public key into the Pi config.** Paste the content of
-   `~/.ssh/rpi-autoupdate.pub` into `nixos/keys.nix` as `autoUpdate`:
+> **Trust.** The signature check is ours-only: `--trusted-public-keys` replaces
+> the Pi's configured keys, so only a toplevel signed by *our* cache key
+> passes (a system from cache.nixos.org or nvmd's cachix does not). That check
+> covers the toplevel path only. The binding that carries the trust is the
+> **pointer's narHash, compared with the realised path after the realise**
+> (a foreign or tampered system fails with 34). The dependencies of the closure
+> are substituted with `require-sigs` and the three configured keys
+> (cache.nixos.org, nvmd's cachix, ours). The pointer itself is not signed:
+> it is only as trustworthy as write access to the repo. A compromised GitHub
+> account or secrets means a deploy to the Pi, the same level as the root SSH key.
+> The monotonic `seq` refuses an older pointer (a rollback attempt).
 
-   ```nix
-   autoUpdate = "ssh-ed25519 AAAA… rpi-autoupdate@andromeda";
-   hostAddress = "192.168.100.115";   # the host's LAN address, as the Pi sees it
-   ```
+**`rpi.pull` options** (`modules/pull-update.nix`): `pointerUrl`, `cacheUrl`,
+`cachePublicKey`, `onCalendar` (`*-*-* 05:00`), `rebootTime` (`04:30`),
+`maxAgeDays` (`21`), `enable`. `configuration.nix` sets `pointerUrl =
+https://raw.githubusercontent.com/GRBurst/nix-raspi/main/nixos/deploy/neptun.json`
+and takes `cacheUrl` (`https://<name>.cachix.org`) and `cachePublicKey` from
+`keys.nix`. The module **stays off, with an evaluation warning** (`rpi.pull
+stays disabled: … not set`) until all three are set: it appears on every
+evaluation of `rpi` until `keys.cache` is filled in, which is intended. Once
+enabled, our cache is added to the Pi's `substituters` and
+`trusted-public-keys` (cache.nixos.org and nvmd's stay). An `http://` pointer
+URL is accepted for the qemu smoke test only (warning).
 
-   It lands in `root`'s authorized keys as `from="<hostAddress>",restrict`,
-   so the key only works from the host (and without forwarding or a pty). Commit it to `main`, then install it on the
-   Pi with a manual `rpi-deploy deploy switch` (or put it in before you build
-   the first image). If the host's address changes, update `hostAddress` and
-   deploy again.
-3. **The `Host neptun` ssh_config entry** (section 1.C).
-4. **The timer**, in the host's NixOS config:
+### Setup (once; steps only you can do)
 
-   ```nix
-   rpi.buildHost.autoUpdate = {
-     enable = true;
-     user = "pallon";
-     repoPath = "/home/pallon/projects/raspberry-pi";
-     sshKey = "/home/pallon/.ssh/rpi-autoupdate";   # a string: never copied into the store
-     # defaults: workDir /var/lib/rpi-autoupdate, target root@neptun, sshPort 2222,
-     #           onCalendar "Sun 03:00", maxBuilds 500, rebootTime "04:30"
-   };
-   ```
-
-   The service needs `nix`, `git`, `ssh` (provided by the unit) and a `main`
-   branch in `repoPath`.
+1. **GitHub.** A **public** repo (free arm64 runners; `raw.githubusercontent.com`
+   serves the pointer): `GRBurst/nix-raspi`, the URL in `configuration.nix` (if
+   it lives elsewhere, change `rpi.pull.pointerUrl`). Push `main`. Settings →
+   Actions → General → Workflow permissions: **Read and write**. No branch
+   protection or ruleset on `main` that blocks `github-actions[bot]` (or give it a
+   bypass), because the job pushes the lock and pointer commit.
+2. **Cachix cache, self-signed.** Create a public cache whose signing key you
+   generate yourself (an advanced choice at creation; Cachix never holds the key):
+   `cachix authtoken <token>`, `cachix generate-keypair <cache>` prints the
+   secret key once. Store it as the GitHub secret **`CACHIX_SIGNING_KEY`**
+   (nowhere in the repo), and a write token of the cache as
+   **`CACHIX_AUTH_TOKEN`**. A Cachix-managed key is not enough: whoever holds the
+   auth token could then sign arbitrary content.
+3. **`nixos/keys.nix`:** `cache = { name = "<cache>"; publicKey =
+   "<cache>.cachix.org-1:…"; };` (the public key from the Cachix dashboard).
+   Commit and push to `main`. The workflow reads the cache name from here.
+4. **First CI run.** Actions → `neptun` → *Run workflow* (`main`). The first push
+   uploads ~340 MiB, later runs ~150 MiB (the free tier has 5 GB and evicts by
+   LRU; the pin protects the last four systems). It pushes, pins and commits
+   `nixos/deploy/neptun.json`; `git pull` it.
+5. **Dispatch a second time** and confirm that it produces **no** pointer
+   commit (same store path, `pushed=false`). If it commits a new pointer every
+   time, the toplevel is not reproducible between runs: find out what differs
+   before relying on the timer.
+6. **Enable the timer on the Pi** with one manual `rpi-deploy deploy switch`
+   from a tree that has `keys.cache` (section 3). From then on the Pi pulls on
+   its own: it applies the pointer at its next 05:00 run, or at once with
+   `ssh -p 2222 root@neptun systemctl start rpi-pull` (watch
+   `journalctl -fu rpi-pull`).
+7. **Hardware acceptance (AC3):** `rpi-deploy status` shows `pull applied: seq N …`
+   and `pull last run: applied (exit 0) at …` after the first run that applied
+   something (checklist in `HANDOFF.md`).
 
 ### Operating it
 
 | what | how |
 |------|-----|
-| run now | `sudo systemctl start rpi-autoupdate` (the unit runs as your user) |
-| logs | `journalctl -u rpi-autoupdate` (a run takes minutes to an hour) |
-| timer | `systemctl list-timers rpi-autoupdate` |
-| dry run | `rpi-autoupdate --repo PATH --work-dir DIR --no-deploy` (updates the lock, guards, builds, pushes `auto-update`, never contacts the Pi) |
-| after re-flashing the Pi | `rm <workDir>/known_hosts` (the job pins the Pi's host key on first contact, `StrictHostKeyChecking=accept-new`) |
+| build and publish now | Actions → `neptun` → *Run workflow*; tick `update-lock` to also update `nixpkgs`/`nixos-raspberrypi` (`gh workflow run neptun.yml -f update-lock=true`) |
+| apply on the Pi now | `ssh -p 2222 root@neptun systemctl start rpi-pull` (blocks until done; ≤ 2 h) |
+| logs | `ssh -p 2222 root@neptun journalctl -u rpi-pull` |
+| timer | `ssh -p 2222 root@neptun systemctl list-timers rpi-pull` |
+| state | `rpi-deploy status`: `pull applied: seq N <path> (3h ago)` or `pull applied: none`; `pull last run: <result> (exit N) at <time>` or `never`; `pull: disabled` (no unit: the Pi runs a system without the timer); `pull: unknown` (query failed) |
 
-**Merging the result.** The new pins arrive as one commit on branch
-`auto-update` (main + lock):
+**Semantics worth knowing.**
 
-```sh
-git log -1 auto-update        # auto-update: flake.lock 2026-…
-git merge auto-update         # or cherry-pick / fast-forward main
-```
-
-The branch is force-pushed every run (`main` + one lock commit), so it is
-rewritten whenever you have not merged it. If you squash-merge or cherry-pick
-it, the next run simply starts again from `main`. `rpi-deploy deploy` refuses
-to deploy a working tree whose `flake.lock` pins an older `nixpkgs` or
-`nixos-raspberrypi` than `auto-update`'s (see section 3).
+- *A push to `main` is a deploy.* Every push that touches `nixos/**` builds and
+  publishes; the Pi applies it at its next daily run. CI builds `main` with
+  `ref: main` whatever started the run, so unpushed local changes are not in it.
+- *Manual deploys persist until the next CI build.* The Pi applies a pointer
+  only if its `seq` is newer than the last one applied, so `rpi-deploy deploy`
+  stays in place; the next CI run replaces it with `main`'s system. Push
+  before the run you want it to survive.
+- *A freshly flashed Pi has no applied seq.* At its first run it applies the
+  current pointer, even if the flashed image is newer (built locally, not
+  pushed): push to `main` before flashing, or expect the downgrade.
+- *A pointer older than the applied seq fails the unit* (exit 31): a rollback
+  attempt or a reset of the repo. An equal seq is a silent `up to date`. After
+  a rollback on the Pi (section 5) the same seq is **not** re-applied; it stays
+  rolled back until the next CI build.
+- *Timing.* CI runs Sunday 00:17 UTC (a build takes minutes to a few hours,
+  longer after a cold cache); the Pi looks daily at 05:00 local + ≤ 30 min, so
+  a fresh pointer is applied within about a day, a needed reboot at the next 04:30.
+- *Failures are loud and safe.* Cache outage between pointer and pull → exit
+  33/38, profile and seq untouched, retried the next day. `rpi-pull` never
+  evaluates or builds.
 
 ## 5. Recovery and rollback
 
@@ -358,6 +438,12 @@ generation from the host:
 ```sh
 NIX_SSHOPTS='-p 2222' nix run .#nixos-rebuild -- switch --rollback --no-reexec --target-host root@neptun
 ```
+
+The rollback persists against the pull: `rpi-pull` applies a pointer only if
+its `seq` is newer than the last one it applied, so the system you rolled back
+from is **not** re-applied at the next run. The next CI build (a push to `main`
+or the Sunday run) replaces the rolled-back system again: revert or fix `main`
+before that.
 
 **Unbootable new kernel or initrd.** There is no boot counting and no
 automatic fallback: U-Boot's extlinux simply boots the default entry. Two ways
@@ -415,7 +501,8 @@ sudo losetup -d "$LOOP"
 ```
 
 The next deploy writes the firmware of whatever it deploys again; deploy the
-good commit (or fix the cause) before the next weekly run.
+good commit (or fix the cause on `main`) before the next CI build (a push to
+`main`, or the Sunday run) is pulled.
 
 **Dead card or re-flash**: section 7. State on the Pi is disposable by design.
 
@@ -463,13 +550,16 @@ The Pi that runs today was installed with the old `nixos-install` flow: `pi`
 only, no root key, `pi` needs a sudo password, no `trusted-users`, so a push
 deploy to it is impossible. Re-flash it (its state is disposable):
 
-1. Put the auto-update key into `keys.nix` first if you already have it
-   (section 4, optional: you can add it with a deploy later).
+1. Make sure `keys.nix` has your key (and, once section 4's setup is done, the
+   `cache`: an image built then already ships the pull timer; otherwise one
+   `rpi-deploy deploy switch` adds it later).
 2. `rpi-deploy image`, `rpi-deploy flash … /dev/sdX`, boot (section 2).
 3. `ssh-keygen -R '[192.168.100.20]:2222'`, then `ssh -p 2222 root@neptun true`
    and `ssh -p 2222 pi@neptun true`.
 4. Walk through the hardware checklist in `HANDOFF.md`.
-5. If the weekly job is enabled: `rm /var/lib/rpi-autoupdate/known_hosts`.
+5. With section 4 set up: a freshly flashed Pi has no applied seq, so at its
+   first run it applies the current pointer, even over a newer image you built
+   locally. Push that state to `main` first, or expect the older system.
 
 Wifi is gone for good (wired LAN only); the old `secrets/wireless.env` is not
 used and not in the repo.
@@ -493,7 +583,8 @@ userspace (security fixes track the release branch). `rpi` is built with
    The Pi trusts it via nixos-raspberrypi's module.
 3. `nix flake update nixos-raspberrypi` can land on a `develop` HEAD whose
    kernel is not cached yet (the cadence is weekly). The guards catch that;
-   the weekly job then falls back to updating `nixpkgs` only.
+   the CI build (`ci/build.sh`) then falls back to updating `nixpkgs` only.
+   A manual `nix flake update` has no such fallback.
 
 Check by hand:
 
@@ -525,38 +616,47 @@ Home Manager is `master`, not release-26.05 (nix-terminal needs
   store and the caches.
 - Access: `PermitRootLogin = prohibit-password`, `PasswordAuthentication = no`,
   `security.sudo.wheelNeedsPassword = false` (`pi` has no password, the login is
-  key-only; same trust as the root key). Root's keys: your key, and the
-  auto-update key restricted with `from=`.
+  key-only; same trust as the root key). Root's key: yours only (no restricted
+  automation key; CI never logs in to the Pi, the Pi pulls).
 - Options follow nixos-26.05 (e.g. `services.journald.extraConfig`; the newer
   `settings` is 26.11 only).
 
 ## 10. Testing
 
 ```sh
-nix flake check --accept-flake-config        # all checks incl. the VM test, ~1–5 min warm
+nix flake check --accept-flake-config        # all checks incl. the VM test, ~2 min warm (131 s, all built fresh)
 nix build .#checks.x86_64-linux.eval-kernel  # one check
 ```
 
 | layer | check | cost |
 |-------|-------|------|
-| eval checks (option values and their effects: kernel identity, image, access, GC/extlinux, sd-wear, headless, external storage, tools, build host) | `eval-<name>` from `tests/eval/<name>.nix` | seconds |
-| unit tests, mocked nix/ssh/sudo/lsblk/dd/nixos-rebuild, real git/zstd | `rpi-deploy-unit`, `autoupdate-unit` | ~10–30 s |
-| bash syntax + shellcheck | `rpi-deploy-syntax` | seconds |
-| NixOS VM test of the build-host module (binfmt, aarch64 `hello`, timer) | `rpi-host-vm` | 1–16 min |
+| eval checks (option values and their effects: kernel identity, image, access, GC/extlinux, sd-wear, headless, external storage, tools, build host, pull module) | `eval-<name>` from `tests/eval/<name>.nix` (`eval-pull-update`: defaults, timer, units, substituter and key, the disabled-until-set rule) | seconds |
+| unit tests, mocked nix/ssh/sudo/lsblk/dd/nixos-rebuild/curl/cachix, real git/zstd/flock | `rpi-deploy-unit` (host tool), `rpi-pull-unit` (every `rpi-pull` path), `rpi-ci-unit` (`ci/*.sh`: build, publish order, pointer, commit and rebase) | ~10–60 s each; auto-discovered from `tests/<n>-unit.sh` |
+| bash syntax + shellcheck (every `*.sh` outside `tests/`, incl. `ci/`) | `rpi-deploy-syntax` | seconds |
+| lint of the workflow (+ shellcheck on its `run:` steps) | `actionlint` | seconds |
+| NixOS VM test of the build-host module (binfmt, aarch64 `hello`, the `rpi-deploy` wrapper) | `rpi-host-vm` | 1–16 min (half a minute of test script once built) |
 | qemu `raspi3b` boot of the real image + SSH banner over usb-net | `tests/boot-smoke.sh IMAGE.img.zst` | ~4–6 min |
 | qemu deploy: boot the image, `rpi-deploy deploy switch`, verify | `tests/deploy-smoke.sh` | ~20–30 min (image build ~10 min of it, cached on re-runs) |
+| qemu pull: boot an image with a throwaway cache key, serve a signed local cache and a pointer over HTTP, let the guest's `rpi-pull.service` apply it (switch path, with a changed unit), then refuse a pointer signed by a foreign key (exit 32) | `tests/pull-smoke.sh` | ~28 min (1656 s measured, image rebuilt) |
 
-The smoke tests are not part of `nix flake check` (qemu TCG, minutes). Both
+The smoke tests are not part of `nix flake check` (qemu TCG, minutes). All
 need `qemu-system-aarch64` with `-M raspi3b` (`nix shell nixpkgs#qemu`),
 `zstd`, `sfdisk`, `debugfs` and `mcopy`, no root:
 
 ```sh
 tests/boot-smoke.sh ~/rpi-images/result-rpi-image/sd-image/neptun-rpi3.img.zst
 tests/deploy-smoke.sh            # builds a throwaway-key image itself
+tests/pull-smoke.sh              # throwaway root and cache keys, local cache on 127.0.0.1:18080
 ```
 
+`pull-smoke` also needs `curl`, `jq` and network for the guards (busybox comes
+from the pinned nixpkgs; the port is `RPI_PULL_SMOKE_HTTP_PORT`, default
+18080, and part of the cached image). Not covered by it: the boot-and-reboot
+path of `rpi-pull` (unit tests only) and the real GitHub and Cachix side.
+
 What qemu cannot cover: U-Boot reading `extlinux.conf`, the GPU firmware
-applying `config.txt`, a real card, the LAN, the reboot timer. That is the
+applying `config.txt`, a real card, the LAN, the reboot timer, GitHub Actions
+and Cachix. That is the
 manual hardware checklist in `HANDOFF.md`.
 
 The build-host module is also evaluated on every flake operation by contract
