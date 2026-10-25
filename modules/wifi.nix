@@ -42,12 +42,17 @@ in
 
     secretsFile = lib.mkOption {
       # A string, never a Nix path (a path would be copied into the store).
-      type = lib.types.strMatching "/.+";
+      # A plain absolute file path (rpi-deploy's rule, re-review N-c): it goes
+      # into a tmpfiles line, BindReadOnlyPaths and rpi-deploy's remote
+      # command, where whitespace, `%` or shell characters would break.
+      type = lib.types.addCheck (lib.types.strMatching "/[A-Za-z0-9._/-]*[A-Za-z0-9._-]")
+        (s: !lib.hasInfix "/../" "${s}/");
       default = "/var/lib/rpi/wireless.env";
       description = ''
         File on the Pi with the `VAR=<psk>` lines, outside the store, owned
         by the wpa_supplicant user (the daemon's), mode 0600; a tmpfiles
-        rule sets both.
+        rule sets both. A plain absolute path: letters, digits, `._-/`, no
+        `..` segment.
       '';
     };
 

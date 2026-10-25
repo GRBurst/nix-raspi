@@ -82,6 +82,14 @@ in
     && !(on.options.rpi.wifi.secretsFile.type.check ./wifi.nix)
     && !(on.options.rpi.wifi.secretsFile.type.check "wireless.env");
 
+  # N-c (re-review): the path goes into a tmpfiles line, BindReadOnlyPaths
+  # and rpi-deploy's remote command: rpi-deploy's rule (plain characters,
+  # no `..` segment, no trailing /) at eval time
+  "secretsFile is a plain absolute file path" =
+    let ok = on.options.rpi.wifi.secretsFile.type.check; in
+    lib.all ok [ "/var/lib/rpi/wireless.env" "/wireless.env" "/etc/wifi.env" "/a/x..y" ]
+    && !(lib.any ok [ "/a b" "/a\tb" "/x%y" "/a/../b" "/.." "/a/" "/" "/a$b" "/a\nb" ]);
+
   "on: Pi 3 wireless firmware despite rpi.sdWear" =
     oc.rpi.sdWear.enable
     && map (p: p.outPath) (firmware on) == [ fw.outPath ];
