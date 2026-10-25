@@ -547,10 +547,26 @@ unset CACHIX_AUTH_TOKEN CACHIX_SIGNING_KEY
 # T7.3 ci/pointer.sh
 # =============================================================================
 SRI=sha256-MOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOC=
-TOP2=/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-neptun-26.05.20261028.0123456
+# T4.4: the pointer carries bootFp, the boot fingerprint of TOP's files, so
+# its toplevels are fake systems (make_sys) in the fake store $FX_STORE, which
+# RL_STORE_DIR makes the store. TOP2 boots another kernel; TOP3 differs from
+# TOP only in its path (same boot fingerprint). Restored after this section.
+TOP0="$TOP"
+TOP=$FX_STORE/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-26.05.20261021.da6dc0e
+TOP2=$FX_STORE/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-neptun-26.05.20261028.0123456
+TOP3=$FX_STORE/cccccccccccccccccccccccccccccccc-nixos-system-neptun-26.05.20261029.0123456
+make_sys "$TOP" && make_sys "$TOP2" kernel=2 && make_sys "$TOP3"
 clone p
 PF="$T/p/deploy/neptun.json"
-pointer() { bash "$CI_DIR/pointer.sh" "$@"; }
+pointer() { RL_STORE_DIR="$FX_STORE" bash "$CI_DIR/pointer.sh" "$@"; }
+# fp_of SYSTEM: the expected bootFp (sha256 of rl_fp_local SYSTEM)
+fp_of() {
+    (
+        # shellcheck source=../rpi-fp.sh
+        source "$CI_DIR/../rpi-fp.sh"
+        RL_STORE_DIR="$FX_STORE" rl_fp_local "$1" | sha256sum | cut -c1-64
+    )
+}
 # put_pointer FILE SEQ PATH: an existing pointer as CI would have written it
 put_pointer() {
     mkdir -p "$(dirname "$1")"
@@ -559,11 +575,16 @@ put_pointer() {
 }
 
 reset_log
-run_cmd w1 -- pointer --seq 7 --rev abc123 --file "$PF" "$TOP"
+run_cmd w1 -- pointer --host neptun --seq 7 --rev abc123 --file "$PF" "$TOP"
 expect_exit "w1 new pointer" 0
 expect_eq "w1 stdout is changed=true" "changed=true" "$(cat "$OUT")"
-expect_eq "w1 keys are exactly seq storePath narHash rev built" \
-    '["built","narHash","rev","seq","storePath"]' "$(jq -c 'keys' "$PF" 2>&1)"
+expect_eq "w1 keys are exactly seq storePath narHash rev built bootFp" \
+    '["bootFp","built","narHash","rev","seq","storePath"]' "$(jq -c 'keys' "$PF" 2>&1)"
+# pt1 (D18)
+expect_eq "pt1 bootFp = sha256 of rl_fp_local TOP" "$(fp_of "$TOP")" "$(jq -r .bootFp "$PF" 2>&1)"
+expect_grep "pt1 bootFp is 64 hex chars" '^[0-9a-f]{64}$' <(jq -r .bootFp "$PF" 2>&1)
+expect_true "pt1 another kernel -> another bootFp" test "$(fp_of "$TOP")" != "$(fp_of "$TOP2")"
+expect_eq "pt1 same boot files -> same bootFp" "$(fp_of "$TOP")" "$(fp_of "$TOP3")"
 expect_eq "w1 seq is the number N" "number 7" "$(jq -r '"\(.seq|type) \(.seq)"' "$PF" 2>&1)"
 expect_eq "w1 storePath is TOP" "$TOP" "$(jq -r .storePath "$PF" 2>&1)"
 expect_eq "w1 rev is --rev" "abc123" "$(jq -r .rev "$PF" 2>&1)"
@@ -576,54 +597,56 @@ expect_eq "w5 converts that hash to SRI" 1 "$(log_count "^nix hash convert .*--t
 expect_eq "w1 no temp file left behind" "neptun.json" "$(ls -A "$(dirname "$PF")")"
 
 cp "$PF" "$T/w1.json"
-run_cmd w2 -- pointer --seq 8 --rev def456 --file "$PF" "$TOP"
+run_cmd w2 -- pointer --host neptun --seq 8 --rev def456 --file "$PF" "$TOP"
 expect_exit "w2 same TOP again" 0
 expect_eq "w2 stdout is changed=false" "changed=false" "$(cat "$OUT")"
 expect_true "w2 file bytes unchanged" cmp -s "$T/w1.json" "$PF"
-run_cmd w2b -- pointer --seq 7 --rev abc123 --file "$PF" "$TOP"
+run_cmd w2b -- pointer --host neptun --seq 7 --rev abc123 --file "$PF" "$TOP"
 expect_eq "w2 same TOP and seq -> changed=false" "changed=false" "$(cat "$OUT")"
 expect_true "w2 same TOP and seq -> bytes unchanged" cmp -s "$T/w1.json" "$PF"
 
 put_pointer "$PF" 9 "$TOP"
 cp "$PF" "$T/w3.json"
 for s in 9 3; do
-    run_cmd "w3-$s" -- pointer --seq "$s" --rev x --file "$PF" "$TOP2"
+    run_cmd "w3-$s" -- pointer --host neptun --seq "$s" --rev x --file "$PF" "$TOP2"
     expect_exit "w3 non-increasing seq refused (existing 9, new path, --seq $s)" 1
     expect_grepf "w3 --seq $s: says why" "not newer" "$ERR"
     expect_true "w3 --seq $s: file unchanged" cmp -s "$T/w3.json" "$PF"
     expect_eq "w3 --seq $s: stdout empty" "" "$(cat "$OUT")"
 done
-run_cmd w3ok -- pointer --seq 10 --rev x --file "$PF" "$TOP2"
+run_cmd w3ok -- pointer --host neptun --seq 10 --rev x --file "$PF" "$TOP2"
 expect_eq "w3 --seq 10 > 9 -> changed=true" "changed=true" "$(cat "$OUT")"
 expect_eq "w3 --seq 10 -> storePath is the new path" "$TOP2" "$(jq -r .storePath "$PF")"
 
 cp "$PF" "$T/w4.json"
-for bad in /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-mars-1 /tmp/x \
-    /nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-nixos-system-neptun-1 \
-    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-1 x" \
-    /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-1/bin; do
-    run_cmd w4 -- pointer --seq 20 --rev x --file "$PF" "$bad"
+for bad in "$FX_STORE"/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-mars-1 /tmp/x \
+    "$FX_STORE"/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-nixos-system-neptun-1 \
+    "$FX_STORE/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-1 x" \
+    "$FX_STORE"/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-1/bin \
+    /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-1; do
+    run_cmd w4 -- pointer --host neptun --seq 20 --rev x --file "$PF" "$bad"
     expect_exit "w4 TOP '$bad' refused" 1
     expect_true "w4 TOP '$bad': file unchanged" cmp -s "$T/w4.json" "$PF"
 done
 for bad in 0 -1 1.0 1e3 01 abc 12345678901 ''; do
-    run_cmd w4s -- pointer --seq "$bad" --rev x --file "$PF" "$TOP"
+    run_cmd w4s -- pointer --host neptun --seq "$bad" --rev x --file "$PF" "$TOP"
     expect_exit "w4 --seq '$bad' refused" 1
 done
 expect_true "w4 bad seqs: file unchanged" cmp -s "$T/w4.json" "$PF"
-MARS=/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-mars-1
+MARS=$FX_STORE/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-mars-1
+make_sys "$MARS"
 run_cmd w4h -- pointer --host mars --seq 1 --rev x --file "$T/mars/p.json" "$MARS"
 expect_eq "w4 --host mars accepts a mars toplevel" "changed=true" "$(cat "$OUT")"
 run_cmd w4i -- pointer --host 'nep.*' --seq 1 --rev x --file "$T/mars/q.json" "$TOP"
 expect_exit "w4 --host must be a plain name" 1
 
 reset_log
-MOCK_NSQ_RC=1 run_cmd w5f -- pointer --seq 30 --rev x --file "$T/w5f/p.json" "$TOP"
+MOCK_NSQ_RC=1 run_cmd w5f -- pointer --host neptun --seq 30 --rev x --file "$T/w5f/p.json" "$TOP"
 expect_true "w5 narHash query failure -> non-zero" test "$RC" -ne 0
 expect_true "w5 narHash query failure -> no file" test ! -e "$T/w5f/p.json"
 
 printf 'not json\n' >"$T/w9.json"
-run_cmd w9 -- pointer --seq 30 --rev x --file "$T/w9.json" "$TOP"
+run_cmd w9 -- pointer --host neptun --seq 30 --rev x --file "$T/w9.json" "$TOP"
 expect_exit "w9 an existing invalid pointer is not overwritten" 1
 expect_eq "w9 file unchanged" "not json" "$(cat "$T/w9.json")"
 
@@ -637,15 +660,15 @@ QF="$T/q/deploy/neptun.json"
 put_pointer "$QF" 5 "$TOP"
 git -C "$T/q" fetch -q origin
 cp "$QF" "$T/w6.json"
-run_cmd w6 -- pointer --seq 10 --rev x --file "$QF" "$TOP2"
+run_cmd w6 -- pointer --host neptun --seq 10 --rev x --file "$QF" "$TOP2"
 expect_exit "w6 origin/main has seq 12 -> --seq 10 refused" 1
 expect_grepf "w6 names origin/main" "origin/main" "$ERR"
 expect_true "w6 file unchanged" cmp -s "$T/w6.json" "$QF"
-run_cmd w6ok -- pointer --seq 13 --rev x --file "$QF" "$TOP2"
+run_cmd w6ok -- pointer --host neptun --seq 13 --rev x --file "$QF" "$TOP2"
 expect_eq "w6 --seq 13 > 12 -> changed=true" "changed=true" "$(cat "$OUT")"
 expect_eq "w6 --seq 13 written" 13 "$(jq -r .seq "$QF")"
 cp "$QF" "$T/w6c.json"
-run_cmd w6c -- pointer --seq 14 --rev x --file "$QF" "$TOP"
+run_cmd w6c -- pointer --host neptun --seq 14 --rev x --file "$QF" "$TOP"
 expect_eq "w6 origin/main already points at TOP -> changed=false" "changed=false" "$(cat "$OUT")"
 expect_true "w6 origin/main already points at TOP -> file unchanged" cmp -s "$T/w6c.json" "$QF"
 
@@ -654,11 +677,11 @@ expect_true "w6 origin/main already points at TOP -> file unchanged" cmp -s "$T/
 # pointer is removed from main and fetched, seq 2 is written.
 clone w11
 WF="$T/w11/deploy/neptun.json"
-run_cmd w11a -- pointer --seq 2 --rev x --file "$WF" "$TOP2"
+run_cmd w11a -- pointer --host neptun --seq 2 --rev x --file "$WF" "$TOP2"
 expect_exit "w11 reset run_number (2 < 12 on origin/main) refused" 1
 git -C "$T/w11" rm -q deploy/neptun.json
 git -C "$T/w11" commit -q -m "drop pointer" && git -C "$T/w11" push -q origin main
-run_cmd w11b -- pointer --seq 2 --rev x --file "$WF" "$TOP2"
+run_cmd w11b -- pointer --host neptun --seq 2 --rev x --file "$WF" "$TOP2"
 expect_exit "w11 pointer removed from main -> seq 2 written" 0
 expect_eq "w11 seq 2 in the file" 2 "$(jq -r .seq "$WF")"
 # restore origin/main's pointer 12 for the later tests
@@ -667,18 +690,74 @@ put_pointer "$T/o/deploy/neptun.json" 12 "$TOP"
 git -C "$T/o" add -A && git -C "$T/o" commit -q -m "pointer 12 again" && git -C "$T/o" push -q origin main
 
 # w8: outside a git repo (pull-smoke writes its pointer into a web root).
-run_cmd w8 -- pointer --seq 1 --rev smoke --file "$T/www/neptun.json" "$TOP"
+run_cmd w8 -- pointer --host neptun --seq 1 --rev smoke --file "$T/www/neptun.json" "$TOP"
 expect_exit "w8 no git repo -> written" 0
 expect_eq "w8 stdout" "changed=true" "$(cat "$OUT")"
 
-run_cmd w10 -- pointer --seq 1 --file "$T/w10.json" "$TOP"
+run_cmd w10 -- pointer --host neptun --seq 1 --file "$T/w10.json" "$TOP"
 expect_exit "w10 missing --rev -> usage" 2
-run_cmd w10b -- pointer --seq 1 --rev x "$TOP"
+run_cmd w10b -- pointer --host neptun --seq 1 --rev x "$TOP"
 expect_exit "w10 missing --file -> usage" 2
-run_cmd w10c -- pointer --seq 1 --rev x --file "$T/w10.json"
+run_cmd w10c -- pointer --host neptun --seq 1 --rev x --file "$T/w10.json"
 expect_exit "w10 missing TOP -> usage" 2
 run_cmd w10h -- pointer --help
 expect_exit "w10 --help" 0
+
+# pt3: --host is required (the pointer file and the toplevel are per host)
+run_cmd pt3 -- pointer --seq 1 --rev x --file "$T/pt3/neptun.json" "$TOP"
+expect_exit "pt3 no --host -> usage" 2
+expect_grepf "pt3 says --host is missing" "--host" "$ERR"
+expect_true "pt3 no file written" test ! -e "$T/pt3/neptun.json"
+
+# pt4 ("host attribute name != hostname"): the workflow-style call keyed on
+# system.name (build's name=), relative to the checkout.
+GARDEN=$FX_STORE/dddddddddddddddddddddddddddddddd-nixos-system-garden-26.05.20261029.0123456
+make_sys "$GARDEN"
+clone pt4
+cd "$T/pt4" || exit 1
+run_cmd pt4 -- pointer --host garden --seq 31 --rev x --file deploy/garden.json "$GARDEN"
+cd - >/dev/null || exit 1
+expect_exit "pt4 --host garden" 0
+expect_eq "pt4 writes deploy/garden.json of the checkout" "$GARDEN" \
+    "$(jq -r .storePath "$T/pt4/deploy/garden.json" 2>&1)"
+run_cmd pt4n -- pointer --host garden --seq 32 --rev x --file "$T/pt4/deploy/garden.json" "$TOP"
+expect_exit "pt4 --host garden refuses a neptun toplevel" 1
+
+# pt2 (D18): the step summary says whether the Pi switches or reboots, by
+# comparing bootFp with the previous pointer's (origin/main's copy, else the
+# file); only under GitHub Actions.
+SUM="$T/pt2-summary.md"
+ghp() { GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" pointer "$@"; }
+: >"$SUM"
+run_cmd pt2a -- ghp --host neptun --seq 1 --rev x --file "$T/pt2/neptun.json" "$TOP"
+expect_exit "pt2 first pointer" 0
+expect_grepf "pt2 summary section names the host" "## neptun: pointer" "$SUM"
+expect_grepf "pt2 summary names file, seq and TOP" "$T/pt2/neptun.json: seq 1 → \`$TOP\`" "$SUM"
+expect_grepf "pt2 no previous pointer -> unknown" "boot: unknown (no previous pointer)" "$SUM"
+: >"$SUM"
+run_cmd pt2b -- ghp --host neptun --seq 2 --rev x --file "$T/pt2/neptun.json" "$TOP3"
+expect_grepf "pt2 same bootFp -> the Pi switches" "boot: unchanged → the Pi switches" "$SUM"
+: >"$SUM"
+run_cmd pt2c -- ghp --host neptun --seq 3 --rev x --file "$T/pt2/neptun.json" "$TOP2"
+expect_grepf "pt2 other bootFp -> the Pi reboots" \
+    "boot: changed → the Pi reboots at rpi.pull.rebootTime" "$SUM"
+: >"$SUM"
+run_cmd pt2d -- ghp --host neptun --seq 3 --rev x --file "$T/pt2/neptun.json" "$TOP2"
+expect_eq "pt2 same TOP -> changed=false" "changed=false" "$(cat "$OUT")"
+expect_grepf "pt2 same TOP -> summary says unchanged" "already points at" "$SUM"
+# origin/main's copy (what the Pi reads) wins over the work tree's file:
+# origin/main has seq 12 without bootFp (an older CI's pointer).
+clone pt2e
+run_cmd pt2e0 -- pointer --host neptun --seq 13 --rev x --file "$T/pt2e/deploy/neptun.json" "$TOP2"
+: >"$SUM"
+run_cmd pt2e -- ghp --host neptun --seq 14 --rev x --file "$T/pt2e/deploy/neptun.json" "$TOP3"
+expect_exit "pt2 previous pointer without bootFp" 0
+expect_grepf "pt2 previous pointer without bootFp -> unknown" \
+    "boot: unknown (the previous pointer has no bootFp)" "$SUM"
+: >"$SUM"
+run_cmd pt2f -- pointer --host neptun --seq 15 --rev x --file "$T/pt2/neptun.json" "$TOP"
+expect_eq "pt2 outside GitHub Actions: no summary" "" "$(cat "$SUM")"
+TOP="$TOP0"
 
 # =============================================================================
 # T7.4 ci/commit-push.sh (real git, bare origin)

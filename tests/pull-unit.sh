@@ -680,6 +680,18 @@ expect_exit "p20 no state dir, seq 1 -> applies" 0
 expect_eq "p20 seq 1 recorded" 1 "$(cat "$STATE/seq" 2>/dev/null)"
 expect_grepf "p20 switched" "stc $NEXT switch" "$MOCK_LOG"
 
+# px1 (D18): rpi-ci pointer adds bootFp; rpi-pull reads only the fields it
+# knows, so extra fields (bootFp, anything newer) do not stop it.
+fresh
+jq -c '. + {bootFp: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", x: [1, {y: null}]}' \
+    "$MOCK_BODY" >"$T/px1.json" && mv "$T/px1.json" "$MOCK_BODY"
+expect_eq "px1 the served pointer has bootFp and x" '["bootFp","x"]' \
+    "$(jq -c '[keys[] | select(. == "bootFp" or . == "x")]' "$MOCK_BODY")"
+rp px1
+expect_exit "px1 extra pointer fields are ignored" 0
+expect_grepf "px1 switched" "stc $NEXT switch" "$MOCK_LOG"
+expect_eq "px1 seq 1 recorded" 1 "$(cat "$STATE/seq" 2>/dev/null)"
+
 # --- A5 staleness: pointer `built`, --max-age-days -----------------------------
 
 for built in - 7 '"2026-10-23"' '"2026-10-23T12:00:00"' '"2026-10-23 12:00:00Z"' \
