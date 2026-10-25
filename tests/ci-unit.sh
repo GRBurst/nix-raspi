@@ -419,6 +419,10 @@ expect_grep "b-rpi summary: nixpkgs revision through rpi" 'nixpkgs.*rpi/nixpkgs-
 expect_grep "b-rpi summary: lock diff names the nested inputs" \
     'lock: updated.*nixpkgs `np1` → `rpi/nixpkgs-new`.*nixos-raspberrypi `rp1` → `rpi/nixos-raspberrypi-new`' "$T/c.md"
 expect_not_grep "b-rpi summary: rpi unchanged" 'rpi `lib1` →' "$T/c.md"
+# SF1 (re-review): the summary names the lock paths that moved
+expect_grep "b-rpi summary: row rpi/nixpkgs" '^- rpi/nixpkgs: `rpi/nixpkgs-new`$' "$T/c.md"
+expect_grep "b-rpi summary: lock diff rpi/nixos-raspberrypi" 'rpi/nixos-raspberrypi `rp1` → `rpi/nixos-raspberrypi-new`' "$T/c.md"
+expect_not_grep "b-rpi summary: no root nixpkgs row" '- nixpkgs:' "$T/c.md"
 
 reset_log
 MOCK_CACHE=full-miss run_cmd b-rpi3 -- cbuild --event schedule
@@ -467,6 +471,66 @@ MOCK_LOCK="$T/cf/flake.lock" MOCK_DRY="$HYB" run_cmd b-rpi-f -- bash "$CI_DIR/bu
 expect_exit "b-rpi-f builds" 0
 expect_eq "b-rpi-f updates root nixpkgs and rpi/nixos-raspberrypi" 1 \
     "$(log_count "^nix flake update --accept-flake-config --flake $T/cf nixpkgs rpi/nixos-raspberrypi\$")"
+# SF1: rpi's nixpkgs follows the root one: no rpi/nixpkgs row of its own
+git -C "$T/cf" checkout -q -- flake.lock
+reset_log
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$T/cf.md" MOCK_LOCK="$T/cf/flake.lock" MOCK_DRY="$HYB" \
+    run_cmd b-rpi-f2 -- bash "$CI_DIR/build.sh" --flake "$T/cf" --host neptun --update-lock
+expect_exit "b-rpi-f2 builds" 0
+expect_grep "b-rpi-f2 summary: exactly nixpkgs and rpi/nixos-raspberrypi moved" \
+    '^- lock: updated \(nixpkgs `np1` → `nixpkgs-new`; rpi/nixos-raspberrypi `rp1` → `rpi/nixos-raspberrypi-new`\)$' "$T/cf.md"
+expect_not_grep "b-rpi-f2 summary: no rpi/nixpkgs row (a follows)" 'rpi/nixpkgs' "$T/cf.md"
+git -C "$T/cf" checkout -q -- flake.lock
+
+# b-rpi-own (SF1, re-review): a consumer with its own root nixpkgs (for its
+# own packages) and the library's own nixpkgs_2 (no follows, as the template
+# asks): the system uses rpi/nixpkgs, so both move, and the summary says
+# exactly which lock paths moved.
+clone co
+COLOCK='{"nodes":{"nixos-raspberrypi":{"locked":{"rev":"rp1"}},"nixpkgs":{"locked":{"rev":"np0"}},"nixpkgs_2":{"locked":{"rev":"np2"}},"root":{"inputs":{"nixpkgs":"nixpkgs","rpi":"rpi"}},"rpi":{"inputs":{"nixos-raspberrypi":"nixos-raspberrypi","nixpkgs":"nixpkgs_2"},"locked":{"rev":"lib1"}}},"root":"root","version":7}'
+printf '%s\n' "$COLOCK" >"$T/co/flake.lock"
+git -C "$T/co" commit -q -am "consumer lock, own nixpkgs"
+cobuild() { MOCK_LOCK="$T/co/flake.lock" MOCK_DRY="$HYB" bash "$CI_DIR/build.sh" --flake "$T/co" --host neptun "$@"; }
+corevs() { jq -r '.nodes | [.rpi, .nixpkgs, .nixpkgs_2, ."nixos-raspberrypi"] | map(.locked.rev) | join(" ")' "$T/co/flake.lock"; }
+reset_log
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$T/co.md" run_cmd b-rpi-own -- cobuild --event schedule
+expect_exit "b-rpi-own builds" 0
+expect_eq "b-rpi-own updates root nixpkgs and both of the library's inputs" 1 \
+    "$(log_count "^nix flake update --accept-flake-config --flake $T/co nixpkgs rpi/nixpkgs rpi/nixos-raspberrypi\$")"
+expect_eq "b-rpi-own one lock update" 1 "$(log_count 'flake update')"
+expect_eq "b-rpi-own lock: rpi as committed, both nixpkgs and nvmd moved" \
+    "lib1 nixpkgs-new rpi/nixpkgs-new rpi/nixos-raspberrypi-new" "$(corevs)"
+expect_grep "b-rpi-own summary: exactly what moved" \
+    '^- lock: updated \(nixpkgs `np0` → `nixpkgs-new`; rpi/nixpkgs `np2` → `rpi/nixpkgs-new`; rpi/nixos-raspberrypi `rp1` → `rpi/nixos-raspberrypi-new`\)$' "$T/co.md"
+expect_grep "b-rpi-own summary: row nixpkgs" '^- nixpkgs: `nixpkgs-new`$' "$T/co.md"
+expect_grep "b-rpi-own summary: row rpi/nixpkgs" '^- rpi/nixpkgs: `rpi/nixpkgs-new`$' "$T/co.md"
+git -C "$T/co" checkout -q -- flake.lock
+# kernel miss after the nvmd update: both nixpkgs nodes, not nvmd
+reset_log
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$T/co3.md" MOCK_CACHE=full-miss run_cmd b-rpi-own3 -- cobuild --event schedule
+expect_exit "b-rpi-own kernel miss -> nixpkgs-only fallback builds" 0
+expect_eq "b-rpi-own fallback: second update is both nixpkgs" 1 "$(log_count "flake update .* $T/co nixpkgs rpi/nixpkgs\$")"
+expect_eq "b-rpi-own fallback: lock = committed + both nixpkgs" "lib1 nixpkgs-new rpi/nixpkgs-new rp1" "$(corevs)"
+expect_grep "b-rpi-own fallback summary: exactly what moved" \
+    '^- lock: updated \(nixpkgs `np0` → `nixpkgs-new`; rpi/nixpkgs `np2` → `rpi/nixpkgs-new`\)$' "$T/co3.md"
+git -C "$T/co" checkout -q -- flake.lock
+# both root nixpkgs and root nixos-raspberrypi, and the library's own of each
+clone co2
+jq -c '.nodes."nixos-raspberrypi_2" = {locked: {rev: "rp2"}} | .nodes.root.inputs."nixos-raspberrypi" = "nixos-raspberrypi_2"' \
+    <<<"$COLOCK" >"$T/co2/flake.lock"
+git -C "$T/co2" commit -q -am "consumer lock, own nixpkgs and nvmd"
+reset_log
+MOCK_LOCK="$T/co2/flake.lock" MOCK_DRY="$HYB" run_cmd b-rpi-own2 -- bash "$CI_DIR/build.sh" --flake "$T/co2" --host neptun --update-lock
+expect_exit "b-rpi-own2 builds" 0
+expect_eq "b-rpi-own2 updates the root and the library's nixpkgs and nixos-raspberrypi" 1 \
+    "$(log_count "^nix flake update --accept-flake-config --flake $T/co2 nixpkgs rpi/nixpkgs nixos-raspberrypi rpi/nixos-raspberrypi\$")"
+# --update-library: rpi brings its own inputs; the root nixpkgs still moves
+# on schedule, never the nested ones
+reset_log
+run_cmd b-rpi-own4 -- cobuild --event schedule --update-library
+expect_exit "b-rpi-own4 builds" 0
+expect_eq "b-rpi-own4 updates root nixpkgs and rpi" 1 "$(log_count "^nix flake update --accept-flake-config --flake $T/co nixpkgs rpi\$")"
+git -C "$T/co" checkout -q -- flake.lock
 
 # =============================================================================
 # ci/publish.sh

@@ -12,15 +12,17 @@
 #    honours them only for a trusted user, which the runner's user is).
 # 2. Lock update when NAME (default $GITHUB_EVENT_NAME) is `schedule` or
 #    --update-lock is given: `nix flake update` of nixpkgs and
-#    nixos-raspberrypi, as root inputs or, in a flake built on this library
-#    (input rpi, the template), as rpi/nixpkgs and rpi/nixos-raspberrypi.
-#    Never rpi itself (final review S3): the library's code reaches a
+#    nixos-raspberrypi: each root input of that name and, in a flake built
+#    on this library (input rpi, the template), the library's own node of
+#    it (rpi/nixpkgs, rpi/nixos-raspberrypi; not when it follows a root
+#    input): a consumer's own root nixpkgs does not stop the system's
+#    rpi/nixpkgs from moving (re-review SF1). Never rpi itself (final review S3): the library's code reaches a
 #    consumer's Pi only through --update-library (the workflow's manual
 #    update-library input), which updates rpi with the inputs it locked.
 # 3. Guards (rpi-lib.sh rl_guard): the kernel must be in the nvmd cache, no
 #    kernel/toolchain build, at most N local builds (default 500).
 #    A kernel cache miss right after a lock update falls back to the
-#    committed lock plus a nixpkgs-only update (if nixpkgs is an input) and
+#    committed lock plus an update of the nixpkgs among them only and
 #    guards again, so an uncached nvmd kernel does not hold back that week's
 #    userspace fixes.
 # 4. `nix build --no-link` of the host's toplevel; `df -h /`.
@@ -44,7 +46,7 @@ usage: ci/build.sh --host NAME [--event NAME] [--update-lock] [--update-library]
 
   --host NAME     the Pi host (nixosConfigurations.NAME) to build
   --event NAME    GitHub event (default \$GITHUB_EVENT_NAME); schedule updates the lock
-  --update-lock   update nixpkgs and nixos-raspberrypi (or rpi/nixpkgs and
+  --update-lock   update nixpkgs and nixos-raspberrypi (and/or rpi/nixpkgs and
                   rpi/nixos-raspberrypi) in flake.lock first; never rpi
   --update-library  update rpi (the library, with the inputs it locked) first
   --flake DIR     flake directory (default: the working directory)
@@ -85,9 +87,11 @@ source "$HERE/gh.sh"
 lock="$dir/flake.lock" nl=$'\n'
 name="" top="" checks_line="" lock_state="as committed" revs_before=""
 
-# lock_revs: "INPUT REV" for nixpkgs, nixos-raspberrypi and rpi in the lock;
-# an input the flake does not have itself is looked up in rpi's inputs
-# (follows paths resolved from the root).
+# lock_revs: "PATH REV" for the lock paths nixpkgs, nixos-raspberrypi and
+# rpi (root inputs) and rpi/nixpkgs, rpi/nixos-raspberrypi (rpi's inputs,
+# unless they follow the root input of the same name); follows paths are
+# resolved from the root. The same paths as lock_targets, so the summary
+# names exactly what moved.
 # shellcheck disable=SC2016 # jq program
 REVS_JQ='
 def node_of($L; $n; $in):
@@ -97,11 +101,18 @@ def node_of($L; $n; $in):
     else reduce $r[] as $i ($L.root; if . == null then null else node_of($L; .; $i) end)
     end;
 . as $L
-| ("nixpkgs", "nixos-raspberrypi", "rpi") as $in
-| (node_of($L; $L.root; $in)
-   // (node_of($L; $L.root; "rpi") as $r | if $r then node_of($L; $r; $in) else null end)) as $n
-| select($n != null)
-| "\($in) \($L.nodes[$n].locked.rev // "?")"'
+| node_of($L; $L.root; "rpi") as $rpi
+| (("nixpkgs", "nixos-raspberrypi") as $x
+   | node_of($L; $L.root; $x) as $o
+   | ([$x, $o],
+      (if $rpi == null then empty
+       else node_of($L; $rpi; $x) as $n
+       | if $n != null and ($n != $o or ($L.nodes[$rpi].inputs[$x] | type) == "string")
+         then ["rpi/\($x)", $n] else empty end
+       end))),
+  ["rpi", $rpi]
+| select(.[1] != null)
+| "\(.[0]) \($L.nodes[.[1]].locked.rev // "?")"'
 lock_revs() { jq -r "$REVS_JQ" "$lock" 2>/dev/null || true; }
 
 # summary LINE...: this build's step summary section (GitHub Actions only)
@@ -160,18 +171,20 @@ fi
 
 # --- lock update ----------------------------------------------------------------
 # lock_targets: the inputs to update, one per line. --update-lock: nixpkgs
-# and nixos-raspberrypi, each as a root input, else as the library's own
-# input (rpi/<name>, a flake built on this library: the template); never
-# rpi itself. --update-library: rpi, with the nixpkgs and nixos-raspberrypi
-# the library locked (what its CI built), so not also its nested inputs.
+# and nixos-raspberrypi, each as a root input and as the library's own
+# input (rpi/<name>, a flake built on this library: the template; a
+# follows is moved by the root input it follows), both when the consumer
+# has a root nixpkgs of its own (re-review SF1: the system uses
+# rpi/nixpkgs); never rpi itself. --update-library: rpi, with the nixpkgs
+# and nixos-raspberrypi the library locked (what its CI built), so not also
+# its nested inputs.
 # shellcheck disable=SC2016 # jq program
 TARGETS_JQ='
 .nodes[.root].inputs as $i
 | (if ($i.rpi | type) == "string" then .nodes[$i.rpi].inputs // {} else {} end) as $r
 | (if $upd then ("nixpkgs", "nixos-raspberrypi") as $x
-     | if $i[$x] != null then $x
-       elif ($lib | not) and ($r[$x] | type) == "string" then "rpi/\($x)"
-       else empty end
+     | (if $i[$x] != null then $x else empty end),
+       (if ($lib | not) and ($r[$x] | type) == "string" then "rpi/\($x)" else empty end)
    else empty end),
   (if $lib and $i.rpi != null then "rpi" else empty end)'
 lock_targets() {
@@ -216,13 +229,13 @@ rc=0
 guard || rc=$?
 if ((rc == RL_E_CACHE && ${#updated[@]})); then
     git -C "$dir" checkout -- flake.lock
-    np="" # nixpkgs or rpi/nixpkgs, when updated
+    np=() # nixpkgs and/or rpi/nixpkgs, when updated
     for u in "${updated[@]}"; do
-        if [[ "$u" == nixpkgs || "$u" == rpi/nixpkgs ]]; then np="$u"; fi
+        if [[ "$u" == nixpkgs || "$u" == rpi/nixpkgs ]]; then np+=("$u"); fi
     done
-    if [[ -n "$np" && ${#updated[@]} -gt 1 ]]; then
-        echo "ci/build.sh: kernel not cached after the update; retrying with nixpkgs only ($np)" >&2
-        update "$np" || fail "$RL_E_BUILD" "lock update of $host failed"
+    if ((${#np[@]} && ${#np[@]} < ${#updated[@]})); then
+        echo "ci/build.sh: kernel not cached after the update; retrying with nixpkgs only (${np[*]})" >&2
+        update "${np[@]}" || fail "$RL_E_BUILD" "lock update of $host failed"
     else
         echo "ci/build.sh: kernel not cached after the update; building the committed lock" >&2
     fi

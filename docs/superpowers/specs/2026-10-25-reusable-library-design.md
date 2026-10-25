@@ -294,3 +294,9 @@ using our cache means trusting our signing key (opt-in, not default).
   `.#rpi-ci`) before any update and call only that, so the Cachix secrets
   never meet unreviewed library code (asserted by the `actionlint` check).
   README and the template README document the trust model.
+  *Amended 2026-10-25 (re-review SF1):* the update targets are each root
+  input `nixpkgs`/`nixos-raspberrypi` **and** rpi's own node of it
+  (`rpi/<x>`, unless it follows a root input): a consumer with a root
+  `nixpkgs` of its own still moves the system's `rpi/nixpkgs`. The kernel
+  fallback updates all nixpkgs targets; the build summary names the lock
+  paths (`nixpkgs`, `rpi/nixpkgs`, …) that moved.

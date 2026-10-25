@@ -537,8 +537,9 @@ library code an update brought in:
 2. `build` (one job per host, named `build <host>`, `contents: read` only):
    1. cron (or `update-lock`): `nix flake update` of `nixpkgs` and
       `nixos-raspberrypi`; in a repo built on the library those are the
-      library's own (`rpi/nixpkgs`, `rpi/nixos-raspberrypi`), never `rpi`
-      itself. Only the manual `update-library` input moves `rpi` (with the
+      library's own (`rpi/nixpkgs`, `rpi/nixos-raspberrypi`), plus your
+      own root inputs of those names if you have them (both move), never
+      `rpi` itself. Only the manual `update-library` input moves `rpi` (with the
       inputs the library locked);
    2. guards (`rl_guard`, the same code as `rpi-deploy`): the kernel must be in
       nvmd's cachix, no kernel/toolchain build, at most 500 local builds. A
@@ -767,7 +768,8 @@ always agree.
   Dispatch the workflow again with `update-lock`.
 - *Your repo takes library changes only when you say so.* The weekly run
   updates nixpkgs and nixos-raspberrypi (in your lock: `rpi/nixpkgs`,
-  `rpi/nixos-raspberrypi`) and commits the lock. The library itself (`rpi`:
+  `rpi/nixos-raspberrypi`, and your own root `nixpkgs`/`nixos-raspberrypi`
+  if you added them) and commits the lock. The library itself (`rpi`:
   modules, `rpi-pull`, `rpi-ci`) moves only when you dispatch the workflow
   with `update-library` or run `nix flake update rpi` and push. Read the
   library's changes first: whoever can push to it is root on your
@@ -797,7 +799,8 @@ Consumers keep the locked inputs of the library (`rpi.url = "github:GRBurst/nix-
 and **no** `follows` on it): that inheritance is what makes the caches hit.
 The weekly CI update then moves only the library's `nixpkgs` and
 `nixos-raspberrypi` in your lock (`nix flake update rpi/nixpkgs
-rpi/nixos-raspberrypi`); nvmd keeps its own nixpkgs pin, so its kernel stays
+rpi/nixos-raspberrypi`, plus your own root inputs of those names if any);
+nvmd keeps its own nixpkgs pin, so its kernel stays
 cached (the guards check it). `nix flake update rpi` returns to exactly the
 library's lock.
 `nixos-raspberrypi` is on branch `develop` and **keeps its own nixpkgs pin**,
