@@ -52,6 +52,10 @@ secretspec run -- rpi-deploy flash result-rpi-image/sd-image/*.img.zst /dev/sdX 
 secretspec run -- rpi-deploy secrets      # later, to the running Pi
 ```
 
+That is inside `devenv shell` (or direnv), where `rpi-deploy` and `secretspec`
+are on PATH. Outside it: `secretspec run -- nix run .#rpi-deploy -- secrets`
+(`secretspec` from your profile, or `nix shell nixpkgs#secretspec`).
+
 With the dotenv provider, quote values that contain spaces or `$` with single
 quotes: `RPI_WIFI_HOME='my pass phrase'`. Without SecretSpec, `export
 RPI_WIFI_HOME=...` before the command works as well.
