@@ -29,7 +29,8 @@ let
   devenvOk = f:
     let m = devenvModule f; names = map (p: p.pname or p.name) m.packages; in
     m.env.RPI_FLAKE == "/repo"
-    && lib.elem "cachix" names && lib.elem "secretspec" names;
+    && lib.elem "cachix" names && lib.elem "secretspec" names
+    && lib.length names == lib.length (lib.unique names); # final review N2
   templateDevenv = devenvModule ../../templates/default/devenv.nix;
 in
 {
@@ -91,7 +92,7 @@ in
 
   # devenv itself cannot run in the sandbox; the module is evaluated here
   # with a fake devenv config instead.
-  "devenv.nix (root, template): RPI_FLAKE is the repo root, cachix and secretspec in the shell" =
+  "devenv.nix (root, template): RPI_FLAKE is the repo root, cachix and secretspec in the shell, no package twice" =
     lib.all devenvOk [ ../../devenv.nix ../../templates/default/devenv.nix ];
 
   # T7.3: the shell's flake check warms up every Pi host (yazi's IFD) and

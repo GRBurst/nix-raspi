@@ -19,7 +19,6 @@
     actionlint
     # rpi-deploy and the scripts in ci/
     git
-    secretspec
     curl
     zstd
     openssh
