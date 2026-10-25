@@ -177,13 +177,13 @@
             };
 
             nixosConfigurations = {
-              # Our Pi (hosts/neptun) through the library entry point, like
+              # Our example host through the library entry point, like
               # any consumer's host (lib/mkPi.nix: nvmd's nixosSystem with
               # the hybrid inputs, the rpi.* modules and home-manager).
               neptun = self.lib.mkPi { modules = [ ./hosts/neptun ]; };
 
               # Deprecated alias (one release, plan §15 / A13): the old name
-              # of neptun for existing `--attr rpi` / `.#rpi` users. Marked
+              # of our host for existing `--attr rpi` / `.#rpi` users. Marked
               # rpiHost = false, so host discovery (rpi-lib.sh rl_hosts,
               # rpi-ci hosts) does not list it twice.
               rpi = self.nixosConfigurations.neptun // { rpiHost = false; };
@@ -345,7 +345,7 @@
                   # actionlint (+ shellcheck on run: blocks) on the CI workflow and
                   # its invariants (pointer after push + pin, SHA-pinned actions,
                   # ...): see tests/workflows-lint.sh. templates/ is in the source
-                  # for the template's workflow (once it exists).
+                  # for the template's workflow.
                   actionlint = x86Pkgs.runCommand "actionlint-check" {
                     src = lib.fileset.toSource {
                       root = ./.;
@@ -359,6 +359,34 @@
                   } ''
                     cd $src
                     bash tests/workflows-lint.sh
+                    touch $out
+                  '';
+                  # No value of our own Pi in the library's code (spec AC1,
+                  # plan D23): tests/personal-values.sh scans these paths and
+                  # flake.nix; keep the list equal to the script's.
+                  personal-values = x86Pkgs.runCommand "personal-values-check" {
+                    src = lib.fileset.toSource {
+                      root = ./.;
+                      fileset = lib.fileset.unions ([
+                        ./flake.nix
+                        ./tests/personal-values.sh
+                        (lib.fileset.fileFilter (f: lib.hasPrefix "rpi-" f.name && f.hasExt "sh") ./.)
+                      ] ++ map lib.fileset.maybeMissing [
+                        ./lib
+                        ./modules
+                        ./templates
+                        ./ci
+                        ./.github
+                        ./devenv.nix
+                        ./devenv.yaml
+                        ./secretspec.toml
+                        ./devenv.local.nix.example
+                      ]);
+                    };
+                    nativeBuildInputs = with x86Pkgs; [ gnugrep gnused coreutils ];
+                  } ''
+                    cd $src
+                    bash tests/personal-values.sh
                     touch $out
                   '';
                 }

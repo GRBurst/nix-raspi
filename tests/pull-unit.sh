@@ -211,14 +211,15 @@ fresh() {
     pointer 1 "$NEXT"
 }
 
-# rp NAME [ARGS...]: run rpi-pull with the test's URLs, key and state dir
+# rp NAME [ARGS...]: run rpi-pull for host neptun (the fixtures' system name; --host is
+# required) with the test's URLs, key and state dir
 # (snapshots profile and state for `untouched`).
 rp() {
     local name="$1"
     shift
     PROFILE_BEFORE=$(readlink "$T/pi/nix/var/nix/profiles/system")
     SEQ_BEFORE=$(cat "$STATE/seq" 2>/dev/null || echo none)
-    run_cmd "$name" -- bash "$RPI_PULL_SRC" --pointer-url https://x/neptun.json \
+    run_cmd "$name" -- bash "$RPI_PULL_SRC" --pointer-url https://x/neptun.json --host neptun \
         --cache-url "$CACHE" --cache-key "$KEY" --state-dir "$STATE" "$@"
 }
 
@@ -241,7 +242,7 @@ expect_grepf "p1 usage: exit 32 covers content-addressed" "content-addressed" "$
 
 for missing in --pointer-url --cache-url --cache-key; do
     fresh
-    args=(--pointer-url https://x/neptun.json --cache-url "$CACHE" --cache-key "$KEY" --state-dir "$STATE")
+    args=(--pointer-url https://x/neptun.json --host neptun --cache-url "$CACHE" --cache-key "$KEY" --state-dir "$STATE")
     for i in "${!args[@]}"; do
         [[ "${args[$i]:-}" == "$missing" ]] && unset "args[$i]" "args[$((i + 1))]"
     done
@@ -249,6 +250,18 @@ for missing in --pointer-url --cache-url --cache-key; do
     expect_exit "p1 missing $missing -> 2" 2
     expect_eq "p1 missing $missing: nothing fetched" 0 "$(log_count '^curl ')"
 done
+
+# --host has no default: the module always passes system.name, and a default
+# would name somebody's host in library code (check personal-values).
+fresh
+run_cmd p1-nohost -- bash "$RPI_PULL_SRC" --pointer-url https://x/neptun.json \
+    --cache-url "$CACHE" --cache-key "$KEY" --state-dir "$STATE"
+expect_exit "p1 no --host -> 2" 2
+expect_grepf "p1 no --host: names --host" "--host" "$ERR"
+expect_eq "p1 no --host: nothing fetched" 0 "$(log_count '^curl ')"
+run_cmd p1-help -- bash "$RPI_PULL_SRC" --help
+expect_not_grep "p1 usage names no default host" "default neptun" "$OUT"
+expect_grep "p1 usage: --host is required" "--host NAME .*required" "$OUT"
 
 fresh
 rp p1-unknown --frobnicate
@@ -852,7 +865,7 @@ fresh
 : >"$T/not-a-dir"
 for sd in "$T/not-a-dir" /proc/rpi-pull-unit-x; do
     fresh
-    run_cmd "p18 state dir $sd" -- bash "$RPI_PULL_SRC" --pointer-url https://x/neptun.json \
+    run_cmd "p18 state dir $sd" -- bash "$RPI_PULL_SRC" --pointer-url https://x/neptun.json --host neptun \
         --cache-url "$CACHE" --cache-key "$KEY" --state-dir "$sd"
     expect_exit "p18 state dir $sd unusable -> 1" 1
     expect_grepf "p18 state dir $sd unusable: says why" "cannot open $sd/lock" "$ERR"

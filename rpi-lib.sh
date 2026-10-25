@@ -9,9 +9,9 @@
 #
 # Globals (set before sourcing or before calling; defaults shown):
 #   RL_FLAKE      flake directory or ref              ($PWD)
-#   RL_ATTR       nixosConfigurations attribute       (rpi)
-#   RL_TARGET     ssh target of the Pi                (root@neptun)
-#   RL_SSH_PORT   sshd port of the Pi                 (2222)
+#   RL_ATTR       nixosConfigurations attribute       (rpi: the template host)
+#   RL_TARGET     ssh target of the Pi                (root@rpi: rpi.deploy.target default)
+#   RL_SSH_PORT   sshd port of the Pi                 (22: rpi.ssh.port default)
 #   RL_SSH_OPTS   extra ssh options, word-split       ($RPI_SSH_OPTS)
 #   RL_CACHE_URL  cache that must hold the kernel     ($RPI_CACHE_URL or nvmd's cachix)
 #   RPI_NIXOS_REBUILD  nixos-rebuild executable; default: the flake's
@@ -19,8 +19,8 @@
 
 RL_FLAKE=${RL_FLAKE:-$PWD}
 RL_ATTR=${RL_ATTR:-rpi}
-RL_TARGET=${RL_TARGET:-root@neptun}
-RL_SSH_PORT=${RL_SSH_PORT:-2222}
+RL_TARGET=${RL_TARGET:-root@rpi}
+RL_SSH_PORT=${RL_SSH_PORT:-22}
 RL_SSH_OPTS=${RL_SSH_OPTS:-${RPI_SSH_OPTS:-}}
 RL_CACHE_URL=${RL_CACHE_URL:-${RPI_CACHE_URL:-https://nixos-raspberrypi.cachix.org}}
 

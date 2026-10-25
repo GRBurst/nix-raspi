@@ -2,7 +2,7 @@
 #
 # rpi-pull — apply the system CI published for this Pi. Runs on the Pi as
 # root (rpi-pull.service, modules/pull-update.nix): fetches the pointer
-# (nixos/deploy/<host>.json), checks it, realises the closure from our
+# (deploy/<host>.json), checks it, realises the closure from our
 # cache and activates it. Spec: docs/superpowers/specs/
 # 2026-10-23-ci-pull-updates-design.md §3.4; plan §15.1, §17.
 #
@@ -15,7 +15,7 @@ set -uo pipefail
 usage() {
     cat <<'EOF'
 usage: rpi-pull --pointer-url URL --cache-url URL --cache-key KEY
-                [--host NAME] [--state-dir DIR] [--reboot-time HH:MM]
+                --host NAME [--state-dir DIR] [--reboot-time HH:MM]
                 [--max-age-days N]
 
 Applies the system in the pointer at URL if its seq is newer than the last
@@ -28,7 +28,7 @@ is activated for the next boot, with a reboot scheduled at --reboot-time.
 A pointer built more than --max-age-days ago means CI has stalled: exit 39
 (after the run has otherwise succeeded).
 
-  --host NAME         system name in the store path (default neptun)
+  --host NAME         system name in the store path (required; the module passes system.name)
   --state-dir DIR     the lock, the applied seq and store-path, and last-run
                       ("time=<UTC> exit=<code> result=<word>", every run that
                       got the lock) (default /var/lib/rpi-pull)
@@ -58,7 +58,7 @@ die() {
 
 SEQ_RE='^[1-9][0-9]{0,9}$'
 
-POINTER_URL="" CACHE_URL="" CACHE_KEY="" HOST=neptun STATE=/var/lib/rpi-pull
+POINTER_URL="" CACHE_URL="" CACHE_KEY="" HOST="" STATE=/var/lib/rpi-pull
 REBOOT_TIME=06:30 MAX_AGE_DAYS=21
 STORE="${RPI_PULL_STORE:-/nix/store}"
 
@@ -83,8 +83,8 @@ rp_parse_args() {
         esac
         shift
     done
-    [[ -n "$POINTER_URL" && -n "$CACHE_URL" && -n "$CACHE_KEY" ]] ||
-        die 2 "--pointer-url, --cache-url and --cache-key are required (see --help)"
+    [[ -n "$POINTER_URL" && -n "$CACHE_URL" && -n "$CACHE_KEY" && -n "$HOST" ]] ||
+        die 2 "--pointer-url, --cache-url, --cache-key and --host are required (see --help)"
     [[ "$HOST" =~ ^[A-Za-z0-9_-]+$ ]] || die 2 "invalid --host: '$HOST'"
     [[ "$REBOOT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] ||
         die 2 "invalid --reboot-time: '$REBOOT_TIME' (HH:MM)"

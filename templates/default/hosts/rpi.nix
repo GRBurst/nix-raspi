@@ -16,7 +16,7 @@
 
   # Identity (NixOS options, defaults "rpi" / "UTC" / "en_US.UTF-8" / "us"):
   # networking.hostName = "rpi";
-  # time.timeZone = "Europe/Berlin";
+  # time.timeZone = "America/New_York";
   # i18n.defaultLocale = "en_US.UTF-8";
   # console.keyMap = "us";
 

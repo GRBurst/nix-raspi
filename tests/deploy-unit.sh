@@ -203,7 +203,9 @@ expect_eq "r4 rl_fp_changed names the differing parts once" "kernel, fat" "$(cat
 RL_SSH_PORT=22 RPI_SSH_OPTS="-F x" run_cmd r5 -- lib rl_sshopts
 expect_eq "r5 rl_sshopts" "-p 22 -F x" "$(cat "$OUT")"
 run_cmd r5 -- lib rl_sshopts
-expect_eq "r5 rl_sshopts default port" "-p 2222" "$(cat "$OUT")"
+expect_eq "r5 rl_sshopts default port is rpi.ssh.port's default" "-p 22" "$(cat "$OUT")"
+run_cmd r5 -- lib eval 'echo "$RL_ATTR $RL_TARGET $RL_SSH_PORT"'
+expect_eq "r5 library defaults are the options' defaults, no host of ours" "rpi root@rpi 22" "$(cat "$OUT")"
 
 # Boot fingerprints: fake toplevels (tests/make-sys.sh) whose FAT inputs come
 # through nvmd's real builder templates; the fake store is $FX_STORE.
@@ -274,7 +276,7 @@ reset_log
 run_cmd fp7 -- lib rl_fp_remote /run/booted-system
 expect_exit "fp7 rl_fp_remote succeeds" 0
 expect_eq "fp7 remote fingerprint = local one of the same system" "$(fp sysA)" "$(cat "$OUT")"
-expect_eq "fp7 one ssh call" 1 "$(log_count '^ssh -p 2222 root@neptun bash -s -- /run/booted-system /nix/store$')"
+expect_eq "fp7 one ssh call" 1 "$(log_count '^ssh -p 22 root@rpi bash -s -- /run/booted-system /nix/store$')"
 run_cmd fp8 -- lib rl_fp_remote /run/no-such-system
 expect_true "fp8 remote failure -> non-zero" test "$RC" -ne 0
 
@@ -283,7 +285,7 @@ exit 0
 EOF
 reset_log
 RPI_SSH_OPTS="-F x -o A=b" run_cmd r7 -- lib rl_ssh true
-expect_eq "r7 rl_ssh argv" "ssh -p 2222 -F x -o A=b root@neptun true" "$(cat "$MOCK_LOG")"
+expect_eq "r7 rl_ssh argv" "ssh -p 22 -F x -o A=b root@rpi true" "$(cat "$MOCK_LOG")"
 
 # x1: rpi-fp.sh is the Pi-safe half of the lib (D1, P12): the fingerprint
 # functions and nothing host-only. Sourced alone, in a fresh shell.

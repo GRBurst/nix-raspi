@@ -3,13 +3,13 @@
 # Import via the flake output (preferred — provides the rpi-deploy package:
 # `rpi-deploy image/flash/deploy/status`):
 #
-#   inputs.pi = { url = "git+file:///home/pallon/projects/pi"; flake = true; };
+#   inputs.rpi.url = "github:GRBurst/nix-raspi";
 #   ...
 #   modules = [
-#     inputs.pi.nixosModules.rpiBuildHost
+#     inputs.rpi.nixosModules.rpiBuildHost
 #     {
 #       rpi.buildHost.enable = true;
-#       rpi.buildHost.flakePath = "/home/pallon/projects/pi";
+#       rpi.buildHost.flakePath = "/home/alice/projects/my-pi";
 #     }
 #   ];
 #
@@ -64,7 +64,7 @@ in
     flakePath = lib.mkOption {
       type = lib.types.str;
       default = "";
-      example = "/home/alice/projects/pi";
+      example = "/home/alice/projects/my-pi";
       description = ''
         If set, the installed `rpi-deploy` wrapper pre-sets `RPI_FLAKE` to
         this path, so `rpi-deploy image` / `rpi-deploy deploy` work without

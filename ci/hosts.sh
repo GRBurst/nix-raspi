@@ -6,7 +6,7 @@
 #   ci/hosts.sh [--flake DIR]
 #
 # stdout: `hosts=<JSON array of names, sorted>` (for $GITHUB_OUTPUT), e.g.
-# hosts=["neptun"]; no Pi host: hosts=[] and a notice (the build job is
+# hosts=["garden","rpi"]; no Pi host: hosts=[] and a notice (the build job is
 # skipped). Logs on stderr (annotations under GitHub Actions, ci/gh.sh).
 # Exit: 0 | 2 usage | 13 evaluation error (rpi-lib.sh rl_hosts).
 #
