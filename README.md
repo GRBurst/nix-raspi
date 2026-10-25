@@ -86,7 +86,7 @@ On a NixOS host, in its configuration:
 
 ```nix
 boot.binfmt.emulatedSystems = [ "aarch64-linux" ];  # aarch64 emulation (qemu user mode)
-nix.settings.trusted-users = [ "root" "pallon" ];   # honour the flake's nvmd cache
+nix.settings.trusted-users = [ "root" "<your user>" ];   # honour the flake's nvmd cache
 ```
 
 - **aarch64 emulation.** The nixpkgs binfmt module registers the qemu handler,
@@ -199,9 +199,9 @@ root.
 
 The image: two partitions on an MBR, found by **label**, disk id `0x2175794e`.
 
-| partition | size    | fs    | label        | mounted at       | holds                                   |
-|-----------|---------|-------|--------------|------------------|-----------------------------------------|
-| p1        | 256 MiB | FAT32 | `NIXOS_BOOT` | `/boot/firmware` | Pi firmware, `config.txt`, U-Boot, DTBs |
+| partition | size    | fs    | label        | mounted at       | holds                                      |
+| --------- | ------- | ----- | ------------ | ---------------- | ------------------------------------------ |
+| p1        | 256 MiB | FAT32 | `NIXOS_BOOT` | `/boot/firmware` | Pi firmware, `config.txt`, U-Boot, DTBs    |
 | p2        | rest    | ext4  | `NIXOS_SD`   | `/`              | system, `/boot` (kernel, initrd, extlinux) |
 
 Kernels and initrds live on the ext4 root (U-Boot reads them there), so the
@@ -242,11 +242,11 @@ rpi-deploy status [--target USER@HOST] [--port N]
 root@neptun`. Never the host's own `nixos-rebuild`: a newer one half-applies
 on the Pi (it passes a `systemd-run` flag the Pi's systemd lacks; E3).
 
-| action   | effect |
-|----------|--------|
-| `switch` (default) | build, copy, make it the boot default and activate now; prints `status` afterwards |
-| `boot`   | make it the boot default, activate at the next reboot (use for kernel or firmware changes; `status` then shows `reboot pending: yes`) |
-| `test`   | activate now, boot default unchanged (gone after a reboot) |
+| action             | effect                                                                                                                                |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `switch` (default) | build, copy, make it the boot default and activate now; prints `status` afterwards                                                    |
+| `boot`             | make it the boot default, activate at the next reboot (use for kernel or firmware changes; `status` then shows `reboot pending: yes`) |
+| `test`             | activate now, boot default unchanged (gone after a reboot)                                                                            |
 
 After every deploy (also a failed one) the Pi runs `sync`: switch and boot
 rewrite the vfat `NIXOS_BOOT` partition, and `switch-to-configuration` only
@@ -480,13 +480,13 @@ URL is accepted for the qemu smoke test only (warning).
 
 ### Operating it
 
-| what | how |
-|------|-----|
-| build and publish now | Actions → `neptun` → *Run workflow*; tick `update-lock` to also update `nixpkgs`/`nixos-raspberrypi` (`gh workflow run neptun.yml -f update-lock=true`) |
-| apply on the Pi now | `ssh -p 2222 root@neptun systemctl start rpi-pull` (blocks until done; ≤ 2 h) |
-| logs | `ssh -p 2222 root@neptun journalctl -u rpi-pull` |
-| timer | `ssh -p 2222 root@neptun systemctl list-timers rpi-pull` |
-| state | `rpi-deploy status`: `pull applied: seq N <path> (3h ago)` (applied 3h ago) or `pull applied: none`; `pull last run: <result> (exit N) at <time>` or `never`; `pull: disabled` (no unit: the Pi runs a system without the timer); `pull: unknown` (query failed) |
+| what                  | how                                                                                                                                                                                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| build and publish now | Actions → `neptun` → *Run workflow*; tick `update-lock` to also update `nixpkgs`/`nixos-raspberrypi` (`gh workflow run neptun.yml -f update-lock=true`)                                                                                                          |
+| apply on the Pi now   | `ssh -p 2222 root@neptun systemctl start rpi-pull` (blocks until done; ≤ 2 h)                                                                                                                                                                                    |
+| logs                  | `ssh -p 2222 root@neptun journalctl -u rpi-pull`                                                                                                                                                                                                                 |
+| timer                 | `ssh -p 2222 root@neptun systemctl list-timers rpi-pull`                                                                                                                                                                                                         |
+| state                 | `rpi-deploy status`: `pull applied: seq N <path> (3h ago)` (applied 3h ago) or `pull applied: none`; `pull last run: <result> (exit N) at <time>` or `never`; `pull: disabled` (no unit: the Pi runs a system without the timer); `pull: unknown` (query failed) |
 
 **Semantics worth knowing.**
 
@@ -544,16 +544,17 @@ extlinux entries stay until the next install but no longer boot):
   extlinux menu. Once it is up, make it permanent:
   `nix-env -p /nix/var/nix/profiles/system --switch-generation N` then
   `/nix/var/nix/profiles/system/bin/switch-to-configuration boot`.
+
 - *From the host*: put the card in the host and edit the default entry on the
   root partition:
-
+  
   ```sh
   sudo mount /dev/disk/by-label/NIXOS_SD /mnt
   grep -E '^(DEFAULT|LABEL)' /mnt/boot/extlinux/extlinux.conf      # labels nixos-default, nixos-N-default
   sudo sed -i 's/^DEFAULT .*/DEFAULT nixos-N-default/' /mnt/boot/extlinux/extlinux.conf
   sudo umount /mnt
   ```
-
+  
   (The file is regenerated by the next successful switch.)
 
 Both recoveries rely on U-Boot's extlinux handling and are not exercised on hardware yet
@@ -625,11 +626,13 @@ on the disk before the first boot with it):
 
 1. Format the disk **on the Pi or the host**: `mkfs.ext4 -L PI_DATA /dev/sdX1`
    (DESTROYS it). Plug it into the Pi.
+
 2. Set `rpi.storage.external.enable = true;` in `configuration.nix`, commit,
    `rpi-deploy deploy boot` (activates nothing yet).
+
 3. On the Pi, copy the data (services that write to `/var` should be quiet;
    repeat the `rsync` right before the reboot):
-
+   
    ```sh
    ssh -p 2222 root@neptun
    RSYNC=$(nix build --no-link --print-out-paths nixpkgs#rsync)/bin/rsync   # fetch it before the store goes quiet
@@ -638,9 +641,10 @@ on the disk before the first boot with it):
    for d in nix var home; do mkdir -p /mnt/data/$d; $RSYNC -aHAXx --numeric-ids /$d/ /mnt/data/$d/; done
    sync; umount /mnt/data
    ```
-
+   
    For a fully consistent copy, power the Pi off and run the same `rsync`
    from the host with the card's `NIXOS_SD` and the disk mounted.
+
 4. `ssh -p 2222 root@neptun reboot`; afterwards `findmnt /external /nix`.
 
 The old copies of `/nix`, `/var` and `/home` stay on the SD underneath the bind
@@ -731,17 +735,17 @@ nix flake check --accept-flake-config        # all checks incl. the VM test, ~2 
 nix build .#checks.x86_64-linux.eval-kernel  # one check
 ```
 
-| layer | check | cost |
-|-------|-------|------|
-| eval checks (option values and their effects: kernel identity, image, access, GC/extlinux, sd-wear, headless, external storage, tools, build host, pull module) | `eval-<name>` from `tests/eval/<name>.nix` (`eval-pull-update`: defaults, timer, units, substituter and key, the disabled-until-set rule) | seconds |
-| unit tests, mocked nix/ssh/sudo/lsblk/dd/nixos-rebuild/curl/cachix, real git/zstd/flock | `rpi-deploy-unit` (host tool), `rpi-pull-unit` (every `rpi-pull` path), `rpi-ci-unit` (`ci/*.sh`: build, publish order, pointer, commit and rebase) | ~10–60 s each; auto-discovered from `tests/<n>-unit.sh` |
-| bash syntax + shellcheck (every `*.sh` outside `tests/`, incl. `ci/`) | `rpi-deploy-syntax` | seconds |
-| the same unit tests and shellcheck for `aarch64-linux`: CI runs them before it publishes (on x86_64 `nix flake check` omits them as an incompatible system) | `checks.aarch64-linux.rpi-{deploy-syntax,pull-unit,ci-unit,deploy-unit}` | ~1–3 min on the arm runner [?] |
-| lint of the workflow (+ shellcheck on its `run:` steps); step order build → unit checks → push + pin → pointer → commit; actions pinned by commit SHA, no secrets handed to an action, dependabot entry | `actionlint` | seconds |
-| NixOS VM test of the build-host module (binfmt, aarch64 `hello`, the `rpi-deploy` wrapper) | `rpi-host-vm` | 1–16 min (half a minute of test script once built) |
-| qemu `raspi3b` boot of the real image + SSH banner over usb-net | `tests/boot-smoke.sh IMAGE.img.zst` | ~4–6 min |
-| qemu deploy: boot the image, `rpi-deploy deploy switch`, verify | `tests/deploy-smoke.sh` | ~20–30 min (image build ~10 min of it, cached on re-runs) |
-| qemu pull: boot an image with a throwaway cache key, serve a signed local cache and a pointer over HTTP, let the guest's `rpi-pull.service` apply it (switch path, with a changed unit), then refuse a pointer signed by a foreign key (exit 32) | `tests/pull-smoke.sh` | ~28 min (1656 s measured, image rebuilt) |
+| layer                                                                                                                                                                                                                                            | check                                                                                                                                               | cost                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| eval checks (option values and their effects: kernel identity, image, access, GC/extlinux, sd-wear, headless, external storage, tools, build host, pull module)                                                                                  | `eval-<name>` from `tests/eval/<name>.nix` (`eval-pull-update`: defaults, timer, units, substituter and key, the disabled-until-set rule)           | seconds                                                   |
+| unit tests, mocked nix/ssh/sudo/lsblk/dd/nixos-rebuild/curl/cachix, real git/zstd/flock                                                                                                                                                          | `rpi-deploy-unit` (host tool), `rpi-pull-unit` (every `rpi-pull` path), `rpi-ci-unit` (`ci/*.sh`: build, publish order, pointer, commit and rebase) | ~10–60 s each; auto-discovered from `tests/<n>-unit.sh`   |
+| bash syntax + shellcheck (every `*.sh` outside `tests/`, incl. `ci/`)                                                                                                                                                                            | `rpi-deploy-syntax`                                                                                                                                 | seconds                                                   |
+| the same unit tests and shellcheck for `aarch64-linux`: CI runs them before it publishes (on x86_64 `nix flake check` omits them as an incompatible system)                                                                                      | `checks.aarch64-linux.rpi-{deploy-syntax,pull-unit,ci-unit,deploy-unit}`                                                                            | ~1–3 min on the arm runner [?]                            |
+| lint of the workflow (+ shellcheck on its `run:` steps); step order build → unit checks → push + pin → pointer → commit; actions pinned by commit SHA, no secrets handed to an action, dependabot entry                                          | `actionlint`                                                                                                                                        | seconds                                                   |
+| NixOS VM test of the build-host module (binfmt, aarch64 `hello`, the `rpi-deploy` wrapper)                                                                                                                                                       | `rpi-host-vm`                                                                                                                                       | 1–16 min (half a minute of test script once built)        |
+| qemu `raspi3b` boot of the real image + SSH banner over usb-net                                                                                                                                                                                  | `tests/boot-smoke.sh IMAGE.img.zst`                                                                                                                 | ~4–6 min                                                  |
+| qemu deploy: boot the image, `rpi-deploy deploy switch`, verify                                                                                                                                                                                  | `tests/deploy-smoke.sh`                                                                                                                             | ~20–30 min (image build ~10 min of it, cached on re-runs) |
+| qemu pull: boot an image with a throwaway cache key, serve a signed local cache and a pointer over HTTP, let the guest's `rpi-pull.service` apply it (switch path, with a changed unit), then refuse a pointer signed by a foreign key (exit 32) | `tests/pull-smoke.sh`                                                                                                                               | ~28 min (1656 s measured, image rebuilt)                  |
 
 The smoke tests are not part of `nix flake check` (qemu TCG, minutes). All
 need `qemu-system-aarch64` with `-M raspi3b` (`nix shell nixpkgs#qemu`),
