@@ -1,11 +1,14 @@
 # Pi pull updates (rpi.pull.*): CI builds the system and publishes a pointer
-# (deploy/<host>.json) plus the closure in our self-signed Cachix
-# cache; a timer on the Pi runs `rpi-pull` (rpi-pull.sh), which verifies the
-# pointer and activates the system. Spec addendum 2026-10-23 §3.1, §3.4.
+# (deploy/<host>.json) plus the closure in a self-signed Cachix cache; a
+# timer on the Pi runs `rpi-pull` (rpi-pull.sh), which verifies the pointer
+# and activates the system. Spec addendum 2026-10-23 §3.1, §3.4;
+# reusable-library spec §4.
 #
-# Enabled by default once pointerUrl, cacheUrl and cachePublicKey are set;
-# configuration.nix sets the pointer URL and takes the cache from keys.nix
-# (`cache = { name; publicKey; }`).
+# A host sets `rpi.pull.repo = "<owner>/<repo>"` (the pointer URL follows
+# from it, the branch and the host name) and, once the cache exists,
+# `rpi.pull.cache = { name; publicKey; }` (gives cacheUrl and
+# cachePublicKey). Enabled by default once pointerUrl, cacheUrl and
+# cachePublicKey are set.
 {
   config,
   lib,
@@ -15,6 +18,7 @@
 }: let
   cfg = config.rpi.pull;
   url = lib.types.nullOr (lib.types.strMatching "https?://.+");
+  publicKey = lib.types.strMatching "[^:]+:[A-Za-z0-9+/]{43}=";
   stateDir = "/var/lib/rpi-pull";
 
   settings = {
@@ -47,6 +51,45 @@
   };
 in {
   options.rpi.pull = {
+    repo = lib.mkOption {
+      type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+");
+      default = null;
+      example = "<owner>/<repo>";
+      description = ''
+        GitHub repository (`owner/name`) whose CI commits this host's pointer
+        file; `pointerUrl` follows from it. `null`: no pointer, no pull.
+      '';
+    };
+
+    branch = lib.mkOption {
+      type = lib.types.str;
+      default = "main";
+      description = "Branch of `repo` that holds the pointer files.";
+    };
+
+    cache = lib.mkOption {
+      type = lib.types.nullOr (lib.types.submodule {
+        options = {
+          name = lib.mkOption {
+            type = lib.types.strMatching "[a-z0-9][a-z0-9-]*";
+            example = "<cache>";
+            description = "Cachix cache name (`https://<name>.cachix.org`).";
+          };
+          publicKey = lib.mkOption {
+            type = publicKey;
+            example = "<cache>.cachix.org-1:<43 base64 characters>=";
+            description = "The cache's public signing key.";
+          };
+        };
+      });
+      default = null;
+      description = ''
+        Self-signed Cachix cache CI publishes this host's system to; sets
+        `cacheUrl` and `cachePublicKey` (and tells CI where to push).
+        `null`: CI builds and tests the host but publishes nothing.
+      '';
+    };
+
     enable = lib.mkOption {
       type = lib.types.bool;
       default = cfg.pointerUrl != null && cfg.cacheUrl != null && cfg.cachePublicKey != null;
@@ -56,7 +99,13 @@ in {
 
     pointerUrl = lib.mkOption {
       type = url;
-      default = null;
+      # Keyed on the host's own name (system.name = networking.hostName), as
+      # rpi-pull's --host and the pointer file CI writes.
+      default =
+        if cfg.repo == null then null
+        else "https://raw.githubusercontent.com/${cfg.repo}/${cfg.branch}/deploy/${config.system.name}.json";
+      defaultText = lib.literalExpression
+        ''if repo == null then null else "https://raw.githubusercontent.com/''${repo}/''${branch}/deploy/''${config.system.name}.json"'';
       example = "https://raw.githubusercontent.com/<owner>/<repo>/main/deploy/<host>.json";
       description = ''
         URL of the pointer file CI commits (`{ seq, storePath, narHash, rev,
@@ -72,7 +121,7 @@ in {
     };
 
     cachePublicKey = lib.mkOption {
-      type = lib.types.nullOr (lib.types.strMatching "[^:]+:[A-Za-z0-9+/]{43}=");
+      type = lib.types.nullOr publicKey;
       default = null;
       example = "<cache>.cachix.org-1:<43 base64 characters>=";
       description = ''
@@ -114,14 +163,19 @@ in {
     {
       # A10: a partial setup would leave rpi.pull silently off.
       warnings = lib.optional (partial && !cfg.enable)
-        "rpi.pull stays disabled: ${lib.concatMapStringsSep ", " (n: "rpi.pull.${n}") unset} not set (keys.nix `cache` gives cacheUrl and cachePublicKey).";
+        "rpi.pull stays disabled: ${lib.concatMapStringsSep ", " (n: "rpi.pull.${n}") unset} not set (rpi.pull.cache gives cacheUrl and cachePublicKey).";
     }
+
+    (lib.mkIf (cfg.cache != null) {
+      rpi.pull.cacheUrl = lib.mkDefault "https://${cfg.cache.name}.cachix.org";
+      rpi.pull.cachePublicKey = lib.mkDefault cfg.cache.publicKey;
+    })
 
     (lib.mkIf cfg.enable {
       assertions = [
         {
           assertion = unset == [ ];
-          message = "rpi.pull.enable needs rpi.pull.pointerUrl, rpi.pull.cacheUrl and rpi.pull.cachePublicKey (keys.nix `cache`).";
+          message = "rpi.pull.enable needs rpi.pull.pointerUrl, rpi.pull.cacheUrl and rpi.pull.cachePublicKey (rpi.pull.repo and rpi.pull.cache).";
         }
       ];
     })

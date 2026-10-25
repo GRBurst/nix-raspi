@@ -60,18 +60,14 @@ in {
   };
 
   # Pull updates (modules/pull-update.nix): CI builds this system weekly and
-  # commits the pointer; rpi-pull applies it. On once keys.nix has `cache`
-  # (the cache also becomes a substituter with its key).
-  rpi.pull = lib.mkMerge [
-    {
-      pointerUrl = "https://raw.githubusercontent.com/GRBurst/nix-raspi/main/deploy/neptun.json";
-    }
+  # commits the pointer (deploy/<hostName>.json of repo); rpi-pull applies
+  # it. On once keys.nix has `cache` (the cache also becomes a substituter
+  # with its key).
+  rpi.pull = {
+    repo = "GRBurst/nix-raspi";
     # `or null`: test overrides of rpiKeys may lack the attribute
-    (lib.mkIf ((keys.cache or null) != null) {
-      cacheUrl = "https://${keys.cache.name}.cachix.org";
-      cachePublicKey = keys.cache.publicKey;
-    })
-  ];
+    cache = keys.cache or null;
+  };
   # `nix shell nixpkgs#…` / <nixpkgs> on the Pi use the system's own nixpkgs
   # (already in the store, cache hits).
   nixpkgs.flake = {

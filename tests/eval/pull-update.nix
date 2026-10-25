@@ -2,7 +2,7 @@
 # A6, A10): rpi.pull options, units, package, substituter and key.
 # Reads option values of `rpi` and of extended copies of it; never forces
 # the toplevel.
-{ lib, rpi, ... }:
+{ lib, rpi, rpiLib, fixtures, ... }:
 let
   keys = import ../../keys.nix;
   # Test key: syntactically valid, not any real cache's key (A10).
@@ -48,8 +48,65 @@ let
   # failedAssertion SYSTEM NEEDLE: some assertion mentioning NEEDLE fails.
   failedAssertion = sys: needle:
     lib.any (a: !a.assertion && lib.hasInfix needle a.message) sys.config.assertions;
+
+  # --- rpi.pull.repo / branch / cache on the fixture host (lib.mkPi) ---
+  fixture = extra: rpiLib.mkPi { modules = [ (fixtures + "/hosts/minimal.nix") ] ++ extra; };
+  fx = fixture [ ];
+  fxPull = extra: (fixture extra).config.rpi.pull;
+  fxOpts = fx.options.rpi.pull;
+  # P4: (repo, branch, hostName); branch null = the default
+  urlTable = [
+    { repo = "o/r"; branch = null; host = "rpi"; }
+    { repo = "o/r"; branch = "dev"; host = "garden"; }
+    { repo = "a-b/c.d"; branch = null; host = "neptun"; }
+  ];
+  urlOf = row:
+    (fxPull [
+      { rpi.pull.repo = row.repo; }
+      { networking.hostName = lib.mkIf (row.host != "rpi") row.host; }
+      { rpi.pull.branch = lib.mkIf (row.branch != null) row.branch; }
+    ]).pointerUrl;
+  expectedUrl = row:
+    "https://raw.githubusercontent.com/${row.repo}/${if row.branch == null then "main" else row.branch}/deploy/${row.host}.json";
+  rejects = v: !(builtins.tryEval (builtins.deepSeq v v)).success;
 in
 {
+  # --- reusable library (plan T2.5): repo, branch, cache ---
+  # P4 (hostName != the nixosConfigurations attribute: keyed on the host's
+  # own name, as rpi-pull's --host and CI's pointer file).
+  "pointer URL derives from repo, branch and hostName" =
+    lib.all (row: urlOf row == expectedUrl row) urlTable
+    && fx.config.rpi.pull.repo == null && fx.config.rpi.pull.pointerUrl == null
+    && fx.config.rpi.pull.branch == "main";
+
+  "explicit pointerUrl wins" =
+    (fxPull [ { rpi.pull.repo = "o/r"; rpi.pull.pointerUrl = "https://example.org/p.json"; } ]).pointerUrl
+    == "https://example.org/p.json";
+
+  "cache sets cacheUrl and cachePublicKey" =
+    let c = fxPull [ { rpi.pull.cache = testCache; } ]; in
+    c.cacheUrl == "https://neptun-test.cachix.org" && c.cachePublicKey == testCache.publicKey
+    && fx.config.rpi.pull.cacheUrl == null && fx.config.rpi.pull.cachePublicKey == null;
+
+  # P5 over the four combinations
+  "enabled iff repo and cache are set" =
+    lib.all (r: (fxPull r.mods).enable == r.on) [
+      { mods = [ ]; on = false; }
+      { mods = [ { rpi.pull.repo = "o/r"; } ]; on = false; }
+      { mods = [ { rpi.pull.cache = testCache; } ]; on = false; }
+      { mods = [ { rpi.pull.repo = "o/r"; rpi.pull.cache = testCache; } ]; on = true; }
+    ];
+
+  "repo must be owner/name" =
+    let ok = fxOpts.repo.type.check; in
+    ok "o/r" && ok "a-b/c.d" && ok "GRB_1/nix-raspi"
+    && !(lib.any ok [ "https://github.com/o/r" "o" "o/r/x" "o r/x" "" ]);
+
+  "cache needs a cache name and a name:base64 public key" =
+    rejects (fxPull [ { rpi.pull.cache = { name = "x"; }; } ]).cache
+    && rejects (fxPull [ { rpi.pull.cache = testCache // { name = "Bad Name"; }; } ]).cache
+    && rejects (fxPull [ { rpi.pull.cache = testCache // { publicKey = "x"; }; } ]).cache;
+
   # --- Task 6.1: options, disabled by default ---
   "disabled without cache key or pointer URL (no units)" =
     !off.config.rpi.pull.enable
@@ -60,8 +117,11 @@ in
   "enable follows pointerUrl, cacheUrl and cachePublicKey" =
     p.enable == (p.pointerUrl != null && p.cacheUrl != null && p.cachePublicKey != null);
 
+  # pointerUrl's default is now derived from rpi.pull.repo (plan T2.5): read
+  # on the fixture host (no repo), not on `rpi` (which sets one).
   "option defaults: URLs and key null, daily 05:00, reboot 06:30 (after the 05:00 run window), 21 days" =
-    opts.pointerUrl.default == null && opts.cacheUrl.default == null
+    fxOpts.pointerUrl.default == null && opts.cacheUrl.default == null
+    && opts.repo.default == null && opts.branch.default == "main" && opts.cache.default == null
     && opts.cachePublicKey.default == null
     && opts.onCalendar.default == "*-*-* 05:00"
     && opts.rebootTime.default == "06:30"
