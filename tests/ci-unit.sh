@@ -1031,6 +1031,16 @@ expect_grepf "r3 eval error is passed through" "error: hosts eval failed" "$ERR"
 MOCK_HOSTS='[]' run_cmd r4 -- bash "$CI_DIR/rpi-ci.sh" hosts --flake "$T/b"
 expect_exit "r4 no Pi host -> exit 0" 0
 expect_eq "r4 no Pi host -> hosts=[]" 'hosts=[]' "$(cat "$OUT")"
+# hs1: nothing to build is not an error, but says so (the build job is skipped)
+expect_exit "hs1 no Pi host -> exit 0" 0
+expect_grepf "hs1 no Pi host -> notice" \
+    "rpi-ci: notice: no Pi hosts (lib.mkPi) in nixosConfigurations" "$ERR"
+MOCK_HOSTS='[]' GITHUB_ACTIONS=true run_cmd hs1g -- bash "$CI_DIR/rpi-ci.sh" hosts --flake "$T/b"
+expect_grepf "hs1 under GitHub Actions -> ::notice::" \
+    "::notice::no Pi hosts (lib.mkPi) in nixosConfigurations" "$ERR"
+expect_eq "hs1 under GitHub Actions: stdout is only hosts=[]" 'hosts=[]' "$(cat "$OUT")"
+MOCK_HOSTS='["neptun"]' run_cmd hs1n -- bash "$CI_DIR/rpi-ci.sh" hosts --flake "$T/b"
+expect_not_grep "hs1 hosts -> no notice" "notice" "$ERR"
 run_cmd r4h -- bash "$CI_DIR/hosts.sh" --help
 expect_exit "r4 hosts --help" 0
 run_cmd r4u -- bash "$CI_DIR/hosts.sh" --frob

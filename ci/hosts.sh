@@ -6,7 +6,8 @@
 #   ci/hosts.sh [--flake DIR]
 #
 # stdout: `hosts=<JSON array of names, sorted>` (for $GITHUB_OUTPUT), e.g.
-# hosts=["neptun"]; no Pi host: hosts=[]. Logs on stderr.
+# hosts=["neptun"]; no Pi host: hosts=[] and a notice (the build job is
+# skipped). Logs on stderr (annotations under GitHub Actions, ci/gh.sh).
 # Exit: 0 | 2 usage | 13 evaluation error (rpi-lib.sh rl_hosts).
 #
 # DIR defaults to the working directory; RPI_LIB overrides the path of
@@ -38,6 +39,9 @@ done
 
 # shellcheck source=../rpi-lib.sh
 source "${RPI_LIB:-$HERE/../rpi-lib.sh}"
+# shellcheck source=gh.sh
+source "$HERE/gh.sh"
 
 names="$(rl_hosts "$dir")" || exit $?
+[[ -n "$names" ]] || gh_notice "no Pi hosts (lib.mkPi) in nixosConfigurations"
 echo "hosts=$(jq -Rcs 'split("\n") | map(select(. != ""))' <<<"$names")"
