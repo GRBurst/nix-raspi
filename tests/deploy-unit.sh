@@ -1357,7 +1357,24 @@ for f in 'relative/x' '/var/lib/rpi/x y' '/x;reboot' '/var/lib/../../etc/x' '/a/
     expect_eq "sc7 '$f' -> no ssh" 0 "$(log_count '^ssh ')"
 done
 
-# sc8 variable names are read with ${!VAR}: plain names only (no subscript
+# sc15 PSKs come from the environment only, never from rpi-deploy's own
+# variables (globals, locals of the reader; N6)
+for v in HOST_INFO RL_FLAKE RL_ATTR _w_var; do
+    reset_log
+    run_cmd sc15 -- env -u "$v" MOCK_INFO="$(wifi_info "$(jq -cn --arg v "$v" '{n: $v}')")" \
+        bash "$RPI_DEPLOY_SRC" secrets
+    expect_exit "sc15 network -> script variable $v (not in the environment) -> exit 2" 2
+    expect_grepf "sc15 $v is missing" "missing PSK variable $v" "$ERR"
+    expect_eq "sc15 $v -> no ssh" 0 "$(log_count '^ssh ')"
+done
+# exported -> read, with a trailing newline still refused (sc5)
+reset_log
+RL_FLAKE=S3cr3tH0meEnv run_cmd sc15 -- env MOCK_INFO="$(wifi_info '{"n":"RL_FLAKE"}')" bash "$RPI_DEPLOY_SRC" secrets
+expect_exit "sc15 an exported RL_FLAKE is a PSK like any other" 0
+expect_eq "sc15 its value is the environment's" "RL_FLAKE=S3cr3tH0meEnv" "$(cat "$T/ssh.stdin")"
+leaked=$((leaked + $(leaks)))
+
+# sc8 variable names are looked up by name: plain names only (no subscript
 # evaluation)
 for v in 'A[$(touch $MOCK_ROOT/pwned)]' '1X' 'A-B' 'A B'; do
     reset_log

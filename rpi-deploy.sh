@@ -9,6 +9,15 @@
 
 set -euo pipefail
 
+# The environment rpi-deploy was started with, before any assignment of its
+# own: the Wi-Fi PSKs are read from here only, so a network mapped to a
+# script variable (RL_FLAKE, HOST_INFO, ...) never yields its value.
+declare -A RD_ENV=()
+while IFS= read -r -d '' _kv; do
+    if [[ "$_kv" == [A-Za-z_]*=* ]]; then RD_ENV["${_kv%%=*}"]="${_kv#*=}"; fi
+done < <(env -0)
+unset _kv
+
 RPI_LIB="${RPI_LIB:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/rpi-lib.sh}"
 # shellcheck source=rpi-lib.sh
 source "$RPI_LIB"
@@ -167,7 +176,8 @@ wifi_secrets_file() {
 # the environment; lines sorted (LC_ALL=C) and unique (P8). Wi-Fi off, no
 # networks, an invalid name, an unset/empty value or a value with a newline
 # -> exit 2 naming the variable (never its value), before any output. Values
-# only ever pass through printf (a builtin): never argv, never a file.
+# come from RD_ENV (the environment at start) and only ever pass through
+# printf (a builtin): never argv, never a file.
 wifi_env_content() {
     local _w_rows _w_var _w_ssid
     local -a _w_vars _w_problems=()
@@ -187,9 +197,9 @@ wifi_env_content() {
     mapfile -t _w_vars < <(printf '%s=\n' "${!_w_ssid_of[@]}" | LC_ALL=C sort | sed 's/=$//')
     for _w_var in "${_w_vars[@]}"; do
         [[ -n "$_w_var" ]] || continue
-        if [[ -z "${!_w_var:-}" ]]; then
+        if [[ -z "${RD_ENV[$_w_var]:-}" ]]; then
             _w_problems+=("missing PSK variable $_w_var (rpi.wifi.networks.\"${_w_ssid_of[$_w_var]}\")")
-        elif [[ "${!_w_var}" == *$'\n'* ]]; then
+        elif [[ "${RD_ENV[$_w_var]}" == *$'\n'* ]]; then
             _w_problems+=("$_w_var contains a newline")
         fi
     done
@@ -198,7 +208,7 @@ wifi_env_content() {
         exit "$RL_E_USAGE"
     fi
     for _w_var in "${_w_vars[@]}"; do
-        printf '%s=%s\n' "$_w_var" "${!_w_var}"
+        printf '%s=%s\n' "$_w_var" "${RD_ENV[$_w_var]}"
     done
 }
 
