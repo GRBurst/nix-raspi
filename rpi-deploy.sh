@@ -43,7 +43,8 @@ Usage:
            rpi-pull run (result, exit code, time) from /var/lib/rpi-pull
   secrets  write the host's Wi-Fi secrets file (rpi.wifi.secretsFile, mode
            600, handed to the wpa_supplicant user by the host's tmpfiles
-           rule) on the Pi over ssh, then restart wpa_supplicant if it runs:
+           rule) on the Pi over ssh, then (re)start wpa_supplicant if the
+           Pi has it (run it before or after the deploy that enables Wi-Fi):
            one VAR=PSK line per variable named in rpi.wifi.networks, the
            values from the environment (e.g. secretspec run -- rpi-deploy
            secrets); a value is never printed or put on a command line
@@ -193,20 +194,23 @@ wifi_env_content() {
 # existing one, e.g. /etc). The file is written root 0600, then the
 # module's tmpfiles rule (z FILE 0600 wpa_supplicant ...) hands it to the
 # daemon's user; without Wi-Fi deployed yet there is no rule (and no such
-# user) and the next switch applies it. try-restart leaves a stopped unit
-# stopped.
+# user) and the next switch applies it. Then restart, not try-restart: the
+# unit is skipped while the file is missing (ConditionPathExists), and
+# try-restart would leave it stopped; only when the Pi has the unit (Wi-Fi
+# deployed), so `secrets` may run before or after the deploy.
 do_secrets() {
-    local file content
+    local file content unit=wpa_supplicant.service restart
     load_info
     file="$(wifi_secrets_file)" || exit
     content="$(wifi_env_content)" || exit
     resolve_target
+    restart="if systemctl cat $unit >/dev/null 2>&1; then systemctl restart $unit; fi"
     log "writing $file (600) on $RL_TARGET (port $RL_SSH_PORT)"
     # \n: $(...) dropped the last line's newline
     printf '%s\n' "$content" |
-        rl_ssh "mkdir -p -m 700 ${file%/*} && install -m 600 /dev/stdin $file && systemd-tmpfiles --create --prefix=$file && systemctl try-restart wpa_supplicant.service" ||
+        rl_ssh "mkdir -p -m 700 ${file%/*} && install -m 600 /dev/stdin $file && systemd-tmpfiles --create --prefix=$file && $restart" ||
         die_rc "$RL_E_DEPLOY" "writing $file on $RL_TARGET failed"
-    echo "secrets: $file written on $RL_TARGET; wpa_supplicant restarted if it was running"
+    echo "secrets: $file written on $RL_TARGET; wpa_supplicant (re)started if the Pi has it"
 }
 
 # --- subcommands -----------------------------------------------------------

@@ -18,6 +18,10 @@
 { config, lib, pkgs, nixos-raspberrypi, ... }:
 let
   cfg = config.rpi.wifi;
+  # nixpkgs' unit names: one per networking.wireless.interfaces entry, else one
+  units =
+    let ifs = config.networking.wireless.interfaces; in
+    if ifs == [ ] then [ "wpa_supplicant" ] else map (i: "wpa_supplicant-${i}") ifs;
   firmware = nixos-raspberrypi.packages.${pkgs.stdenv.hostPlatform.system}.raspberrypiWirelessFirmware;
 in
 {
@@ -59,6 +63,13 @@ in
         inherit (cfg) secretsFile;
         networks = lib.mapAttrs (_ssid: var: { pskRaw = "ext:${var}"; }) cfg.networks;
       };
+      # nixpkgs bind-mounts the secrets file into the unit (no `-` prefix),
+      # so without the file the unit fails (226/NAMESPACE) and with it a
+      # deploy's switch. Skipped instead until the file exists; `rpi-deploy
+      # secrets` writes it and restarts the unit (final review S2).
+      systemd.services = lib.genAttrs units (_: {
+        unitConfig.ConditionPathExists = cfg.secretsFile;
+      });
       hardware.firmware = lib.mkOverride 49 [ firmware ];
       systemd.tmpfiles.rules = [
         "d /var/lib/rpi 0700 root root -"

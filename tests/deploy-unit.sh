@@ -1179,14 +1179,43 @@ expect_eq "sc1 one line per variable" 2 "$(grep -c . "$T/ssh.stdin")"
 expect_eq "sc1 one ssh call" 1 "$(log_count '^ssh ')"
 expect_grep "sc1 ssh to the host's target and port" "^ssh -p $INFO_PORT $INFO_TARGET " "$MOCK_LOG"
 expect_grepf "sc1 installs stdin as the secrets file, mode 600" "install -m 600 /dev/stdin /var/lib/rpi/wireless.env" "$MOCK_LOG"
-expect_grepf "sc1 restarts wpa_supplicant if running" "systemctl try-restart wpa_supplicant.service" "$MOCK_LOG"
+# S2: restart (not try-restart): it also starts a unit that was skipped
+# (no file yet) or failed; guarded so a Pi without Wi-Fi deployed exits 0
+expect_grepf "sc1 (re)starts wpa_supplicant when the Pi has the unit" \
+    "if systemctl cat wpa_supplicant.service >/dev/null 2>&1; then systemctl restart wpa_supplicant.service; fi" "$MOCK_LOG"
+expect_not_grep "sc1 no try-restart (it leaves a skipped unit stopped)" "try-restart" "$MOCK_LOG"
 expect_grepf "sc1 creates the directory 0700 only if missing" "mkdir -p -m 700 /var/lib/rpi &&" "$MOCK_LOG"
 # B1: wpa_supplicant runs as its own user; the module's tmpfiles rule
 # (z FILE 0600 wpa_supplicant ...) hands the file over, applied right away
 expect_grepf "sc1 applies the module's tmpfiles rule to the file" \
     "systemd-tmpfiles --create --prefix=/var/lib/rpi/wireless.env" "$MOCK_LOG"
 expect_true "sc1 order: dir, install, tmpfiles, restart" grep -qE \
-    'mkdir -p -m 700 /var/lib/rpi && install -m 600 /dev/stdin /var/lib/rpi/wireless.env && systemd-tmpfiles --create --prefix=/var/lib/rpi/wireless\.env && systemctl try-restart wpa_supplicant\.service$' "$MOCK_LOG"
+    'mkdir -p -m 700 /var/lib/rpi && install -m 600 /dev/stdin /var/lib/rpi/wireless.env && systemd-tmpfiles --create --prefix=/var/lib/rpi/wireless\.env && if systemctl cat wpa_supplicant\.service' "$MOCK_LOG"
+
+# sc12 the remote command itself, on a fake Pi (mkdir, install,
+# systemd-tmpfiles, systemctl are stubs logging to $T/pi.log;
+# PI_UNIT=1: the unit exists; PI_RESTART_RC fails the restart)
+mkdir -p "$T/pi-bin"
+for c in mkdir install systemd-tmpfiles systemctl; do
+    printf '#!%s\necho "%s $*" >>"$PI_LOG"\n' "$BASH_BIN" "$c" >"$T/pi-bin/$c"
+    chmod 755 "$T/pi-bin/$c"
+done
+cat >>"$T/pi-bin/systemctl" <<'EOF'
+case "$1" in
+cat) [[ "${PI_UNIT:-0}" == 1 ]] ;;
+restart) exit "${PI_RESTART_RC:-0}" ;;
+esac
+EOF
+remote_cmd="$(sed -nE 's/^ssh -p [0-9]+ [^ ]+ //p' "$MOCK_LOG" | tail -n 1)"
+pi_run() { PI_LOG="$T/pi.log" PATH="$T/pi-bin:$PATH" bash -c "$remote_cmd" </dev/null; }
+for unit in 1 0; do
+    : >"$T/pi.log"
+    rc=0; PI_UNIT=$unit pi_run || rc=$?
+    expect_eq "sc12 unit=$unit: the remote command succeeds" 0 "$rc"
+    expect_eq "sc12 unit=$unit: restarts it iff the unit exists" "$unit" "$(grep -c '^systemctl restart wpa_supplicant.service$' "$T/pi.log")"
+done
+rc=0; PI_UNIT=1 PI_RESTART_RC=1 pi_run || rc=$?
+expect_eq "sc12 a failing restart fails the remote command" 1 "$rc"
 expect_not_grep "sc1 never chmods an existing directory (install -d)" "install -d" "$MOCK_LOG"
 expect_eq "sc1 the host info is evaluated once" 1 "$(log_count "$INFO_RE")"
 leaked=$((leaked + $(leaks)))

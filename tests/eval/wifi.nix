@@ -49,6 +49,10 @@ let
     && lib.elemAt r 2 == "0600"
     && lib.elemAt r 3 == sc.User && lib.elemAt r 4 == sc.Group;
   etcFile = mk [ { rpi.wifi = { enable = true; inherit networks; secretsFile = "/etc/wifi.env"; }; } ];
+  # S2: one unit per interface when networking.wireless.interfaces is set
+  wlan0 = (mk [ { rpi.wifi = { enable = true; inherit networks; };
+                  networking.wireless.interfaces = [ "wlan0" ]; } ]).config.systemd.services;
+  conditioned = u: (u.unitConfig.ConditionPathExists or null) == "/var/lib/rpi/wireless.env";
 in
 {
   "off: disable-wifi overlay on, no wpa_supplicant, firmware list empty" =
@@ -82,6 +86,14 @@ in
     && readableOnlyBy on
     && readableOnlyBy etcFile
     && tmpfilesFor t off.rpi.wifi.secretsFile == [ ];
+
+  # S2 (final review): nixpkgs bind-mounts the file without `-`, so a
+  # missing file fails the unit and with it the switch (exit 14/36); the
+  # unit is skipped instead until `rpi-deploy secrets` writes the file.
+  "wpa_supplicant unit(s) are conditioned on the secrets file" =
+    conditioned oc.systemd.services.wpa_supplicant
+    && conditioned wlan0."wpa_supplicant-wlan0"
+    && !(wlan0 ? wpa_supplicant);
 
   "/var/lib/rpi is a 0700 root dir" =
     lib.elem "d /var/lib/rpi 0700 root root -" oc.systemd.tmpfiles.rules;

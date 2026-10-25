@@ -142,6 +142,12 @@ pre-generated host key at flash time; possible later extension).
   `secrets` applies it right after `install` (`systemd-tmpfiles --create
   --prefix=<file>`); `flash --wifi-env` still writes root 0600 (the card has
   no such user yet) and the first boot applies the rule.
+- *Amended 2026-10-25 (final review S2):* the wpa_supplicant unit(s) get
+  `ConditionPathExists = <secretsFile>` (nixpkgs bind-mounts the file, so a
+  missing file failed the unit and the deploy's switch); `secrets` then runs
+  `systemctl restart` instead of `try-restart` (which left the skipped unit
+  stopped), guarded by `systemctl cat` so a Pi without Wi-Fi deployed exits
+  0. `secrets` may run before or after the deploy that enables Wi-Fi.
 
 devenv: `secretspec.toml` declares the PSK variables of the example host;
 `devenv.local.nix.example` shows `RPI_HOST`, `RPI_TARGET`, `RPI_PORT`;
