@@ -98,6 +98,10 @@ in
     && lib.elem "dtoverlay=disable-wifi" txt && lib.elem "dtoverlay=disable-bt" txt
     && !cfg.networking.wireless.enable && !cfg.hardware.bluetooth.enable;
 
+  "no HM users by default (terminal profile off, bash login shell)" =
+    !cfg.rpi.profiles.terminal.enable && cfg.home-manager.users == { }
+    && lib.getName cfg.users.users.pi.shell != "zsh";
+
   "default network is DHCP" =
     cfg.rpi.network.mode == "dhcp" && !(cfg.systemd.network.networks ? "10-lan-static");
 
