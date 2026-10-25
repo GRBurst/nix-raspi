@@ -1,0 +1,11 @@
+# Operator settings of this machine (copy devenv.local.nix.example)
+devenv.local.nix
+devenv.local.yaml
+
+# devenv, direnv
+.devenv*
+.direnv
+
+# rpi-deploy image: the SD image link (result-rpi-image), nix build links
+result
+result-*

@@ -1,0 +1,16 @@
+# Copy to devenv.local.nix (gitignored; devenv imports it by itself) for
+# settings of this machine only. They steer `rpi-deploy` and never reach the
+# Pi's system or the cache, so they are not in a host module.
+{ ... }:
+{
+  env = {
+    # The host rpi-deploy works on when the flake has several (default: the
+    # only Pi host; several and none set -> exit 2 listing them).
+    RPI_HOST = "rpi";
+
+    # Override the host's rpi.deploy.target (default root@<hostname>) and
+    # rpi.ssh.port, e.g. while the hostname does not resolve yet:
+    # RPI_TARGET = "root@192.168.1.20";
+    # RPI_PORT = "22";
+  };
+}

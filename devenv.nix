@@ -10,12 +10,15 @@
   packages = with pkgs; [
     # binary cache setup (README §4: create the cache, signing key)
     cachix
+    # Wi-Fi PSKs from the user's provider into rpi-deploy, never into the
+    # store: `secretspec run -- rpi-deploy secrets` (secretspec.toml)
+    secretspec
     # lint, same tools as the flake checks
     shellcheck
     actionlint
     # rpi-deploy and the scripts in ci/
     git
-    jq
+    secretspec
     curl
     zstd
     openssh

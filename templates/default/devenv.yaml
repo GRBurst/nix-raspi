@@ -1,0 +1,6 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+# Same release as the Pi's flake (the library's nixpkgs); the exact commit is
+# pinned in devenv.lock (`devenv update` moves it).
+inputs:
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixos-26.05
