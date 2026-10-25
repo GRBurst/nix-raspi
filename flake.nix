@@ -152,7 +152,15 @@
     && (lib.assertMsg contract.wrapperPkg "build-host contract: rpi-deploy wrapper is in environment.systemPackages")
   then
   {
-            
+            # Library entry point (lib/mkPi.nix): nvmd base + hybrid inputs +
+            # rpi.* modules + home-manager; result marked `rpiHost = true`.
+            lib.mkPi = import ./lib/mkPi.nix { inherit inputs; };
+
+            # The rpi.* modules (for users who wire nvmd themselves) and the
+            # terminal profile (needs the home-manager NixOS module).
+            nixosModules.default = ./modules/default.nix;
+            nixosModules.terminal = ./modules/profiles/terminal.nix;
+
             nixosConfigurations = {
               # nixos-raspberrypi.lib.nixosSystem is a drop-in for
               # nixpkgs.lib.nixosSystem: it injects the vendor kernel /
@@ -386,6 +394,9 @@
                   args = {
                     inherit lib nixpkgs hostTestSystem;
                     rpi = self.nixosConfigurations.rpi;
+                    rpiLib = self.lib;
+                    nixosModules = self.nixosModules;
+                    fixtures = ./tests/fixtures;
                     nvmd = nixos-raspberrypi;
                     nixosConfigurations = self.nixosConfigurations;
                     packages = self.packages;
