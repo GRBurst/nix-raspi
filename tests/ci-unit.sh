@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Unit tests for the CI scripts nixos/ci/*.sh (check `rpi-ci-unit`).
+# Unit tests for the CI scripts ci/*.sh (check `rpi-ci-unit`).
 #
 #   CI_DIR=ci RPI_LIB=rpi-lib.sh FIXTURES=tests/fixtures bash tests/ci-unit.sh
 #
@@ -36,13 +36,12 @@ export K_DEF=/nix/store/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-linux_rpi-bcm2711-6.18.
 export M_DEF=/nix/store/mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm-linux_rpi-bcm2711-6.18.52-modules
 LOCK0='{ "committed": "lock" }'
 
-# A bare origin with one commit on main (nixos/flake.lock, nixos/keys.nix);
+# A bare origin with one commit on main (flake.lock, keys.nix at the root);
 # clone NAME gives a fresh work repo $T/NAME tracking it.
 git init -q --bare -b main "$T/origin.git"
 git init -q -b main "$T/seed"
-mkdir -p "$T/seed/nixos"
-printf '%s\n' "$LOCK0" >"$T/seed/nixos/flake.lock"
-printf '{ user = "ssh-ed25519 AAAA test"; }\n' >"$T/seed/nixos/keys.nix"
+printf '%s\n' "$LOCK0" >"$T/seed/flake.lock"
+printf '{ user = "ssh-ed25519 AAAA test"; }\n' >"$T/seed/keys.nix"
 printf 'readme\n' >"$T/seed/README.md"
 git -C "$T/seed" add -A
 git -C "$T/seed" commit -q -m init
@@ -111,10 +110,10 @@ EOF
 HYB="$FIXTURES/dry-run-hybrid.txt"
 KER="$FIXTURES/dry-run-kernel.txt"
 clone b
-LOCKF="$T/b/nixos/flake.lock"
+LOCKF="$T/b/flake.lock"
 export MOCK_LOCK="$LOCKF"
-build() { bash "$CI_DIR/build.sh" --flake "$T/b/nixos" "$@"; }
-relock() { git -C "$T/b" checkout -q -- nixos/flake.lock; }
+build() { bash "$CI_DIR/build.sh" --flake "$T/b" "$@"; }
+relock() { git -C "$T/b" checkout -q -- flake.lock; }
 
 reset_log
 MOCK_DRY="$HYB" run_cmd b1 -- build --event push
@@ -140,7 +139,7 @@ expect_eq "b1 event defaults to \$GITHUB_EVENT_NAME (push: no update)" 0 "$(log_
 reset_log
 MOCK_DRY="$HYB" run_cmd b2 -- build --event schedule
 expect_exit "b2 schedule builds" 0
-fu=$(first_line "^nix flake update --accept-flake-config --flake $T/b/nixos nixpkgs nixos-raspberrypi\$")
+fu=$(first_line "^nix flake update --accept-flake-config --flake $T/b nixpkgs nixos-raspberrypi\$")
 pi=$(first_line '^nix .*path-info')
 expect_true "b2 schedule updates nixpkgs and nixos-raspberrypi before the guard ($fu < $pi)" \
     test "$fu" -lt "$pi" -a "$pi" -lt 999999
@@ -156,14 +155,14 @@ reset_log
 MOCK_DRY="$HYB" run_cmd b8 -- build --event workflow_dispatch --update-lock
 expect_exit "b8 --update-lock builds" 0
 expect_eq "b8 --update-lock updates nixpkgs and nixos-raspberrypi" 1 \
-    "$(log_count "^nix flake update --accept-flake-config --flake $T/b/nixos nixpkgs nixos-raspberrypi\$")"
+    "$(log_count "^nix flake update --accept-flake-config --flake $T/b nixpkgs nixos-raspberrypi\$")"
 relock
 
 reset_log
 MOCK_CACHE=full-miss MOCK_DRY="$HYB" run_cmd b3 -- build --event schedule
 expect_exit "b3 kernel miss after the nvmd update -> nixpkgs-only fallback builds" 0
 expect_eq "b3 lock = committed + one nixpkgs-only update" \
-    "$LOCK0"$'\n'"flake update --accept-flake-config --flake $T/b/nixos nixpkgs" "$(cat "$LOCKF")"
+    "$LOCK0"$'\n'"flake update --accept-flake-config --flake $T/b nixpkgs" "$(cat "$LOCKF")"
 expect_eq "b3 second update has nixpkgs only" 1 "$(log_count 'flake update .* nixpkgs$')"
 expect_grepf "b3 says why it falls back" "nixpkgs only" "$ERR"
 expect_eq "b3 stdout is top=" "top=$TOP" "$(cat "$OUT")"
@@ -213,17 +212,17 @@ expect_grepf "b9 --help shows the usage" "--update-lock" "$OUT"
 # T7.2 ci/cache-name.sh, ci/publish.sh
 # =============================================================================
 reset_log
-MOCK_CACHE_NAME='' run_cmd c1 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b/nixos"
+MOCK_CACHE_NAME='' run_cmd c1 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b"
 expect_exit "c1 no cache in keys.nix -> exit 1" 1
-expect_grepf "c1 says where to set it" "nixos/keys.nix" "$ERR"
+expect_grepf "c1 says where to set it" "in keys.nix" "$ERR"
 expect_eq "c1 stdout empty" "" "$(cat "$OUT")"
 
 reset_log
-MOCK_CACHE_NAME=neptun-x run_cmd c2 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b/nixos"
+MOCK_CACHE_NAME=neptun-x run_cmd c2 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b"
 expect_exit "c2 cache name set" 0
 expect_eq "c2 stdout is name=<cache>" "name=neptun-x" "$(cat "$OUT")"
 expect_eq "c2 nix eval --impure --raw --expr" 1 "$(log_count '^nix eval --impure --raw --expr ')"
-expect_eq "c2 reads keys.nix of --flake DIR" 1 "$(log_count "^nix-cwd $T/b/nixos\$")"
+expect_eq "c2 reads keys.nix of --flake DIR" 1 "$(log_count "^nix-cwd $T/b\$")"
 expect_eq "c2 the expression imports ./keys.nix" 1 "$(log_count 'import \./keys\.nix')"
 
 reset_log
@@ -231,7 +230,7 @@ MOCK_CACHE_NAME=neptun-y run_cmd c2d -- bash "$CI_DIR/cache-name.sh"
 expect_eq "c2 DIR defaults to the flake next to ci/" 1 \
     "$(log_count "^nix-cwd $(cd "$CI_DIR/.." && pwd)\$")"
 
-MOCK_CACHE_NAME=$'evil\ntop=/nix/store/x' run_cmd c3 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b/nixos"
+MOCK_CACHE_NAME=$'evil\ntop=/nix/store/x' run_cmd c3 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b"
 expect_exit "c3 a name that is not a cachix name -> exit 1" 1
 expect_eq "c3 stdout empty" "" "$(cat "$OUT")"
 
@@ -267,7 +266,7 @@ expect_exit "u4 --help" 0
 SRI=sha256-MOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOCKMOC=
 TOP2=/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-neptun-26.05.20261028.0123456
 clone p
-PF="$T/p/nixos/deploy/neptun.json"
+PF="$T/p/deploy/neptun.json"
 pointer() { bash "$CI_DIR/pointer.sh" "$@"; }
 # put_pointer FILE SEQ PATH: an existing pointer as CI would have written it
 put_pointer() {
@@ -348,10 +347,10 @@ expect_eq "w9 file unchanged" "not json" "$(cat "$T/w9.json")"
 # w6 (A4): the pointer on origin/main counts too (a stale checkout or a re-run
 # of an older run must not move the pointer backwards).
 clone o
-put_pointer "$T/o/nixos/deploy/neptun.json" 12 "$TOP"
+put_pointer "$T/o/deploy/neptun.json" 12 "$TOP"
 git -C "$T/o" add -A && git -C "$T/o" commit -q -m "pointer 12" && git -C "$T/o" push -q origin main
 clone q
-QF="$T/q/nixos/deploy/neptun.json"
+QF="$T/q/deploy/neptun.json"
 put_pointer "$QF" 5 "$TOP"
 git -C "$T/q" fetch -q origin
 cp "$QF" "$T/w6.json"
@@ -371,17 +370,17 @@ expect_true "w6 origin/main already points at TOP -> file unchanged" cmp -s "$T/
 # reset counter (seq 2) is refused while origin/main has seq 12; after the
 # pointer is removed from main and fetched, seq 2 is written.
 clone w11
-WF="$T/w11/nixos/deploy/neptun.json"
+WF="$T/w11/deploy/neptun.json"
 run_cmd w11a -- pointer --seq 2 --rev x --file "$WF" "$TOP2"
 expect_exit "w11 reset run_number (2 < 12 on origin/main) refused" 1
-git -C "$T/w11" rm -q nixos/deploy/neptun.json
+git -C "$T/w11" rm -q deploy/neptun.json
 git -C "$T/w11" commit -q -m "drop pointer" && git -C "$T/w11" push -q origin main
 run_cmd w11b -- pointer --seq 2 --rev x --file "$WF" "$TOP2"
 expect_exit "w11 pointer removed from main -> seq 2 written" 0
 expect_eq "w11 seq 2 in the file" 2 "$(jq -r .seq "$WF")"
 # restore origin/main's pointer 12 for the later tests
 git -C "$T/o" pull -q --rebase origin main
-put_pointer "$T/o/nixos/deploy/neptun.json" 12 "$TOP"
+put_pointer "$T/o/deploy/neptun.json" 12 "$TOP"
 git -C "$T/o" add -A && git -C "$T/o" commit -q -m "pointer 12 again" && git -C "$T/o" push -q origin main
 
 # w8: outside a git repo (pull-smoke writes its pointer into a web root).
@@ -404,12 +403,12 @@ expect_exit "w10 --help" 0
 BOT='github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>'
 MSG='neptun: build 7 (push)'
 origin_main() { git -C "$T/origin.git" rev-parse main; }
-# cpush REPO ARGS...: run commit-push.sh in REPO/nixos like the workflow does
-cpush() { local r="$1"; shift; (cd "$T/$r/nixos" && bash "$CI_DIR/commit-push.sh" "$@"); }
+# cpush REPO ARGS...: run commit-push.sh in REPO like the workflow does
+cpush() { local r="$1"; shift; (cd "$T/$r" && bash "$CI_DIR/commit-push.sh" "$@"); }
 # change REPO: a lock update and a new pointer in REPO's work tree
 change() {
-    printf 'update %s\n' "$1" >>"$T/$1/nixos/flake.lock"
-    put_pointer "$T/$1/nixos/deploy/neptun.json" 7 "$TOP"
+    printf 'update %s\n' "$1" >>"$T/$1/flake.lock"
+    put_pointer "$T/$1/deploy/neptun.json" 7 "$TOP"
 }
 # other NAME FILE: another clone pushes a commit changing FILE first
 other() {
@@ -430,19 +429,19 @@ expect_eq "g1 origin main unchanged" "$before" "$(origin_main)"
 clone g2
 before="$(origin_main)"
 change g2
-printf 'stray\n' >"$T/g2/nixos/stray.txt"
+printf 'stray\n' >"$T/g2/stray.txt"
 run_cmd g2 -- cpush g2 --message "$MSG" flake.lock deploy/neptun.json nope.json
 expect_exit "g2 lock + pointer changed" 0
 expect_eq "g2 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
 expect_eq "g2 one new commit on origin main" "$before" "$(git -C "$T/origin.git" rev-parse main^)"
 expect_eq "g2 the commit touches exactly lock + pointer" \
-    "nixos/deploy/neptun.json nixos/flake.lock" \
+    "deploy/neptun.json flake.lock" \
     "$(git -C "$T/origin.git" diff-tree --no-commit-id --name-only -r main | sort | xargs)"
 expect_eq "g2 author is github-actions[bot]" "$BOT" "$(git -C "$T/origin.git" log -1 --format='%an <%ae>' main)"
 expect_eq "g2 committer is github-actions[bot]" "$BOT" "$(git -C "$T/origin.git" log -1 --format='%cn <%ce>' main)"
 expect_eq "g2 message" "$MSG" "$(git -C "$T/origin.git" log -1 --format=%s main)"
-expect_eq "g2 the work tree pointer is what origin has" "$(cat "$T/g2/nixos/deploy/neptun.json")" \
-    "$(git -C "$T/origin.git" show main:nixos/deploy/neptun.json)"
+expect_eq "g2 the work tree pointer is what origin has" "$(cat "$T/g2/deploy/neptun.json")" \
+    "$(git -C "$T/origin.git" show main:deploy/neptun.json)"
 
 clone g3
 change g3
@@ -454,11 +453,11 @@ expect_eq "g3 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
 expect_eq "g3 origin main's parent is the other commit" "$upstream" "$(git -C "$T/origin.git" rev-parse main^)"
 expect_eq "g3 linear history (no merges)" "" "$(git -C "$T/origin.git" rev-list --merges main)"
 expect_eq "g3 the pointer reached origin" 7 \
-    "$(git -C "$T/origin.git" show main:nixos/deploy/neptun.json | jq -r .seq)"
+    "$(git -C "$T/origin.git" show main:deploy/neptun.json | jq -r .seq)"
 
 clone g4
 change g4
-other g4o nixos/flake.lock
+other g4o flake.lock
 upstream="$(origin_main)"
 run_cmd g4 -- cpush g4 --message "$MSG" flake.lock deploy/neptun.json
 expect_true "g4 conflicting lock -> non-zero" test "$RC" -ne 0
@@ -497,7 +496,7 @@ git -C "$T/g7" config user.useConfigOnly true
 change g7
 other g7o README.md
 run_cmd g7 -- env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME \
-    -u GIT_COMMITTER_EMAIL -u EMAIL bash -c 'cd "$1/nixos" && bash "$2/commit-push.sh" "${@:3}"' _ \
+    -u GIT_COMMITTER_EMAIL -u EMAIL bash -c 'cd "$1" && bash "$2/commit-push.sh" "${@:3}"' _ \
     "$T/g7" "$CI_DIR" --message "$MSG" flake.lock deploy/neptun.json
 expect_exit "g7 no inherited git identity -> commit + rebase still work" 0
 expect_eq "g7 rebased commit's committer is github-actions[bot]" "$BOT" \

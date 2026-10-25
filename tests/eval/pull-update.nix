@@ -21,7 +21,7 @@ let
     _module.args.rpiKeys = keys // { cache = testCache; };
     rpi.pull.pointerUrl = lib.mkForce pointerUrl;
   } ];
-  on = onWith "https://raw.githubusercontent.com/o/r/main/nixos/deploy/neptun.json";
+  on = onWith "https://raw.githubusercontent.com/o/r/main/deploy/neptun.json";
   onHttp = onWith "http://192.168.100.1:18080/neptun.json";
   # Partial setups (A10): pointer URL only; cache only.
   pointerOnly = extend [ { _module.args.rpiKeys = keys // { cache = null; }; rpi.pull.pointerUrl = lib.mkForce "https://x/neptun.json"; } ];
@@ -83,7 +83,7 @@ in
       url = opts.pointerUrl.type.check;
       key = opts.cachePublicKey.type.check;
     in
-    url "https://raw.githubusercontent.com/o/r/main/nixos/deploy/neptun.json"
+    url "https://raw.githubusercontent.com/o/r/main/deploy/neptun.json"
     && url "http://192.168.100.1:18080/neptun.json"
     && !(lib.any url [ "ftp://x/neptun.json" "raw.githubusercontent.com/o/r" "https://" ])
     && opts.cacheUrl.type.check "https://neptun-test.cachix.org"
@@ -198,5 +198,5 @@ in
 
   # Plan §17 "Remote": the production pointer (raw GitHub, HTTPS).
   "configuration.nix sets the production pointer URL" =
-    p.pointerUrl == "https://raw.githubusercontent.com/GRBurst/nix-raspi/main/nixos/deploy/neptun.json";
+    p.pointerUrl == "https://raw.githubusercontent.com/GRBurst/nix-raspi/main/deploy/neptun.json";
 }

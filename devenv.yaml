@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
-# Same release branch as the Pi's flake (nixos/flake.nix `nixpkgs`), so the
+# Same release branch as the Pi's flake (flake.nix `nixpkgs`), so the
 # tools here match `nix flake check` and CI. The exact commit is pinned in
 # devenv.lock (`devenv update` moves it).
 inputs:

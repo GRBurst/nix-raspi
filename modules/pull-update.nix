@@ -1,5 +1,5 @@
 # Pi pull updates (rpi.pull.*): CI builds the system and publishes a pointer
-# (nixos/deploy/neptun.json) plus the closure in our self-signed Cachix
+# (deploy/<host>.json) plus the closure in our self-signed Cachix
 # cache; a timer on the Pi runs `rpi-pull` (rpi-pull.sh), which verifies the
 # pointer and activates the system. Spec addendum 2026-10-23 §3.1, §3.4.
 #
@@ -57,7 +57,7 @@ in {
     pointerUrl = lib.mkOption {
       type = url;
       default = null;
-      example = "https://raw.githubusercontent.com/<owner>/<repo>/main/nixos/deploy/neptun.json";
+      example = "https://raw.githubusercontent.com/<owner>/<repo>/main/deploy/<host>.json";
       description = ''
         URL of the pointer file CI commits (`{ seq, storePath, narHash, rev,
         built }`). Use HTTPS; plain HTTP (tests) adds a warning.

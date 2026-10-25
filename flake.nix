@@ -362,7 +362,7 @@
                   # to an action (ci/publish.sh gets them via env), and dependabot
                   # keeps the pins current.
                   actionlint = x86Pkgs.runCommand "actionlint-check" {
-                    src = lib.fileset.toSource { root = ../.; fileset = ../.github; };
+                    src = lib.fileset.toSource { root = ./.; fileset = ./.github; };
                     nativeBuildInputs = [ x86Pkgs.actionlint x86Pkgs.shellcheck ];
                   } ''
                     cd $src

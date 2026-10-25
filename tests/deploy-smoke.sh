@@ -38,7 +38,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NIXOS_DIR="$(dirname "$HERE")"
+FLAKE_DIR="$(dirname "$HERE")"
 # shellcheck source=qemu-pi.sh
 source "$HERE/qemu-pi.sh"
 
@@ -56,8 +56,8 @@ done
 
 qp_need zstd sfdisk debugfs mcopy ssh ssh-keygen nix git
 qp_find_qemu || { echo "error: no qemu-system-aarch64 with -M raspi3b (set RPI_QEMU, or: nix shell nixpkgs#qemu)" >&2; exit 2; }
-REPO="$(git -C "$NIXOS_DIR" rev-parse --show-toplevel)" || { echo "error: $NIXOS_DIR is not in a git checkout" >&2; exit 2; }
-SUBDIR="${NIXOS_DIR#"$REPO"/}"
+REPO="$(git -C "$FLAKE_DIR" rev-parse --show-toplevel)" || { echo "error: $FLAKE_DIR is not in a git checkout" >&2; exit 2; }
+[[ "$(cd "$FLAKE_DIR" && pwd -P)" == "$REPO" ]] || { echo "error: $FLAKE_DIR is not the top of its git checkout ($REPO): run from the repository root" >&2; exit 2; }
 
 WORK="${RPI_SMOKE_DIR:-$PWD/.scratch/deploy-smoke}"
 mkdir -p "$WORK"
@@ -99,7 +99,7 @@ cat >"$FLAKE/flake.nix" <<EOF
     extra-substituters = [ "https://nixos-raspberrypi.cachix.org" ];
     extra-trusted-public-keys = [ "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=" ];
   };
-  inputs.rpi.url = "git+file://$REPO?dir=$SUBDIR";
+  inputs.rpi.url = "git+file://$REPO";
   outputs = { self, rpi }: let
     smoke-image = rpi.nixosConfigurations.rpi.extendModules {
       modules = [ ({ lib, ... }: {
@@ -122,7 +122,7 @@ SF="path:$FLAKE"
 if [[ -n "${RPI_DEPLOY:-}" ]]; then
   read -ra DEPLOY <<<"$RPI_DEPLOY"
 else
-  DEPLOY=(nix run --accept-flake-config "$NIXOS_DIR#rpi-deploy" --)
+  DEPLOY=(nix run --accept-flake-config "$FLAKE_DIR#rpi-deploy" --)
 fi
 
 # 3: build the image of smoke-image through the real tool (cache + build guards)

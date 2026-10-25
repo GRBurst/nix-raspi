@@ -64,7 +64,7 @@ in {
   # (the cache also becomes a substituter with its key).
   rpi.pull = lib.mkMerge [
     {
-      pointerUrl = "https://raw.githubusercontent.com/GRBurst/nix-raspi/main/nixos/deploy/neptun.json";
+      pointerUrl = "https://raw.githubusercontent.com/GRBurst/nix-raspi/main/deploy/neptun.json";
     }
     # `or null`: test overrides of rpiKeys may lack the attribute
     (lib.mkIf ((keys.cache or null) != null) {

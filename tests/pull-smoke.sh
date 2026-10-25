@@ -58,7 +58,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NIXOS_DIR="$(dirname "$HERE")"
+FLAKE_DIR="$(dirname "$HERE")"
 # shellcheck source=qemu-pi.sh
 source "$HERE/qemu-pi.sh"
 
@@ -76,8 +76,8 @@ done
 
 qp_need zstd sfdisk debugfs mcopy ssh ssh-keygen nix git jq curl
 qp_find_qemu || { echo "error: no qemu-system-aarch64 with -M raspi3b (set RPI_QEMU, or: nix shell nixpkgs#qemu)" >&2; exit 2; }
-REPO="$(git -C "$NIXOS_DIR" rev-parse --show-toplevel)" || { echo "error: $NIXOS_DIR is not in a git checkout" >&2; exit 2; }
-SUBDIR="${NIXOS_DIR#"$REPO"/}"
+REPO="$(git -C "$FLAKE_DIR" rev-parse --show-toplevel)" || { echo "error: $FLAKE_DIR is not in a git checkout" >&2; exit 2; }
+[[ "$(cd "$FLAKE_DIR" && pwd -P)" == "$REPO" ]] || { echo "error: $FLAKE_DIR is not the top of its git checkout ($REPO): run from the repository root" >&2; exit 2; }
 
 PORT="${RPI_PULL_SMOKE_HTTP_PORT:-18080}"
 PLANT="${RPI_PULL_SMOKE_PLANT:-0}"
@@ -150,7 +150,7 @@ cat >"$FLAKE/flake.nix" <<EOF
     extra-substituters = [ "https://nixos-raspberrypi.cachix.org" ];
     extra-trusted-public-keys = [ "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=" ];
   };
-  inputs.rpi.url = "git+file://$REPO?dir=$SUBDIR";
+  inputs.rpi.url = "git+file://$REPO";
   outputs = { self, rpi }: let
     smoke-image = rpi.nixosConfigurations.rpi.extendModules {
       modules = [ ({ lib, ... }: {
@@ -187,7 +187,7 @@ SF="path:$FLAKE"
 if [[ -n "${RPI_DEPLOY:-}" ]]; then
   read -ra DEPLOY <<<"$RPI_DEPLOY"
 else
-  DEPLOY=(nix run --accept-flake-config "$NIXOS_DIR#rpi-deploy" --)
+  DEPLOY=(nix run --accept-flake-config "$FLAKE_DIR#rpi-deploy" --)
 fi
 
 # 3: the image of smoke-image through the real tool (cache + build guards), then the toplevels
@@ -224,11 +224,11 @@ stage "nix copy: closure of smoke-evil (foreign key; existing paths are skipped)
 grep -q '^Priority:' "$WWW/cache/nix-cache-info" || echo 'Priority: 10' >>"$WWW/cache/nix-cache-info"
 grep -qx 'Priority: 10' "$WWW/cache/nix-cache-info" || fail "cannot set Priority: 10 in $WWW/cache/nix-cache-info"
 # the pointer: GIT_CEILING_DIRECTORIES keeps pointer.sh from consulting this checkout's origin/main
-GIT_CEILING_DIRECTORIES="$WORK" bash "$NIXOS_DIR/ci/pointer.sh" --seq 1 --rev smoke --file "$WWW/neptun.json" "$NEXT" >/dev/null ||
+GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --seq 1 --rev smoke --file "$WWW/neptun.json" "$NEXT" >/dev/null ||
   fail "ci/pointer.sh failed for seq 1"
 jq -c . "$WWW/neptun.json"
 
-BUSYBOX="$(nix build --accept-flake-config --no-link --print-out-paths --inputs-from "$NIXOS_DIR" nixpkgs#busybox)"
+BUSYBOX="$(nix build --accept-flake-config --no-link --print-out-paths --inputs-from "$FLAKE_DIR" nixpkgs#busybox)"
 [[ -x "$BUSYBOX/bin/busybox" ]] || fail "no busybox in '$BUSYBOX'"
 if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
   fail "something already listens on 127.0.0.1:$PORT (set RPI_PULL_SMOKE_HTTP_PORT; the port is part of the image)"
@@ -310,7 +310,7 @@ stage "seq 1 applied by switch: $NEXT"
 
 # 7: the tamper path: seq 2 points at a system signed by a foreign key
 stage "pointer seq 2 -> smoke-evil (foreign key); systemctl start rpi-pull.service"
-GIT_CEILING_DIRECTORIES="$WORK" bash "$NIXOS_DIR/ci/pointer.sh" --seq 2 --rev evil --file "$WWW/neptun.json" "$EVIL" >/dev/null ||
+GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --seq 2 --rev evil --file "$WWW/neptun.json" "$EVIL" >/dev/null ||
   fail "ci/pointer.sh failed for seq 2"
 rc=0
 gssh timeout 1800 systemctl start rpi-pull.service 2>&1 | ts | tee "$WORK/pull-2.out" || rc=${PIPESTATUS[0]}

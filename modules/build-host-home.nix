@@ -8,12 +8,12 @@
 #
 # Import via the flake output (preferred — provides the rpi-deploy script):
 #
-#   inputs.pi = { url = "git+file:///home/pallon/projects/pi/nixos"; flake = true; };
+#   inputs.pi = { url = "git+file:///home/pallon/projects/pi"; flake = true; };
 #   ...
 #   home-manager.users.alice = {
 #     imports = [ inputs.pi.homeModules.rpiBuildHost ];
 #     rpi.buildHost.enable = true;
-#     rpi.buildHost.flakePath = "/home/alice/projects/pi/nixos";
+#     rpi.buildHost.flakePath = "/home/alice/projects/pi";
 #   };
 
 {
@@ -50,7 +50,7 @@ in
     flakePath = lib.mkOption {
       type = lib.types.str;
       default = "";
-      example = "/home/alice/projects/pi/nixos";
+      example = "/home/alice/projects/pi";
       description = ''
         If set, the installed `rpi-deploy` wrapper pre-sets `RPI_FLAKE` to
         this path, so `rpi-deploy image` / `rpi-deploy deploy` work without

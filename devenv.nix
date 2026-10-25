@@ -13,7 +13,7 @@
     # lint, same tools as the flake checks
     shellcheck
     actionlint
-    # rpi-deploy and the scripts in nixos/ci
+    # rpi-deploy and the scripts in ci/
     git
     jq
     curl
@@ -27,7 +27,7 @@
   ];
 
   # rpi-deploy needs no --flake (what rpi.buildHost.flakePath does on a host).
-  env.RPI_FLAKE = "${config.devenv.root}/nixos";
+  env.RPI_FLAKE = config.devenv.root;
 
   # The two things only the host can provide (README section 1); warns, never
   # blocks the shell.
@@ -53,13 +53,13 @@
   # The working tree's rpi-deploy (the build host's packaged one is the
   # committed version).
   scripts.rpi-deploy = {
-    exec = ''exec bash "$DEVENV_ROOT/nixos/rpi-deploy.sh" "$@"'';
+    exec = ''exec bash "$DEVENV_ROOT/rpi-deploy.sh" "$@"'';
     description = "rpi-deploy from the working tree (image, flash, deploy, status)";
   };
 
   scripts.rpi-unit = {
     exec = ''
-      cd "$DEVENV_ROOT/nixos" || exit 1
+      cd "$DEVENV_ROOT" || exit 1
       rc=0
       for t in tests/*-unit.sh; do
         last=$(bash "$t" 2>&1 | tail -n 1)
@@ -74,13 +74,13 @@
   scripts.rpi-check = {
     exec = ''
       set -e
-      cd "$DEVENV_ROOT/nixos"
+      cd "$DEVENV_ROOT"
       # yazi's IFD: evaluate the toplevel once before the check (HANDOFF §6)
       nix eval --raw --accept-flake-config \
         .#nixosConfigurations.rpi.config.system.build.toplevel.drvPath >/dev/null
       nix flake check --accept-flake-config "$@"
     '';
-    description = "nix flake check in nixos/ (all checks incl. the host VM test; --no-build for eval only)";
+    description = "nix flake check at the repository root (all checks incl. the host VM test; --no-build for eval only)";
   };
 
   # `devenv test`
@@ -91,7 +91,7 @@
       enable = true;
       args = ["-x" "-P" "SCRIPTDIR" "-S" "warning"];
       # vendored nvmd builder templates, not ours
-      excludes = ["^nixos/tests/fixtures/"];
+      excludes = ["^tests/fixtures/"];
     };
     actionlint.enable = true;
   };

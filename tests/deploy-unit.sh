@@ -575,8 +575,8 @@ pi_state() {
 # default: switched to a userspace-only change (same boot parts as booted)
 pi_state sysA2 sysA sysA2
 
-# the flake: subdir nixos/ of a git repo (like the real checkout)
-REPO="$T/repo" FL="$T/repo/nixos"
+# the flake: the root of a git repo (like the real checkout)
+REPO="$T/repo" FL="$T/repo"
 mkdir -p "$FL"
 echo '{ }' >"$FL/flake.nix"
 # lock_json NIXPKGS RPI [OTHER]: a flake.lock whose root inputs nixpkgs
@@ -604,7 +604,7 @@ git -C "$REPO" init -q -b main
 git -C "$REPO" add -A
 git -C "$REPO" commit -qm init
 git -C "$REPO" remote add origin "$T/origin.git" # never fetched: the URL need not exist
-# set_ref_lock REF TEXT: REF = main + one commit whose nixos/flake.lock is
+# set_ref_lock REF TEXT: REF = main + one commit whose flake.lock is
 # TEXT ('' = the commit deletes it); main is untouched
 set_ref_lock() {
     local ref="$1" idx="$T/om-index" blob tree c; shift
@@ -612,9 +612,9 @@ set_ref_lock() {
     GIT_INDEX_FILE="$idx" git -C "$REPO" read-tree main
     if [[ -n "$1" ]]; then
         blob="$(printf '%s\n' "$1" | git -C "$REPO" hash-object -w --stdin)"
-        GIT_INDEX_FILE="$idx" git -C "$REPO" update-index --add --cacheinfo "100644,$blob,nixos/flake.lock"
+        GIT_INDEX_FILE="$idx" git -C "$REPO" update-index --add --cacheinfo "100644,$blob,flake.lock"
     else
-        GIT_INDEX_FILE="$idx" git -C "$REPO" update-index --force-remove nixos/flake.lock
+        GIT_INDEX_FILE="$idx" git -C "$REPO" update-index --force-remove flake.lock
     fi
     tree="$(GIT_INDEX_FILE="$idx" git -C "$REPO" write-tree)"
     c="$(git -C "$REPO" commit-tree -p main -m "ci: lock" "$tree")"

@@ -4,7 +4,7 @@ on:
     - cron: "17 0 * * 0"            # Sun 00:17 UTC: lock update + build
   push:
     branches: [main]
-    paths: ["nixos/**", "!nixos/deploy/**"]
+    paths-ignore: ["deploy/**", "docs/**", "**.md"]
   workflow_dispatch:
     inputs:
       update-lock:
@@ -24,9 +24,6 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 300
-    defaults:
-      run:
-        working-directory: nixos
     steps:
       # Always build main, whatever ref triggered the run.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

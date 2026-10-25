@@ -17,8 +17,8 @@
 # Exit: 0 | 2 usage | rl_guard's RL_E_* (10 cache, 11 forbidden, 12 too
 # many, 13 eval/build error).
 #
-# DIR defaults to the flake next to this script (nixos/); RPI_LIB overrides
-# the path of rpi-lib.sh.
+# DIR defaults to the flake next to this script (the repository root);
+# RPI_LIB overrides the path of rpi-lib.sh.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
