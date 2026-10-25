@@ -759,6 +759,12 @@ always agree.
 - *Failures are loud and safe.* Cache outage between pointer and pull → exit
   33/38, profile and seq untouched, retried the next day. `rpi-pull` never
   evaluates or builds.
+- *Several hosts: one lock or nothing.* Each host's build job updates the
+  lock on its own; if they end up with different locks (nixpkgs moved
+  between the jobs, or one host fell back to an older, cached kernel), the
+  commit job refuses the whole run (`flake.lock differs between hosts`):
+  no lock and no pointer reaches `main`, the Pis stay where they are.
+  Dispatch the workflow again with `update-lock`.
 - *Your repo takes library changes only when you say so.* The weekly run
   updates nixpkgs and nixos-raspberrypi (in your lock: `rpi/nixpkgs`,
   `rpi/nixos-raspberrypi`) and commits the lock. The library itself (`rpi`:
