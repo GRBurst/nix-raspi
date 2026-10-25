@@ -652,7 +652,7 @@ run_cmd w6c -- pointer --host neptun --seq 14 --rev x --file "$QF" "$TOP"
 expect_eq "w6 origin/main already points at TOP -> changed=false" "changed=false" "$(cat "$OUT")"
 expect_true "w6 origin/main already points at TOP -> file unchanged" cmp -s "$T/w6c.json" "$QF"
 
-# w11 (final review N7, README section 5): the run_number-reset recovery. A
+# w11 (final review N7, README, "Recovery and rollback"): the run_number-reset recovery. A
 # reset counter (seq 2) is refused while origin/main has seq 12; after the
 # pointer is removed from main and fetched, seq 2 is written.
 clone w11
