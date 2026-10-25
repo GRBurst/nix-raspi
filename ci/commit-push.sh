@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 #
-# ci/commit-push.sh — commit the given paths (flake.lock, the pointer) as
+# ci/commit-push.sh — commit the given paths (flake.lock, the pointers) as
 # github-actions[bot] and push them to main of `origin`.
 #
-#   ci/commit-push.sh --message MSG PATH...
+#   ci/commit-push.sh --message MSG [--artifacts DIR] [PATH...]
 #
 # - Runs only for GITHUB_REF=refs/heads/main (a run dispatched from another
 #   branch must never push to main).
+# - --artifacts DIR: the commit job's download of the build jobs' artifacts,
+#   one subdirectory per job, each with its flake.lock and, when published,
+#   deploy/NAME.json. Every job updates the lock itself (D14), so the locks
+#   must be identical ("lock differs between hosts": exit 1, nothing
+#   copied or pushed); a pointer name may come from one artifact only. The
+#   lock and every pointer are copied into the work tree and committed with
+#   the PATHs.
 # - Paths that do not exist are skipped; nothing changed → `pushed=false`.
 # - Commits are unsigned (an unattended job cannot sign). A rejected push
 #   (main moved on) rebases once (`git pull --rebase origin main`) and
@@ -14,35 +21,74 @@
 #   fails the job, so main and its pointer stay unchanged.
 #
 # stdout: `pushed=true|false` (for $GITHUB_OUTPUT); git output on stderr.
-# Exit: 0 | 1 refused / rebase or push failed | 2 usage.
+# Under GitHub Actions also annotations and a step summary section.
+# Exit: 0 | 1 refused / differing locks / bad artifact / rebase or push
+# failed | 2 usage.
 set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=gh.sh
+source "$HERE/gh.sh"
 
 BOT_NAME='github-actions[bot]'
 BOT_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
 
-usage() { echo "usage: ci/commit-push.sh --message MSG PATH..."; }
-die() { echo "ci/commit-push.sh: $*" >&2; exit 1; }
+usage() { echo "usage: ci/commit-push.sh --message MSG [--artifacts DIR] [PATH...]"; }
+# summary LINE...: this step's summary section (GitHub Actions only)
+summary() { { echo "## commit"; echo; printf '%s\n' "$@"; echo; } | gh_summary; }
+die() { gh_error "$*"; summary "- failed: $*"; exit 1; }
 die_usage() { echo "ci/commit-push.sh: $1" >&2; usage >&2; exit 2; }
 
-msg="" paths=()
+msg="" art="" paths=()
 while (($#)); do
     case "$1" in
-    --message)
-        (($# >= 2)) || die_usage "--message needs a value"
-        msg="$2"
-        shift 2
-        ;;
+    --message | --artifacts) (($# >= 2)) || die_usage "$1 needs a value" ;;&
+    --message) msg="$2"; shift 2 ;;
+    --artifacts) art="$2"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     -*) die_usage "unknown option '$1'" ;;
     *) paths+=("$1"); shift ;;
     esac
 done
 [[ -n "$msg" ]] || die_usage "missing --message"
-((${#paths[@]})) || die_usage "no PATH given"
+[[ -n "$art" ]] || ((${#paths[@]})) || die_usage "neither --artifacts nor a PATH given"
 
 ref="${GITHUB_REF:-}"
 [[ "$ref" == refs/heads/main ]] ||
     die "refusing to push: GITHUB_REF='$ref' is not refs/heads/main"
+
+# The artifacts: check all of them before copying anything.
+if [[ -n "$art" ]]; then
+    [[ -d "$art" ]] || die "no artifacts directory '$art'"
+    lock="" lock_from="" copies=()
+    declare -A ptr_from=()
+    for a in "$art"/*/; do
+        [[ -d "$a" ]] || continue
+        a="${a%/}" an="${a##*/}"
+        if [[ -f "$a/flake.lock" ]]; then
+            if [[ -z "$lock" ]]; then
+                lock="$a/flake.lock" lock_from="$an"
+            elif ! cmp -s "$lock" "$a/flake.lock"; then
+                die "flake.lock differs between hosts ($lock_from, $an): nothing committed"
+            fi
+        fi
+        for p in "$a"/deploy/*; do
+            [[ -e "$p" ]] || continue
+            b="${p##*/}"
+            [[ -f "$p" && "$b" =~ ^[A-Za-z0-9_-]+\.json$ ]] || die "$an: not a pointer deploy/NAME.json: deploy/$b"
+            [[ -z "${ptr_from[$b]:-}" ]] ||
+                die "deploy/$b is in more than one artifact (${ptr_from[$b]}, $an): nothing committed"
+            ptr_from[$b]="$an"
+            copies+=("$p" "deploy/$b")
+        done
+    done
+    [[ -z "$lock" ]] || copies+=("$lock" flake.lock)
+    for ((i = 0; i < ${#copies[@]}; i += 2)); do
+        mkdir -p "$(dirname "${copies[i + 1]}")"
+        cp -- "${copies[i]}" "${copies[i + 1]}"
+        paths+=("${copies[i + 1]}")
+    done
+fi
 
 # The bot identity for the commit and for the rebase of `pull --rebase`;
 # GIT_* in the environment would override user.*, so set those too.
@@ -59,9 +105,11 @@ if ((${#existing[@]})); then
 fi
 if ((${#existing[@]} == 0)) || git diff --cached --quiet -- "${existing[@]}"; then
     echo "ci/commit-push.sh: nothing changed" >&2
+    summary "- nothing changed: no commit"
     echo "pushed=false"
     exit 0
 fi
+files="$(git diff --cached --name-only -- "${existing[@]}" | xargs)"
 
 g commit -q -m "$msg" -- "${existing[@]}" >&2
 if ! git push origin HEAD:main >&2; then
@@ -72,4 +120,5 @@ if ! git push origin HEAD:main >&2; then
     fi
     git push origin HEAD:main >&2 || die "push failed after the rebase"
 fi
+summary "- pushed \`$(git rev-parse --short HEAD)\` to main: $files"
 echo "pushed=true"

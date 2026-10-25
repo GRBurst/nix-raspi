@@ -871,6 +871,91 @@ expect_exit "g8 no PATH -> usage" 2
 run_cmd g8h -- cpush g1 --help
 expect_exit "g8 --help" 0
 
+# T4.5 commit --artifacts DIR: the commit job's download-artifact directory,
+# one subdirectory per build job (pi-HOST) with its flake.lock and, when
+# published, deploy/NAME.json; one commit of the lock and all pointers (D14).
+# art DIR LOCK [NAME...]: an artifact DIR with lock text LOCK (- = none)
+# and a pointer deploy/NAME.json per NAME
+art() {
+    local d="$1" lock="$2" n
+    shift 2
+    mkdir -p "$d"
+    [[ "$lock" == - ]] || printf '%s\n' "$lock" >"$d/flake.lock"
+    for n in "$@"; do put_pointer "$d/deploy/$n.json" 40 "$TOP"; done
+}
+changed_files() { git -C "$T/origin.git" diff-tree --no-commit-id --name-only -r main | sort | xargs; }
+
+clone k1
+L0="$(cat "$T/k1/flake.lock")" L1="$(cat "$T/k1/flake.lock")"$'\nupdate k1'
+art "$T/k1-art/pi-a" "$L1" a
+art "$T/k1-art/pi-b" "$L1" b
+before="$(origin_main)" SUM="$T/k1-summary.md"
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" \
+    run_cmd k1 -- cpush k1 --artifacts "$T/k1-art" --message "$MSG"
+expect_exit "k1 two artifacts, same updated lock" 0
+expect_eq "k1 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
+expect_eq "k1 one new commit on origin main" "$before" "$(git -C "$T/origin.git" rev-parse main^)"
+expect_eq "k1 the commit changes exactly both pointers + the lock" \
+    "deploy/a.json deploy/b.json flake.lock" "$(changed_files)"
+expect_eq "k1 origin has the artifacts' lock" "$L1" "$(git -C "$T/origin.git" show main:flake.lock)"
+expect_eq "k1 origin has pointer a" "$(cat "$T/k1-art/pi-a/deploy/a.json")" \
+    "$(git -C "$T/origin.git" show main:deploy/a.json)"
+expect_eq "k1 message" "$MSG" "$(git -C "$T/origin.git" log -1 --format=%s main)"
+expect_grepf "k1 summary section" "## commit" "$SUM"
+expect_grepf "k1 summary names the pushed files" "deploy/a.json" "$SUM"
+
+clone k1b
+art "$T/k1b-art/pi-c" "$L1" c
+art "$T/k1b-art/pi-d" "$L1"
+run_cmd k1b -- cpush k1b --artifacts "$T/k1b-art" --message "$MSG"
+expect_exit "k1b lock as on main" 0
+expect_eq "k1b the commit changes only the pointer" "deploy/c.json" "$(changed_files)"
+
+clone k2
+art "$T/k2-art/pi-a" "$L1" k2a
+art "$T/k2-art/pi-b" "$L0"$'\nupdate other' k2b
+before="$(origin_main)"
+run_cmd k2 -- cpush k2 --artifacts "$T/k2-art" --message "$MSG"
+expect_exit "k2 locks differ between hosts -> 1" 1
+expect_grepf "k2 says the lock differs between hosts" "lock differs between hosts" "$ERR"
+expect_eq "k2 stdout empty" "" "$(cat "$OUT")"
+expect_eq "k2 origin unchanged" "$before" "$(origin_main)"
+expect_eq "k2 work tree untouched" "" "$(git -C "$T/k2" status --porcelain)"
+
+clone k3
+mkdir -p "$T/k3-art"
+before="$(origin_main)"
+run_cmd k3 -- cpush k3 --artifacts "$T/k3-art" --message "$MSG"
+expect_exit "k3 empty artifacts dir" 0
+expect_eq "k3 stdout is pushed=false" "pushed=false" "$(cat "$OUT")"
+expect_eq "k3 origin unchanged" "$before" "$(origin_main)"
+run_cmd k3m -- cpush k3 --artifacts "$T/k3-missing" --message "$MSG"
+expect_exit "k3 missing artifacts dir -> 1" 1
+
+clone k4
+art "$T/k4-art/pi-e" "$L0"$'\nupdate k4'
+run_cmd k4 -- cpush k4 --artifacts "$T/k4-art" --message "$MSG"
+expect_exit "k4 lock-only artifact (no cache, updated lock)" 0
+expect_eq "k4 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
+expect_eq "k4 the commit changes only the lock" "flake.lock" "$(changed_files)"
+
+clone k5
+art "$T/k5-art/pi-a" "$L0" a
+art "$T/k5-art/pi-b" "$L0" a
+before="$(origin_main)"
+run_cmd k5 -- cpush k5 --artifacts "$T/k5-art" --message "$MSG"
+expect_exit "k5 one pointer name in two artifacts -> 1" 1
+expect_grepf "k5 names the pointer" "deploy/a.json" "$ERR"
+expect_eq "k5 origin unchanged" "$before" "$(origin_main)"
+rm -rf "$T/k5-art/pi-b"
+art "$T/k5-art/pi-b" "$L0"
+put_pointer "$T/k5-art/pi-b/deploy/a b.json" 40 "$TOP"
+run_cmd k5b -- cpush k5 --artifacts "$T/k5-art" --message "$MSG"
+expect_exit "k5 a pointer that is not deploy/NAME.json -> 1" 1
+expect_eq "k5 origin still unchanged" "$before" "$(origin_main)"
+run_cmd k6 -- cpush k5 --message "$MSG"
+expect_exit "k6 neither --artifacts nor PATH -> usage" 2
+
 # =============================================================================
 # ci/gh.sh (annotations, groups, step summary; only under GitHub Actions)
 # =============================================================================
