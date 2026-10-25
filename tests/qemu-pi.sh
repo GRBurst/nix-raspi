@@ -2,7 +2,7 @@
 #
 # qemu-pi.sh — shared helpers to boot the exact SD image in qemu's Raspberry
 # Pi 3B model (-M raspi3b), without root and without touching a card. Sourced
-# by boot-smoke.sh and deploy-smoke.sh; defines functions only.
+# by boot-smoke.sh, deploy-smoke.sh and pull-smoke.sh; defines functions only.
 #
 #   qp_need TOOL...           exit 2 unless every TOOL is on the PATH
 #   qp_find_qemu              set QEMU (RPI_QEMU, PATH, or the store); 1 if none
@@ -10,9 +10,10 @@
 #   qp_unpack IMG.zst WORK    unpack the image to WORK/card.img (8 GiB), extract
 #                             WORK/{Image,initrd,bcm2710-rpi-3-b.dtb}; sets APPEND
 #   qp_boot WORK [FWD_PORT]   start qemu in the background (QPID, QP_MONPORT);
-#                             with FWD_PORT the guest gets a usb-net NIC
-#                             (192.168.100.20) whose sshd is forwarded to
-#                             127.0.0.1:FWD_PORT, without it no network at all
+#                             with FWD_PORT the guest gets a usb-net NIC whose
+#                             sshd (RPI_SMOKE_GUEST_IP, RPI_SMOKE_GUEST_SSH_PORT)
+#                             is forwarded to 127.0.0.1:FWD_PORT, without it
+#                             no network at all
 #   qp_wait_serial RE SECS    wait for RE in WORK/serial.log (0 found, 1 timeout,
 #                             2 qemu exited, 3 kernel panic; reason in QP_WHY)
 #   qp_wait_ssh_banner PORT SECS
@@ -29,7 +30,11 @@
 #
 # Env: RPI_QEMU (qemu-system-aarch64 with -M raspi3b),
 #      RPI_SMOKE_GUEST_SSH_PORT (guest sshd port behind the forward, default
-#      2222; set it wrong on purpose to see the SSH checks fail).
+#      2222 = neptun; set it wrong on purpose to see the SSH checks fail),
+#      RPI_SMOKE_GUEST_IP (guest address the forward targets, default
+#      192.168.100.20 = neptun's static address in qemu's 192.168.100.0/24;
+#      set but empty: the first DHCP lease of qemu's user-net, for a guest in
+#      DHCP mode such as the template's default host).
 #
 # NOTE for callers talking to the guest with ssh: the host's system
 # ssh_config may include files owned by other uids in this sandbox ("Bad
@@ -99,13 +104,14 @@ qp_unpack() {
 
 # qp_boot WORK [FWD_PORT]
 qp_boot() {
-  local work fwd="${2:-}" fwdspec netdev
+  local work fwd="${2:-}" gip="${RPI_SMOKE_GUEST_IP-192.168.100.20}" fwdspec netdev
   local -a net
   work="$(cd "$1" && pwd)"
   QP_WORK="$work"
   QP_MONPORT="$(qp_free_port)"
   if [[ -n "$fwd" ]]; then
-    fwdspec="tcp:127.0.0.1:$fwd-192.168.100.20:${RPI_SMOKE_GUEST_SSH_PORT:-2222}"
+    # an empty guest address makes slirp forward to its first DHCP lease (192.168.100.15)
+    fwdspec="tcp:127.0.0.1:$fwd-$gip:${RPI_SMOKE_GUEST_SSH_PORT:-2222}"
     netdev="user,id=n0,net=192.168.100.0/24,host=192.168.100.1,hostfwd=$fwdspec"
     net=(-netdev "$netdev" -device "usb-net,netdev=n0")
   else
