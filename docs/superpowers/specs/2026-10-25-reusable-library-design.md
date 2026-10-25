@@ -159,11 +159,13 @@ devenv: `secretspec.toml` declares the PSK variables of the example host;
 subcommands `hosts|build|publish|pointer|commit`). Workflows call
 `nix run --inputs-from . rpi#rpi-ci -- <cmd>` in a consumer repo and
 `nix run .#rpi-ci -- <cmd>` here, so template users run the locked scripts
-without copying shell code.
+without copying shell code. (Build and commit jobs: built once before the
+lock update, see the S3 amendment in "11. Risks".)
 
 `.github/workflows/pi.yml` (ours and the template's): weekly cron (lock
-update), push to `main`, manual dispatch (`update-lock` input); main only;
-actions SHA-pinned + dependabot (as now).
+update), push to `main`, manual dispatch (`update-lock` input, and
+`update-library` since S3); main only; actions SHA-pinned + dependabot (as
+now).
 
 1. `hosts`: lists Pi hosts → matrix.
 2. `build` (matrix, `ubuntu-24.04-arm`): lock update if requested, build
@@ -272,3 +274,17 @@ using our cache means trusting our signing key (opt-in, not default).
   16 GB runner).
 - Template users inherit our weekly lock bumps only when they update their
   lock; documented.
+  *Amended 2026-10-25 (final review S3, user decision):* the consumer's
+  weekly run updated its root input `rpi`, i.e. auto-followed our `main`
+  and signed it with the consumer's key. Now `rpi-ci build` updates
+  nixpkgs and nixos-raspberrypi only, in a consumer as the nested inputs
+  `rpi/nixpkgs` and `rpi/nixos-raspberrypi` (`nix flake update
+  rpi/nixpkgs rpi/nixos-raspberrypi`: nvmd keeps its own nixpkgs pin, so
+  its kernel stays cached; spike in the fix report); `rpi` moves only via
+  the manual dispatch input `update-library` (`--update-library`: `rpi`
+  with the inputs it locked) or a local `nix flake update rpi`. The build
+  and commit jobs build `rpi-ci` once from the committed lock (`nix build
+  --inputs-from . rpi#rpi-ci --out-link "$RUNNER_TEMP/rpi-ci"`, here
+  `.#rpi-ci`) before any update and call only that, so the Cachix secrets
+  never meet unreviewed library code (asserted by the `actionlint` check).
+  README and the template README document the trust model.

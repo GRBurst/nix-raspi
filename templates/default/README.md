@@ -56,7 +56,19 @@ With the dotenv provider, quote values that contain spaces or `$` with single
 quotes: `RPI_WIFI_HOME='my pass phrase'`. Without SecretSpec, `export
 RPI_WIFI_HOME=...` before the command works as well.
 
-## Updating the library
+## Updates and trust
 
-`nix flake update rpi` moves the library and its locked nixpkgs and nvmd
-inputs; `nix flake update` moves everything.
+CI (`.github/workflows/pi.yml`) updates nixpkgs and nixos-raspberrypi every
+week (in `flake.lock` they are the library's inputs `rpi/nixpkgs` and
+`rpi/nixos-raspberrypi`), builds, and with a cache publishes to your Pi. The
+library itself (`rpi`: modules, `rpi-pull`, `rpi-ci`) never moves on its own:
+dispatch the workflow with `update-library` ticked, or run
+`nix flake update rpi` and push. Read what changed in the library first:
+whoever can push to it is root on your Pi once you take that update (your CI
+builds and signs it). The CI steps that hold your Cachix secrets run the
+`rpi-ci` of your committed lock, never a freshly updated one.
+
+`nix flake update rpi` also resets nixpkgs and nixos-raspberrypi to the
+library's lock (what its CI built); `nix flake update` moves everything,
+the library included. To pin the library, set
+`inputs.rpi.url = "github:GRBurst/nix-raspi/<tag or revision>"`.

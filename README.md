@@ -513,21 +513,28 @@ cache CI still builds and tests every host, it just publishes nothing.
 **CI** (`.github/workflows/pi.yml`, `ubuntu-24.04-arm`, always on `main`; the
 template ships the same workflow): runs on cron `17 0 * * 0` (Sunday 00:17
 UTC), on every push to `main` except changes to `deploy/**`, `docs/**` and
-`*.md`, and on `workflow_dispatch` (input `update-lock`; dispatched on another
-branch the jobs are skipped: they would build `main` anyway). One run at a time
+`*.md`, and on `workflow_dispatch` (inputs `update-lock` and `update-library`;
+dispatched on another branch the jobs are skipped: they would build `main`
+anyway). One run at a time
 (`concurrency: pi`). The third-party actions are pinned by full commit SHA
 (tag in a trailing comment; the `actionlint` check enforces it) and get no
 secrets: the signing key and the auth token only reach `rpi-ci publish`,
 because together they are root on the Pi. Dependabot
 (`.github/dependabot.yml`) opens weekly PRs that bump the pins: read what
-changed before merging one. The jobs run `rpi-ci` of the locked library
-(`nix run --inputs-from . rpi#rpi-ci -- <command>` in your repo, `nix run
-.#rpi-ci -- <command>` in this one):
+changed before merging one. The jobs run `rpi-ci` of the committed lock:
+`hosts` with `nix run --inputs-from . rpi#rpi-ci -- hosts` in your repo (`nix
+run .#rpi-ci` in this one); the build and commit jobs build it once, before
+anything updates the lock (`nix build --inputs-from . rpi#rpi-ci --out-link
+"$RUNNER_TEMP/rpi-ci"`), and call only that, so the secrets never meet
+library code an update brought in:
 
 1. `hosts`: lists the flake's Pi hosts (`lib.mkPi`) as the build matrix.
 2. `build` (one job per host, named `build <host>`, `contents: read` only):
-   1. cron (or `update-lock`): `nix flake update` of `nixpkgs`,
-      `nixos-raspberrypi` and `rpi` (those that are inputs);
+   1. cron (or `update-lock`): `nix flake update` of `nixpkgs` and
+      `nixos-raspberrypi`; in a repo built on the library those are the
+      library's own (`rpi/nixpkgs`, `rpi/nixos-raspberrypi`), never `rpi`
+      itself. Only the manual `update-library` input moves `rpi` (with the
+      inputs the library locked);
    2. guards (`rl_guard`, the same code as `rpi-deploy`): the kernel must be in
       nvmd's cachix, no kernel/toolchain build, at most 500 local builds. A
       kernel cache miss after the lock update falls back to the committed lock
@@ -710,7 +717,7 @@ always agree.
 
 | what                  | how                                                                                                                                                                                                                                                              |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| build and publish now | Actions → `pi` → *Run workflow*; tick `update-lock` to also update `nixpkgs`/`nixos-raspberrypi` (`gh workflow run pi.yml -f update-lock=true`)                                                                                                                  |
+| build and publish now | Actions → `pi` → *Run workflow*; tick `update-lock` to also update `nixpkgs`/`nixos-raspberrypi` (`gh workflow run pi.yml -f update-lock=true`); in a repo built on the library tick `update-library` to move the library (`rpi`) after reading its changes      |
 | apply on the Pi now   | `ssh root@<address> systemctl start rpi-pull` (blocks until done; ≤ 2 h)                                                                                                                                                                                         |
 | logs                  | `ssh root@<address> journalctl -u rpi-pull`                                                                                                                                                                                                                      |
 | timer                 | `ssh root@<address> systemctl list-timers rpi-pull`                                                                                                                                                                                                              |
@@ -747,9 +754,14 @@ always agree.
 - *Failures are loud and safe.* Cache outage between pointer and pull → exit
   33/38, profile and seq untouched, retried the next day. `rpi-pull` never
   evaluates or builds.
-- *Template users inherit the weekly lock bumps* only when they update their
-  lock (the cron job commits the new `flake.lock` to your repo; `nix flake
-  update rpi` moves the library).
+- *Your repo takes library changes only when you say so.* The weekly run
+  updates nixpkgs and nixos-raspberrypi (in your lock: `rpi/nixpkgs`,
+  `rpi/nixos-raspberrypi`) and commits the lock. The library itself (`rpi`:
+  modules, `rpi-pull`, `rpi-ci`) moves only when you dispatch the workflow
+  with `update-library` or run `nix flake update rpi` and push. Read the
+  library's changes first: whoever can push to it is root on your
+  pull-enabled Pi once you take them (your CI builds and signs it). To pin
+  it, set `inputs.rpi.url` to a tag or revision.
 
 ## Binary cache and pins
 
@@ -772,6 +784,11 @@ What is built where, and what you download:
 
 Consumers keep the locked inputs of the library (`rpi.url = "github:GRBurst/nix-raspi"`
 and **no** `follows` on it): that inheritance is what makes the caches hit.
+The weekly CI update then moves only the library's `nixpkgs` and
+`nixos-raspberrypi` in your lock (`nix flake update rpi/nixpkgs
+rpi/nixos-raspberrypi`); nvmd keeps its own nixpkgs pin, so its kernel stays
+cached (the guards check it). `nix flake update rpi` returns to exactly the
+library's lock.
 `nixos-raspberrypi` is on branch `develop` and **keeps its own nixpkgs pin**,
 so the vendor kernel/firmware derivations hash exactly like nvmd's cachix
 builds. The library's `nixpkgs` (`nixos-26.05`) is a separate input that drives

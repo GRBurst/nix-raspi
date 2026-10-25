@@ -67,7 +67,8 @@ clone() { rm -rf "${T:?}/$1"; git clone -q "$T/origin.git" "$T/$1"; }
 # fixed size) and --recursive (3 paths), path-info per MOCK_CACHE (hit |
 # always-miss | full-miss = miss only once nixos-raspberrypi or rpi was
 # updated in $MOCK_LOCK), flake update (sets the named inputs' revs in
-# <--flake DIR>/flake.lock to <input>-new and appends them to .updated),
+# <--flake DIR>/flake.lock to <input>-new, nested input paths like
+# rpi/nixpkgs too, and appends them to .updated),
 # build --dry-run (logs NIX_CONFIG, cat $MOCK_DRY to stderr), build of
 # checks (rc MOCK_CHECK_RC), build --print-out-paths ($MOCK_TOP, or rc
 # MOCK_BUILD_RC), hash convert (a fixed SRI hash).
@@ -91,7 +92,7 @@ case " $* " in
     hit) exit 0 ;;
     always-miss) exit 1 ;;
     full-miss)
-        if jq -e '(.updated // []) | any(. == "nixos-raspberrypi" or . == "rpi")' "$MOCK_LOCK" >/dev/null; then
+        if jq -e '(.updated // []) | any(. == "nixos-raspberrypi" or . == "rpi/nixos-raspberrypi" or . == "rpi")' "$MOCK_LOCK" >/dev/null; then
             exit 1
         fi ;;
     esac ;;
@@ -103,7 +104,9 @@ case " $* " in
         prev="$a"
     done
     jq -c --args '.updated = ((.updated // []) + $ARGS.positional)
-        | reduce $ARGS.positional[] as $i (.; .nodes[.nodes[.root].inputs[$i]].locked.rev = "\($i)-new")' \
+        | . as $L
+        | reduce $ARGS.positional[] as $i (.;
+            .nodes[reduce ($i | split("/"))[] as $s ($L.root; $L.nodes[.].inputs[$s])].locked.rev = "\($i)-new")' \
         "${ins[@]}" <"$dir/flake.lock" >"$dir/flake.lock.new" && mv "$dir/flake.lock.new" "$dir/flake.lock" ;;
 *" build "*" --dry-run "*)
     echo "dry-nix-config ${NIX_CONFIG//$'\n'/; }" >>"$MOCK_LOG"
@@ -387,31 +390,83 @@ expect_true "b-grp group build <host> < build log < endgroup (${gs:-none} < ${bl
 expect_grep "b-grp the checks have their own group" '^::group::checks neptun$' "$ERR"
 expect_eq "b-grp groups are closed" "$(grep -c '^::group::' "$ERR")" "$(grep -c '^::endgroup::$' "$ERR")"
 
-# b-rpi: a consumer flake (the template): its only Pi input is the library
-# `rpi` (nixpkgs and nixos-raspberrypi come with it), so the lock update
-# updates rpi; the summary reads the revisions through rpi.
+# b-rpi: a consumer flake (the template): its only root input is the
+# library `rpi`. S3 (final review): the weekly (or update-lock) update moves
+# the library's nixpkgs and nixos-raspberrypi as nested inputs
+# (rpi/nixpkgs, rpi/nixos-raspberrypi), never `rpi` itself: library code
+# changes only through --update-library (a manual dispatch) or a local
+# `nix flake update rpi`. The summary reads the revisions through rpi.
 clone c
 CLOCK='{"nodes":{"nixos-raspberrypi":{"locked":{"rev":"rp1"}},"nixpkgs":{"locked":{"rev":"np1"}},"root":{"inputs":{"rpi":"rpi"}},"rpi":{"inputs":{"nixos-raspberrypi":"nixos-raspberrypi","nixpkgs":"nixpkgs"},"locked":{"rev":"lib1"}}},"root":"root","version":7}'
 printf '%s\n' "$CLOCK" >"$T/c/flake.lock"
 git -C "$T/c" commit -q -am "consumer lock"
+cbuild() { MOCK_LOCK="$T/c/flake.lock" MOCK_DRY="$HYB" bash "$CI_DIR/build.sh" --flake "$T/c" --host neptun "$@"; }
+crevs() { jq -r '.nodes.rpi.locked.rev, .nodes.nixpkgs.locked.rev, .nodes."nixos-raspberrypi".locked.rev' "$T/c/flake.lock" | xargs; }
+for how in "--event schedule" "--event workflow_dispatch --update-lock"; do
+    reset_log
+    # shellcheck disable=SC2086 # two words
+    GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$T/c.md" run_cmd b-rpi -- cbuild $how
+    expect_exit "b-rpi ($how) consumer lock update builds" 0
+    expect_eq "b-rpi ($how) updates the library's nixpkgs and nixos-raspberrypi" 1 \
+        "$(log_count "^nix flake update --accept-flake-config --flake $T/c rpi/nixpkgs rpi/nixos-raspberrypi\$")"
+    expect_eq "b-rpi ($how) one lock update" 1 "$(log_count 'flake update')"
+    expect_eq "b-rpi ($how) never the library input rpi itself" 0 "$(log_count 'flake update .* rpi( |$)')"
+    expect_eq "b-rpi ($how) lock: rpi as committed, its inputs updated" \
+        "lib1 rpi/nixpkgs-new rpi/nixos-raspberrypi-new" "$(crevs)"
+    git -C "$T/c" checkout -q -- flake.lock
+done
+expect_grep "b-rpi summary: nixpkgs revision through rpi" 'nixpkgs.*rpi/nixpkgs-new' "$T/c.md"
+expect_grep "b-rpi summary: lock diff names the nested inputs" \
+    'lock: updated.*nixpkgs `np1` → `rpi/nixpkgs-new`.*nixos-raspberrypi `rp1` → `rpi/nixos-raspberrypi-new`' "$T/c.md"
+expect_not_grep "b-rpi summary: rpi unchanged" 'rpi `lib1` →' "$T/c.md"
+
 reset_log
-GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$T/c.md" MOCK_LOCK="$T/c/flake.lock" MOCK_DRY="$HYB" \
-    run_cmd b-rpi -- bash "$CI_DIR/build.sh" --flake "$T/c" --host neptun --event schedule
-expect_exit "b-rpi consumer lock update builds" 0
-expect_eq "b-rpi updates the library input rpi only" 1 \
-    "$(log_count "^nix flake update --accept-flake-config --flake $T/c rpi\$")"
-expect_eq "b-rpi one lock update" 1 "$(log_count 'flake update')"
-expect_grep "b-rpi nixpkgs revision through rpi" 'nixpkgs.*np1' "$T/c.md"
-expect_grep "b-rpi nixos-raspberrypi revision through rpi" 'nixos-raspberrypi.*rp1' "$T/c.md"
-expect_grep "b-rpi lock diff names rpi" 'lock: updated.*rpi `lib1` → `rpi-new`' "$T/c.md"
+MOCK_CACHE=full-miss run_cmd b-rpi3 -- cbuild --event schedule
+expect_exit "b-rpi kernel miss after the nvmd update -> nixpkgs-only fallback builds" 0
+expect_eq "b-rpi fallback: second update is rpi/nixpkgs only" 1 "$(log_count "flake update .* $T/c rpi/nixpkgs\$")"
+expect_eq "b-rpi fallback: lock = committed + rpi/nixpkgs" "lib1 rpi/nixpkgs-new rp1" "$(crevs)"
+expect_grepf "b-rpi fallback: says so" "nixpkgs only" "$ERR"
 git -C "$T/c" checkout -q -- flake.lock
+
+# b-lib: --update-library (the workflow's manual `update-library` input)
+# moves rpi, with the nixpkgs and nvmd the library locked (what its CI
+# built); the nested update is not added on top
+for how in "--event workflow_dispatch --update-library" "--event schedule --update-library"; do
+    reset_log
+    # shellcheck disable=SC2086
+    GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$T/c-lib.md" run_cmd b-lib -- cbuild $how
+    expect_exit "b-lib ($how) builds" 0
+    expect_eq "b-lib ($how) updates rpi only" 1 "$(log_count "^nix flake update --accept-flake-config --flake $T/c rpi\$")"
+    expect_eq "b-lib ($how) one lock update" 1 "$(log_count 'flake update')"
+    git -C "$T/c" checkout -q -- flake.lock
+done
+expect_grep "b-lib summary: lock diff names rpi" 'lock: updated.*rpi `lib1` → `rpi-new`' "$T/c-lib.md"
 reset_log
-MOCK_CACHE=full-miss MOCK_LOCK="$T/c/flake.lock" MOCK_DRY="$HYB" \
-    run_cmd b-rpi3 -- bash "$CI_DIR/build.sh" --flake "$T/c" --host neptun --event schedule
-expect_exit "b-rpi kernel miss after the rpi update -> builds the committed lock" 0
-expect_eq "b-rpi fallback: lock as committed" "$CLOCK" "$(cat "$T/c/flake.lock")"
-expect_eq "b-rpi fallback: no second update" 1 "$(log_count 'flake update')"
-expect_grepf "b-rpi fallback: says so" "committed lock" "$ERR"
+MOCK_CACHE=full-miss run_cmd b-lib3 -- cbuild --event workflow_dispatch --update-library
+expect_exit "b-lib kernel miss after the rpi update -> builds the committed lock" 0
+expect_eq "b-lib fallback: lock as committed" "$CLOCK" "$(cat "$T/c/flake.lock")"
+expect_eq "b-lib fallback: no second update" 1 "$(log_count 'flake update')"
+expect_grepf "b-lib fallback: says so" "committed lock" "$ERR"
+git -C "$T/c" checkout -q -- flake.lock
+# this repository (no rpi input): --update-library only warns
+reset_log
+MOCK_DRY="$HYB" run_cmd b-lib4 -- build --event workflow_dispatch --update-library
+expect_exit "b-lib without an rpi input builds" 0
+expect_eq "b-lib without an rpi input: no lock update" 0 "$(log_count 'flake update')"
+expect_grepf "b-lib without an rpi input: warns" "no input rpi" "$ERR"
+run_cmd b-lib5 -- build --help
+expect_grepf "b-lib --help names --update-library" "--update-library" "$OUT"
+
+# b-rpi-f: a consumer whose nixpkgs is its own root input that rpi follows:
+# the root nixpkgs and the library's nixos-raspberrypi
+clone cf
+printf '%s\n' '{"nodes":{"nixos-raspberrypi":{"locked":{"rev":"rp1"}},"nixpkgs":{"locked":{"rev":"np1"}},"root":{"inputs":{"nixpkgs":"nixpkgs","rpi":"rpi"}},"rpi":{"inputs":{"nixos-raspberrypi":"nixos-raspberrypi","nixpkgs":["nixpkgs"]},"locked":{"rev":"lib1"}}},"root":"root","version":7}' >"$T/cf/flake.lock"
+git -C "$T/cf" commit -q -am "consumer lock, follows"
+reset_log
+MOCK_LOCK="$T/cf/flake.lock" MOCK_DRY="$HYB" run_cmd b-rpi-f -- bash "$CI_DIR/build.sh" --flake "$T/cf" --host neptun --event schedule
+expect_exit "b-rpi-f builds" 0
+expect_eq "b-rpi-f updates root nixpkgs and rpi/nixos-raspberrypi" 1 \
+    "$(log_count "^nix flake update --accept-flake-config --flake $T/cf nixpkgs rpi/nixos-raspberrypi\$")"
 
 # =============================================================================
 # ci/publish.sh

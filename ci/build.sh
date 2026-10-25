@@ -3,7 +3,7 @@
 # ci/build.sh — CI build of one Pi host's system (`rpi-ci build`, one job of
 # the workflow's host matrix).
 #
-#   ci/build.sh --host NAME [--event NAME] [--update-lock] [--flake DIR] [--max-builds N]
+#   ci/build.sh --host NAME [--event NAME] [--update-lock] [--update-library] [--flake DIR] [--max-builds N]
 #
 # 1. Host info (rpi-lib.sh rl_host_info of nixosConfigurations.NAME):
 #    system.name and rpi.pull.cache. A cache is added as an extra
@@ -11,9 +11,12 @@
 #    (--option extra-substituters / extra-trusted-public-keys; nix-daemon
 #    honours them only for a trusted user, which the runner's user is).
 # 2. Lock update when NAME (default $GITHUB_EVENT_NAME) is `schedule` or
-#    --update-lock is given: `nix flake update` of those of nixpkgs,
-#    nixos-raspberrypi and rpi (this library, in a flake built on it) that
-#    are inputs of the flake.
+#    --update-lock is given: `nix flake update` of nixpkgs and
+#    nixos-raspberrypi, as root inputs or, in a flake built on this library
+#    (input rpi, the template), as rpi/nixpkgs and rpi/nixos-raspberrypi.
+#    Never rpi itself (final review S3): the library's code reaches a
+#    consumer's Pi only through --update-library (the workflow's manual
+#    update-library input), which updates rpi with the inputs it locked.
 # 3. Guards (rpi-lib.sh rl_guard): the kernel must be in the nvmd cache, no
 #    kernel/toolchain build, at most N local builds (default 500).
 #    A kernel cache miss right after a lock update falls back to the
@@ -37,11 +40,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat <<EOF
-usage: ci/build.sh --host NAME [--event NAME] [--update-lock] [--flake DIR] [--max-builds N]
+usage: ci/build.sh --host NAME [--event NAME] [--update-lock] [--update-library] [--flake DIR] [--max-builds N]
 
   --host NAME     the Pi host (nixosConfigurations.NAME) to build
   --event NAME    GitHub event (default \$GITHUB_EVENT_NAME); schedule updates the lock
-  --update-lock   update nixpkgs, nixos-raspberrypi / rpi in flake.lock first
+  --update-lock   update nixpkgs and nixos-raspberrypi (or rpi/nixpkgs and
+                  rpi/nixos-raspberrypi) in flake.lock first; never rpi
+  --update-library  update rpi (the library, with the inputs it locked) first
   --flake DIR     flake directory (default: the working directory)
   --max-builds N  build guard limit (default 500)
 
@@ -51,12 +56,13 @@ EOF
 
 die_usage() { echo "ci/build.sh: $1" >&2; usage >&2; exit 2; }
 
-event="${GITHUB_EVENT_NAME:-}" update_lock=0 dir="$PWD" max=500 host=""
+event="${GITHUB_EVENT_NAME:-}" update_lock=0 update_library=0 dir="$PWD" max=500 host=""
 while (($#)); do
     case "$1" in
     --event | --flake | --max-builds | --host) (($# >= 2)) || die_usage "$1 needs a value" ;;&
     --event) event="$2"; shift 2 ;;
     --update-lock) update_lock=1; shift ;;
+    --update-library) update_library=1; shift ;;
     --flake) dir="$2"; shift 2 ;;
     --max-builds) max="$2"; shift 2 ;;
     --host) host="$2"; shift 2 ;;
@@ -153,15 +159,38 @@ if [[ -n "$cache_name" || -n "$cache_key" ]]; then
 fi
 
 # --- lock update ----------------------------------------------------------------
+# lock_targets: the inputs to update, one per line. --update-lock: nixpkgs
+# and nixos-raspberrypi, each as a root input, else as the library's own
+# input (rpi/<name>, a flake built on this library: the template); never
+# rpi itself. --update-library: rpi, with the nixpkgs and nixos-raspberrypi
+# the library locked (what its CI built), so not also its nested inputs.
+# shellcheck disable=SC2016 # jq program
+TARGETS_JQ='
+.nodes[.root].inputs as $i
+| (if ($i.rpi | type) == "string" then .nodes[$i.rpi].inputs // {} else {} end) as $r
+| (if $upd then ("nixpkgs", "nixos-raspberrypi") as $x
+     | if $i[$x] != null then $x
+       elif ($lib | not) and ($r[$x] | type) == "string" then "rpi/\($x)"
+       else empty end
+   else empty end),
+  (if $lib and $i.rpi != null then "rpi" else empty end)'
+lock_targets() {
+    local upd=false lib=false
+    if ((update_lock)); then upd=true; fi
+    if ((update_library)); then lib=true; fi
+    jq -r --argjson upd "$upd" --argjson lib "$lib" "$TARGETS_JQ" "$lock" 2>/dev/null || true
+}
 updated=()
-if ((update_lock)); then
+if ((update_lock || update_library)); then
     revs_before="$(lock_revs)"
-    mapfile -t updated < <(jq -r '.nodes[.root].inputs as $i
-        | ("nixpkgs", "nixos-raspberrypi", "rpi") | select($i[.] != null)' "$lock" 2>/dev/null || true)
+    mapfile -t updated < <(lock_targets)
+    if ((update_library)) && [[ " ${updated[*]} " != *" rpi "* ]]; then
+        gh_warning "--update-library: no input rpi in $lock (the library itself has none)"
+    fi
     if ((${#updated[@]})); then
         update "${updated[@]}" || fail "$RL_E_BUILD" "lock update of $host failed"
-    else
-        gh_warning "lock not updated: none of nixpkgs, nixos-raspberrypi, rpi is an input in $lock"
+    elif ((update_lock)); then
+        gh_warning "lock not updated: neither nixpkgs nor nixos-raspberrypi is an input (or an input of rpi) in $lock"
     fi
 fi
 
@@ -187,16 +216,20 @@ rc=0
 guard || rc=$?
 if ((rc == RL_E_CACHE && ${#updated[@]})); then
     git -C "$dir" checkout -- flake.lock
-    if [[ " ${updated[*]} " == *" nixpkgs "* && ${#updated[@]} -gt 1 ]]; then
-        echo "ci/build.sh: kernel not cached after the update; retrying with nixpkgs only" >&2
-        update nixpkgs || fail "$RL_E_BUILD" "lock update of $host failed"
+    np="" # nixpkgs or rpi/nixpkgs, when updated
+    for u in "${updated[@]}"; do
+        if [[ "$u" == nixpkgs || "$u" == rpi/nixpkgs ]]; then np="$u"; fi
+    done
+    if [[ -n "$np" && ${#updated[@]} -gt 1 ]]; then
+        echo "ci/build.sh: kernel not cached after the update; retrying with nixpkgs only ($np)" >&2
+        update "$np" || fail "$RL_E_BUILD" "lock update of $host failed"
     else
         echo "ci/build.sh: kernel not cached after the update; building the committed lock" >&2
     fi
     rc=0
     guard || rc=$?
 fi
-if ((update_lock)); then
+if ((update_lock || update_library)); then
     # "INPUT `OLD` → `NEW`" for each input whose revision changed
     changes="$(awk 'NR == FNR { if ($1 != "") b[$1] = $2; next }
         { o = ($1 in b) ? b[$1] : "-" } o != $2 { printf "%s%s `%s` → `%s`", sep, $1, o, $2; sep = "; " }' \

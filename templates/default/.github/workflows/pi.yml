@@ -7,6 +7,13 @@
 #
 # Repository secrets, needed once a host sets rpi.pull.cache:
 # CACHIX_AUTH_TOKEN (push and pin) and CACHIX_SIGNING_KEY (signs the paths).
+#
+# Trust: the weekly lock update moves nixpkgs and nixos-raspberrypi only. In
+# a flake built on the library (input rpi) the library itself moves only
+# when you dispatch with update-library (or run `nix flake update rpi`):
+# whoever can push to the library is root on every pull-enabled Pi that
+# follows it. rpi-ci is resolved from the committed lock before any update,
+# so the secrets never meet library code the update brought in.
 name: pi
 on:
   schedule:
@@ -17,7 +24,11 @@ on:
   workflow_dispatch:
     inputs:
       update-lock:
-        description: "Update flake.lock (nixpkgs, nixos-raspberrypi or rpi) before building"
+        description: "Update flake.lock (nixpkgs, nixos-raspberrypi) before building"
+        type: boolean
+        default: false
+      update-library:
+        description: "Also move the rpi input (the nix-raspi library) to its latest main: review its changes first"
         type: boolean
         default: false
 # Read only; the commit job alone may write (the build jobs hold the
@@ -81,6 +92,11 @@ jobs:
             accept-flake-config = true
             extra-substituters = https://nixos-raspberrypi.cachix.org
             extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+      # rpi-ci from the committed lock, once, before the lock update: the
+      # later steps (publish gets the Cachix secrets) never run library code
+      # the update brought in.
+      - id: rpi-ci
+        run: nix build --inputs-from . rpi#rpi-ci --out-link "$RUNNER_TEMP/rpi-ci"
       # Updates the lock when asked (or on schedule), builds the host's
       # system and then every checks.<system> of the flake, before anything
       # is published.
@@ -88,10 +104,12 @@ jobs:
         env:
           HOST: ${{ matrix.host }}
           UPDATE_LOCK: ${{ inputs.update-lock }}
+          UPDATE_LIBRARY: ${{ inputs.update-library }}
         run: |
           set -- --host "$HOST" --event "$GITHUB_EVENT_NAME"
           if [ "$UPDATE_LOCK" = true ]; then set -- "$@" --update-lock; fi
-          nix run --inputs-from . rpi#rpi-ci -- build "$@" >> "$GITHUB_OUTPUT"
+          if [ "$UPDATE_LIBRARY" = true ]; then set -- "$@" --update-library; fi
+          "$RUNNER_TEMP/rpi-ci/bin/rpi-ci" build "$@" >> "$GITHUB_OUTPUT"
       # Push the closure and pin it; without a cache: notice, published=false.
       - id: publish
         env:
@@ -99,7 +117,8 @@ jobs:
           TOP: ${{ steps.build.outputs.top }}
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
           CACHIX_SIGNING_KEY: ${{ secrets.CACHIX_SIGNING_KEY }}
-        run: nix run --inputs-from . rpi#rpi-ci -- publish --host "$HOST" --top "$TOP" >> "$GITHUB_OUTPUT"
+        run: |
+          "$RUNNER_TEMP/rpi-ci/bin/rpi-ci" publish --host "$HOST" --top "$TOP" >> "$GITHUB_OUTPUT"
       # The pointer only after push + pin: the Pi must find what it points at.
       - id: pointer
         if: steps.publish.outputs.published == 'true'
@@ -109,7 +128,7 @@ jobs:
           SEQ: ${{ github.run_number }}
         run: |
           git fetch origin +refs/heads/main:refs/remotes/origin/main >&2
-          nix run --inputs-from . rpi#rpi-ci -- pointer --host "$NAME" --seq "$SEQ" --rev "$(git rev-parse HEAD)" --file "deploy/$NAME.json" "$TOP" >> "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/rpi-ci/bin/rpi-ci" pointer --host "$NAME" --seq "$SEQ" --rev "$(git rev-parse HEAD)" --file "deploy/$NAME.json" "$TOP" >> "$GITHUB_OUTPUT"
       # The lock (updated or not) and the pointer for the commit job.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -144,10 +163,13 @@ jobs:
             accept-flake-config = true
             extra-substituters = https://nixos-raspberrypi.cachix.org
             extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+      # rpi-ci from main's committed lock
+      - id: rpi-ci
+        run: nix build --inputs-from . rpi#rpi-ci --out-link "$RUNNER_TEMP/rpi-ci"
       - id: commit
         env:
           BASE: ${{ needs.hosts.outputs.rev }}
           ARTIFACTS: ${{ runner.temp }}/artifacts
           SEQ: ${{ github.run_number }}
         run: |
-          nix run --inputs-from . rpi#rpi-ci -- commit --base "$BASE" --artifacts "$ARTIFACTS" --message "pi: build $SEQ ($GITHUB_EVENT_NAME)" >> "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/rpi-ci/bin/rpi-ci" commit --base "$BASE" --artifacts "$ARTIFACTS" --message "pi: build $SEQ ($GITHUB_EVENT_NAME)" >> "$GITHUB_OUTPUT"

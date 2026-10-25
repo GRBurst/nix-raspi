@@ -13,9 +13,10 @@
     ];
   };
 
-  # Keep the name `rpi` (the CI workflow runs `nix run --inputs-from . rpi#rpi-ci`)
-  # and do not add `follows`: inheriting the library's lock is what makes the
-  # nixpkgs and nvmd caches hit.
+  # Keep the name `rpi` (the CI workflow takes `--inputs-from . rpi#rpi-ci` and
+  # updates `rpi/nixpkgs` and `rpi/nixos-raspberrypi` weekly, never `rpi`
+  # itself: README "Updates and trust") and do not add `follows`: inheriting
+  # the library's lock is what makes the nixpkgs and nvmd caches hit.
   inputs.rpi.url = "github:GRBurst/nix-raspi";
 
   outputs = { rpi, ... }: {

@@ -235,7 +235,7 @@ Evidence in `nixos/.scratch/m7/` (untracked). Still valid except where noted.
 - **D16** `rpi-ci build` also builds every `checks.<system>` of the flake after the toplevel (none: a notice).
 - **D17** `ci/gh.sh`: notices, warnings, errors, groups and summaries only under `GITHUB_ACTIONS=true` (plain `rpi-ci: <level>: …` on stderr otherwise); messages are escaped.
 - **D18** The pointer gains `bootFp` (sha256 of the boot fingerprint); the summary says switch, reboot or unknown; `rpi-pull` ignores unknown fields.
-- **D19** Ours `.github/workflows/pi.yml` = the template's with `nix run .#rpi-ci` for `nix run --inputs-from . rpi#rpi-ci`; asserted textually (`actionlint` check).
+- **D19** Ours `.github/workflows/pi.yml` = the template's with `.#rpi-ci` for `--inputs-from . rpi#rpi-ci`; asserted textually (`actionlint` check). Build and commit jobs build `rpi-ci` once from the committed lock (`--out-link "$RUNNER_TEMP/rpi-ci"`) before the lock update; the weekly update never moves `rpi` (`update-library` does; final review S3).
 - **D20** Push trigger `paths-ignore: ["deploy/**", "docs/**", "**.md"]`.
 - **D21** PSKs reach `rpi-deploy` as env variables; the content goes over stdin (`ssh … install -m 600 /dev/stdin`, `sudo install … /dev/stdin`), never a temp file or argv. The module's tmpfiles rule hands the file to the `wpa_supplicant` user (final review B1).
 - **D22** Template: `hosts/rpi.nix`, `nixosConfigurations.rpi`, input named `rpi`, re-exports `apps` and `packages`, copies our `nixConfig`, minimal devenv files.
@@ -430,6 +430,9 @@ Needs the Pi, a card ≥ 8 GiB, the LAN cable, ideally a 3.3 V USB-UART on GPIO
 - [ ] A scratch repo from `nix flake init -t github:GRBurst/nix-raspi`:
       `nix run --inputs-from . rpi#rpi-ci -- hosts` prints `hosts=["rpi"]` and
       its `pi` workflow is green without a cache.
+      Dispatched with `update-lock`, its `flake.lock` commit changes only
+      `rpi/nixpkgs` and `rpi/nixos-raspberrypi` (`rpi` keeps its rev, the
+      kernel stays cached); with `update-library`, `rpi` moves (final review S3).
 
 ### Wi-Fi and Bluetooth (spec §10.2; qemu has neither radio)
 
