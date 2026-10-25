@@ -100,6 +100,22 @@ in
     && readableOnlyBy etcFile
     && tmpfilesFor t off.rpi.wifi.secretsFile == [ ];
 
+  # N-e (re-review): the rule follows the unit's User/Group (not a fixed
+  # name): without hardening the daemon runs as root, so the file is root's
+  "the secrets file's owner follows the unit's User/Group" =
+    let
+      plain = mk [ { rpi.wifi = { enable = true; inherit networks; };
+                     networking.wireless.enableHardening = false; } ];
+      named = mk [ { rpi.wifi = { enable = true; inherit networks; };
+                     networking.wireless.interfaces = [ "wlan0" ];
+                     systemd.services."wpa_supplicant-wlan0".serviceConfig = {
+                       User = lib.mkForce "wpa-x"; Group = lib.mkForce "wpa-y"; };
+                   } ];
+    in
+    !(plain.config.systemd.services.wpa_supplicant.serviceConfig ? User)
+    && tmpfilesFor plain "/var/lib/rpi/wireless.env" == [ [ "z" "/var/lib/rpi/wireless.env" "0600" "root" "root" "-" ] ]
+    && tmpfilesFor named "/var/lib/rpi/wireless.env" == [ [ "z" "/var/lib/rpi/wireless.env" "0600" "wpa-x" "wpa-y" "-" ] ];
+
   # S2 (final review): nixpkgs bind-mounts the file without `-`, so a
   # missing file fails the unit and with it the switch (exit 14/36); the
   # unit is skipped instead until `rpi-deploy secrets` writes the file.

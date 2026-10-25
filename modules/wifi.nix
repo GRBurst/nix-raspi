@@ -23,6 +23,11 @@ let
     let ifs = config.networking.wireless.interfaces; in
     if ifs == [ ] then [ "wpa_supplicant" ] else map (i: "wpa_supplicant-${i}") ifs;
   firmware = nixos-raspberrypi.packages.${pkgs.stdenv.hostPlatform.system}.raspberrypiWirelessFirmware;
+  # the user/group the daemon runs as (nixpkgs: wpa_supplicant with
+  # enableHardening, else root; the same for every unit), so the file's
+  # owner follows a nixpkgs change (re-review N-e)
+  svc = config.systemd.services.${lib.head units}.serviceConfig;
+  owner = "${svc.User or "root"} ${svc.Group or "root"}";
 in
 {
   options.rpi.wifi = {
@@ -93,7 +98,7 @@ in
         # the daemon reads the file as this user through a read-only bind
         # mount (the 0700 directory is not in the way); `rpi-deploy
         # secrets` applies the rule with systemd-tmpfiles --prefix=<file>
-        "z ${cfg.secretsFile} 0600 wpa_supplicant wpa_supplicant -"
+        "z ${cfg.secretsFile} 0600 ${owner} -"
       ];
     })
   ];
