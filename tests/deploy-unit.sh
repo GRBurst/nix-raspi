@@ -1141,4 +1141,152 @@ reset_log
 MOCK_HOSTS='["a","b"]' run_cmd tp8 -- rd status
 expect_exit "tp8 status, several hosts, no target -> exit 2" 2
 expect_eq "tp8 several hosts -> no ssh" 0 "$(log_count '^ssh ')"
+
+# =============================================================================
+# T3.3 secrets: the Wi-Fi PSKs named in rpi.wifi.networks, from the
+# environment, through ssh's stdin into rpi.wifi.secretsFile (P8)
+# =============================================================================
+# ssh: saves its stdin to $T/ssh.stdin (MOCK_SSH_RC fails it)
+mock ssh <<'EOF'
+cat >"$MOCK_ROOT/ssh.stdin"
+exit "${MOCK_SSH_RC:-0}"
+EOF
+# wifi_info NETWORKS_JSON [ENABLE [SECRETS_FILE]]: host info with Wi-Fi
+wifi_info() {
+    jq -cn --argjson n "$1" --argjson e "${2:-true}" --arg f "${3-/var/lib/rpi/wireless.env}" \
+        '{name: "rpi", target: "root@rpi", port: 22, cache: null,
+          wifi: {enable: $e, networks: $n, secretsFile: $f}}'
+}
+NETS='{"Home Net":"RPI_WIFI_HOME","Lab":"RPI_WIFI_LAB"}'
+# values with shell/ssh metacharacters; the S3cr3t* tokens must never leak
+PSK_HOME='S3cr3tH0me pass"word $x `y` ;& -n'
+PSK_LAB="-S3cr3tLab 'q' \\"
+# p8 VAR...: the expected file content (P8): sorted VAR=value lines
+p8() { local v; for v in "$@"; do printf '%s=%s\n' "$v" "${!v}"; done | LC_ALL=C sort -u; }
+# leaks: PSK tokens in the mock log (argv of every mocked command) or output
+leaks() { grep -cE 'S3cr3t(H0me|Lab)' "$MOCK_LOG" "$OUT" "$ERR" | awk -F: '{ s += $NF } END { print s + 0 }'; }
+sec() { MOCK_INFO="$(wifi_info "$NETS")" rd secrets "$@"; }
+export RPI_WIFI_HOME="$PSK_HOME" RPI_WIFI_LAB="$PSK_LAB"
+leaked=0
+
+reset_log; rm -f "$T/ssh.stdin"
+run_cmd sc1 -- sec
+expect_exit "sc1 secrets succeeds" 0
+expect_true "sc1 ssh stdin = the sorted VAR=PSK lines (P8)" cmp -s <(p8 RPI_WIFI_HOME RPI_WIFI_LAB) "$T/ssh.stdin"
+expect_eq "sc1 one line per variable" 2 "$(grep -c . "$T/ssh.stdin")"
+expect_eq "sc1 one ssh call" 1 "$(log_count '^ssh ')"
+expect_grep "sc1 ssh to the host's target and port" "^ssh -p $INFO_PORT $INFO_TARGET " "$MOCK_LOG"
+expect_grepf "sc1 installs stdin as the secrets file, mode 600" "install -m 600 /dev/stdin /var/lib/rpi/wireless.env" "$MOCK_LOG"
+expect_grepf "sc1 restarts wpa_supplicant if running" "systemctl try-restart wpa_supplicant.service" "$MOCK_LOG"
+expect_grepf "sc1 creates the directory 0700 only if missing" "mkdir -p -m 700 /var/lib/rpi &&" "$MOCK_LOG"
+expect_true "sc1 order: dir, install, restart" grep -qE \
+    'mkdir -p -m 700 /var/lib/rpi && install -m 600 /dev/stdin /var/lib/rpi/wireless.env && systemctl try-restart wpa_supplicant\.service$' "$MOCK_LOG"
+expect_not_grep "sc1 never chmods an existing directory (install -d)" "install -d" "$MOCK_LOG"
+expect_eq "sc1 the host info is evaluated once" 1 "$(log_count "$INFO_RE")"
+leaked=$((leaked + $(leaks)))
+
+# two SSIDs sharing a variable -> one line; line order = sort of the lines
+# (RPI_W1=... sorts before RPI_W=...)
+export RPI_W=S3cr3tH0me1 RPI_W1=S3cr3tH0me2
+reset_log; rm -f "$T/ssh.stdin"
+MOCK_INFO="$(wifi_info '{"a":"RPI_W","b":"RPI_W1","c":"RPI_W"}')" run_cmd sc1 -- rd secrets
+expect_exit "sc1 shared variable succeeds" 0
+expect_true "sc1 shared variable -> one line each, sorted lines" cmp -s <(p8 RPI_W RPI_W1) "$T/ssh.stdin"
+expect_eq "sc1 RPI_W1 line first" "RPI_W1=S3cr3tH0me2" "$(head -n1 "$T/ssh.stdin")"
+leaked=$((leaked + $(leaks)))
+unset RPI_W RPI_W1
+
+reset_log
+MOCK_INFO="$(wifi_info "$NETS" false)" run_cmd sc2 -- rd secrets
+expect_exit "sc2 Wi-Fi off -> exit 2" 2
+expect_grepf "sc2 says rpi.wifi is disabled" "rpi.wifi is disabled for rpi" "$ERR"
+expect_eq "sc2 -> no ssh" 0 "$(log_count '^ssh ')"
+reset_log
+run_cmd sc2 -- rd secrets
+expect_exit "sc2 Wi-Fi off (default host info) -> exit 2" 2
+
+for unset_how in unset empty; do
+    reset_log
+    if [[ $unset_how == unset ]]; then
+        run_cmd sc3 -- env -u RPI_WIFI_LAB MOCK_INFO="$(wifi_info "$NETS")" bash "$RPI_DEPLOY_SRC" secrets
+    else
+        RPI_WIFI_LAB='' run_cmd sc3 -- sec
+    fi
+    expect_exit "sc3 RPI_WIFI_LAB $unset_how -> exit 2" 2
+    expect_grepf "sc3 ($unset_how) names the variable and its network" \
+        'missing PSK variable RPI_WIFI_LAB (rpi.wifi.networks."Lab")' "$ERR"
+    expect_not_grep "sc3 ($unset_how) RPI_WIFI_HOME is fine" "RPI_WIFI_HOME" "$ERR"
+    expect_eq "sc3 ($unset_how) -> no ssh" 0 "$(log_count '^ssh ')"
+    leaked=$((leaked + $(leaks)))
+done
+reset_log
+run_cmd sc3 -- env -u RPI_WIFI_LAB -u RPI_WIFI_HOME MOCK_INFO="$(wifi_info "$NETS")" bash "$RPI_DEPLOY_SRC" secrets
+expect_grepf "sc3 every missing variable is named (HOME)" "missing PSK variable RPI_WIFI_HOME" "$ERR"
+expect_grepf "sc3 every missing variable is named (LAB)" "missing PSK variable RPI_WIFI_LAB" "$ERR"
+
+reset_log
+RPI_WIFI_LAB=$'S3cr3tLab\nsecond' run_cmd sc5 -- sec
+expect_exit "sc5 PSK with a newline -> exit 2" 2
+expect_grepf "sc5 says which variable contains a newline" "RPI_WIFI_LAB contains a newline" "$ERR"
+expect_eq "sc5 -> no ssh" 0 "$(log_count '^ssh ')"
+leaked=$((leaked + $(leaks)))
+reset_log
+RPI_WIFI_LAB=$'S3cr3tLab\n' run_cmd sc5 -- sec
+expect_exit "sc5 trailing newline -> exit 2" 2
+leaked=$((leaked + $(leaks)))
+
+reset_log
+MOCK_INFO="$(wifi_info '{}')" run_cmd sc6 -- rd secrets
+expect_exit "sc6 no networks -> exit 2" 2
+expect_grepf "sc6 says the networks are empty" "rpi.wifi.networks is empty for rpi" "$ERR"
+expect_eq "sc6 -> no ssh" 0 "$(log_count '^ssh ')"
+
+# sc7 the secrets file goes into a remote command line and below a mount
+# point: only plain absolute paths
+for f in 'relative/x' '/var/lib/rpi/x y' '/x;reboot' '/var/lib/../../etc/x' '/a/$(id)' '/a/' ''; do
+    reset_log
+    MOCK_INFO="$(wifi_info "$NETS" true "$f")" run_cmd sc7 -- rd secrets
+    expect_exit "sc7 secretsFile '$f' -> exit 2" 2
+    expect_grepf "sc7 '$f' names rpi.wifi.secretsFile" "rpi.wifi.secretsFile" "$ERR"
+    expect_eq "sc7 '$f' -> no ssh" 0 "$(log_count '^ssh ')"
+done
+
+# sc8 variable names are read with ${!VAR}: plain names only (no subscript
+# evaluation)
+for v in 'A[$(touch $MOCK_ROOT/pwned)]' '1X' 'A-B' 'A B'; do
+    reset_log
+    MOCK_INFO="$(wifi_info "$(jq -cn --arg v "$v" '{n: $v}')")" run_cmd sc8 -- rd secrets
+    expect_exit "sc8 variable name '$v' -> exit 2" 2
+    expect_grepf "sc8 '$v' is called invalid" "invalid PSK variable name" "$ERR"
+    expect_eq "sc8 '$v' -> no ssh" 0 "$(log_count '^ssh ')"
+done
+expect_true "sc8 no command ran from a variable name" test ! -e "$T/pwned"
+
+reset_log
+MOCK_SSH_RC=255 run_cmd sc9 -- sec
+expect_exit "sc9 ssh failure -> RL_E_DEPLOY" 14
+expect_grepf "sc9 says writing failed" "/var/lib/rpi/wireless.env" "$ERR"
+leaked=$((leaked + $(leaks)))
+
+reset_log
+RPI_TARGET=pi@envhost run_cmd sc10 -- sec --port 2202
+expect_exit "sc10 secrets --port/RPI_TARGET succeeds" 0
+expect_grep "sc10 --port/RPI_TARGET honoured" "^ssh -p 2202 pi@envhost " "$MOCK_LOG"
+reset_log
+run_cmd sc10 -- sec --target a@b --port 1
+expect_eq "sc10 target+port given -> host info still read once (Wi-Fi)" 1 "$(log_count "$INFO_RE")"
+reset_log
+MOCK_HOSTS='["a","b"]' run_cmd sc10 -- sec --host b --flake /flk2
+expect_grep "sc10 --host/--flake select the host" "^nix eval .* /flk2#nixosConfigurations\.b --apply " "$MOCK_LOG"
+leaked=$((leaked + $(leaks)))
+
+run_cmd sc11 -- rd --help
+expect_grep "sc11 usage lists secrets" "rpi-deploy secrets .*--host NAME" "$OUT"
+run_cmd sc11 -- sec extra
+expect_exit "sc11 secrets takes no argument -> exit 2" 2
+run_cmd sc11 -- sec --force
+expect_exit "sc11 secrets rejects --force -> exit 2" 2
+
+expect_eq "sc4 PSK values never in argv" 0 "$leaked"
+unset RPI_WIFI_HOME RPI_WIFI_LAB
 summary

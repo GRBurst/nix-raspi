@@ -20,6 +20,7 @@ Usage:
   rpi-deploy flash IMAGE DEVICE
   rpi-deploy deploy [switch|boot|test] [--host NAME] [--target USER@HOST] [--port N] [--flake DIR] [--max-builds N] [--force]
   rpi-deploy status [--host NAME] [--target USER@HOST] [--port N] [--flake DIR]
+  rpi-deploy secrets [--host NAME] [--target USER@HOST] [--port N] [--flake DIR]
 
   image    build config.system.build.sdImage of the flake's Pi system (after
            the cache and build guards) and print the image path and size
@@ -37,6 +38,11 @@ Usage:
            firmware/config.txt/U-Boot differ from the booted system's); then the
            pull state: the applied pointer seq and its age, and the last
            rpi-pull run (result, exit code, time) from /var/lib/rpi-pull
+  secrets  write the host's Wi-Fi secrets file (rpi.wifi.secretsFile, mode
+           600) on the Pi over ssh, then restart wpa_supplicant if it runs:
+           one VAR=PSK line per variable named in rpi.wifi.networks, the
+           values from the environment (e.g. secretspec run -- rpi-deploy
+           secrets); a value is never printed or put on a command line
 
 Host: --host NAME selects the flake's nixosConfigurations.NAME; default
   $RPI_HOST, else the flake's only Pi host (built with lib.mkPi); none or
@@ -52,7 +58,7 @@ Environment: RPI_FLAKE (default flake dir), RPI_HOST (default host),
   RPI_NIXOS_REBUILD (nixos-rebuild to use instead of the flake's pinned one),
   RPI_LIB (path of rpi-lib.sh); test hooks RPI_ALLOW_NONBLOCK=1, RPI_SYSFS.
 Exit codes: 2 usage, 10 kernel not cached, 11 forbidden local build,
-  12 too many local builds, 13 build/eval failed, 14 deploy failed,
+  12 too many local builds, 13 build/eval failed, 14 deploy/secrets failed,
   15 would downgrade, 16 device refused, 17 verify failed.
 EOF
 }
@@ -124,6 +130,74 @@ resolve_target() {
         RL_SSH_PORT="$(info .port)" && [[ "$RL_SSH_PORT" =~ ^[0-9]+$ ]] ||
             die_rc "$RL_E_BUILD" "no valid rpi.ssh.port in the host config of $(rl_conf_ref)"
     fi
+}
+
+# --- Wi-Fi secrets -----------------------------------------------------------
+# wifi_secrets_file: rpi.wifi.secretsFile of the host, checked: it is put on a
+# remote command line and below a mount point, so only a plain absolute path.
+wifi_secrets_file() {
+    local f
+    f="$(info .wifi.secretsFile)" || die_rc "$RL_E_BUILD" "cannot read rpi.wifi.secretsFile of $RL_ATTR"
+    [[ "$f" =~ ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$ && "/$f/" != */../* ]] ||
+        die_rc "$RL_E_USAGE" "rpi.wifi.secretsFile of $RL_ATTR must be a plain absolute file path, got '$f'"
+    printf '%s\n' "$f"
+}
+
+# wifi_env_content: the host's Wi-Fi secrets file on stdout: one VAR=value
+# line per PSK variable named in rpi.wifi.networks (SSID -> VAR), values from
+# the environment; lines sorted (LC_ALL=C) and unique (P8). Wi-Fi off, no
+# networks, an invalid name, an unset/empty value or a value with a newline
+# -> exit 2 naming the variable (never its value), before any output. Values
+# only ever pass through printf (a builtin): never argv, never a file.
+wifi_env_content() {
+    local _w_rows _w_var _w_ssid
+    local -a _w_vars _w_problems=()
+    local -A _w_ssid_of=()
+    [[ "$(info .wifi.enable)" == true ]] || die_rc "$RL_E_USAGE" "rpi.wifi is disabled for $RL_ATTR"
+    _w_rows="$(jq -r '.wifi.networks // {} | to_entries[] | [.value, .key] | @tsv' <<<"$HOST_INFO")" ||
+        die_rc "$RL_E_BUILD" "cannot read rpi.wifi.networks of $RL_ATTR"
+    [[ -n "$_w_rows" ]] || die_rc "$RL_E_USAGE" "rpi.wifi.networks is empty for $RL_ATTR"
+    while IFS=$'\t' read -r _w_var _w_ssid; do
+        if [[ ! "$_w_var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            _w_problems+=("invalid PSK variable name '$_w_var' (rpi.wifi.networks.\"$_w_ssid\")")
+        elif [[ -z "${_w_ssid_of[$_w_var]+set}" ]]; then
+            _w_ssid_of[$_w_var]="$_w_ssid"
+        fi
+    done <<<"$_w_rows"
+    # sorting "VAR=" orders exactly like sorting the "VAR=value" lines
+    mapfile -t _w_vars < <(printf '%s=\n' "${!_w_ssid_of[@]}" | LC_ALL=C sort | sed 's/=$//')
+    for _w_var in "${_w_vars[@]}"; do
+        [[ -n "$_w_var" ]] || continue
+        if [[ -z "${!_w_var:-}" ]]; then
+            _w_problems+=("missing PSK variable $_w_var (rpi.wifi.networks.\"${_w_ssid_of[$_w_var]}\")")
+        elif [[ "${!_w_var}" == *$'\n'* ]]; then
+            _w_problems+=("$_w_var contains a newline")
+        fi
+    done
+    if ((${#_w_problems[@]} > 0)); then
+        printf 'rpi-deploy: error: %s\n' "${_w_problems[@]}" >&2
+        exit "$RL_E_USAGE"
+    fi
+    for _w_var in "${_w_vars[@]}"; do
+        printf '%s=%s\n' "$_w_var" "${!_w_var}"
+    done
+}
+
+# secrets: the Wi-Fi secrets file onto the Pi through ssh's stdin. The
+# directory is created 0700 only when missing (install -d would chmod an
+# existing one, e.g. /etc); try-restart leaves a stopped unit stopped.
+do_secrets() {
+    local file content
+    load_info
+    file="$(wifi_secrets_file)" || exit
+    content="$(wifi_env_content)" || exit
+    resolve_target
+    log "writing $file (600) on $RL_TARGET (port $RL_SSH_PORT)"
+    # \n: $(...) dropped the last line's newline
+    printf '%s\n' "$content" |
+        rl_ssh "mkdir -p -m 700 ${file%/*} && install -m 600 /dev/stdin $file && systemctl try-restart wpa_supplicant.service" ||
+        die_rc "$RL_E_DEPLOY" "writing $file on $RL_TARGET failed"
+    echo "secrets: $file written on $RL_TARGET; wpa_supplicant restarted if it was running"
 }
 
 # --- subcommands -----------------------------------------------------------
@@ -428,6 +502,7 @@ declare -A ALLOWED=(
     [flash]=" "
     [deploy]=" --target --port --flake --host --attr --max-builds --force "
     [status]=" --target --port --flake --host --attr "
+    [secrets]=" --target --port --flake --host --attr "
 )
 
 parse_args() {
@@ -440,7 +515,7 @@ parse_args() {
         usage
         exit 0
         ;;
-    image | flash | deploy | status) SUBCOMMAND="$1" ;;
+    image | flash | deploy | status | secrets) SUBCOMMAND="$1" ;;
     *) usage_error "unknown subcommand: $1" ;;
     esac
     shift
@@ -516,6 +591,7 @@ main() {
         resolve_target
         do_status
         ;;
+    secrets) do_secrets ;;
     esac
 }
 
