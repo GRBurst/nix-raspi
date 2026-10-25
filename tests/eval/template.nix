@@ -94,6 +94,12 @@ in
   "devenv.nix (root, template): RPI_FLAKE is the repo root, cachix and secretspec in the shell" =
     lib.all devenvOk [ ../../devenv.nix ../../templates/default/devenv.nix ];
 
+  # T7.3: the shell's flake check warms up every Pi host (yazi's IFD) and
+  # names none, so a consumer or a second host needs no devenv edit.
+  "devenv.nix: rpi-check warms up every Pi host through rl_hosts, names no host" =
+    let s = (devenvModule ../../devenv.nix).scripts.rpi-check.exec; in
+    lib.hasInfix "rl_hosts" s && !lib.hasInfix "nixosConfigurations.rpi" s && !lib.hasInfix "neptun" s;
+
   "template devenv.nix: rpi-deploy runs the locked library's rpi-deploy" =
     lib.hasInfix "#rpi-deploy" (templateDevenv.scripts.rpi-deploy.exec);
 

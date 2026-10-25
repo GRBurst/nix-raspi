@@ -1,14 +1,19 @@
-# HANDOFF — Raspberry Pi 3 NixOS: build here, flash once, CI builds, the Pi pulls
+# HANDOFF — nix-raspi: a reusable library for the Raspberry Pi 3 (mkPi, template, rpi-deploy, rpi-ci)
 
 > **Maintain this file.** Update it at the end of every work step: status,
 > decisions, open problems, what was verified vs. assumed. A new session should
 > be able to start from this file alone.
-> Last updated: fixes of the final whole-branch review (plan T9.3), after milestone M9. Full docs: `README.md`.
-> Spec: `docs/superpowers/specs/2026-10-19-image-push-deploy-design.md`;
-> addendum (CI builds, the Pi pulls; amends its §3.3, §3.4, §5, §8, §10):
-> `docs/superpowers/specs/2026-10-23-ci-pull-updates-design.md`.
-> Plans: `docs/superpowers/plans/2026-10-19-image-push-deploy.md`,
-> `docs/superpowers/plans/2026-10-23-ci-pull-updates.md` (§17 amendments A1–A13 are binding).
+> Last updated: M7 docs (README consumer first, this file, `personal-values`
+> check, generic `rpi-check`). The final acceptance (plan T7.4) and the final
+> whole-branch review (T7.5) follow. Full docs: `README.md`.
+> Spec: `docs/superpowers/specs/2026-10-25-reusable-library-design.md`; plan:
+> `docs/superpowers/plans/2026-10-25-reusable-library.md` (§3 decisions D1–D25,
+> §9 planted violations, §12 refactor invariant, §15 interfaces).
+> It builds on `2026-10-19-image-push-deploy-design.md` and the addendum
+> `2026-10-23-ci-pull-updates-design.md` (same directory) and their plans
+> `docs/superpowers/plans/2026-10-19-image-push-deploy.md` and
+> `docs/superpowers/plans/2026-10-23-ci-pull-updates.md` (§17 amendments A1–A13
+> are binding where the library spec is silent).
 
 Legend: **[V]** verified by running it · **[M]** verified against mocks / unit
 tests / eval only · **[?]** assumption, not verified (needs the real Pi, GitHub or Cachix).
@@ -17,18 +22,101 @@ tests / eval only · **[?]** assumption, not verified (needs the real Pi, GitHub
 
 ## 1. Goal
 
-One NixOS configuration (`nixosConfigurations.rpi`, alias `neptun`) yields both
-the SD image for the Raspberry Pi 3B "neptun" (flashed once) and every later
-update. Manual push deploys from the x86_64 NixOS host "andromeda" stay
-(`rpi-deploy`). Security updates no longer depend on the host: GitHub Actions
-(arm64) builds the `rpi` toplevel weekly and on every push to `main`, pushes
-it to our self-signed Cachix cache and commits a pointer
-(`nixos/deploy/neptun.json`); a daily timer on the Pi (`rpi-pull`) verifies the
-pointer and activates the system. Hard constraints: the kernel is never built
-locally (nvmd's cachix), the Pi never evaluates the flake (1 GiB RAM), no
-chroot and no binfmt tricks during install, any failure leaves the Pi untouched.
+The repository is a library flake that others use to run their own Raspberry
+Pi 3: `lib.mkPi { modules; }` hides nvmd's `nixos-raspberrypi`, the hybrid
+inputs, home-manager and the SD image; every Pi-specific value is an `rpi.*`
+option or an `mkDefault`; `nix flake init -t github:GRBurst/nix-raspi` gives a
+working host; CI is a host matrix (`rpi-ci hosts|build|publish|pointer|commit`)
+that stays green without a cache. Our own Pi, **neptun** (`hosts/neptun`, one
+host module on `lib.mkPi`), keeps its system derivation unchanged (checked by
+the refactor invariant, §2). The flake lives at the repository root (it moved
+from `nixos/`); the pointer is `deploy/neptun.json`.
+
+The hard constraints of the earlier plans stand: the kernel is never built
+locally (nvmd's cachix), the Pi never evaluates the flake (1.1 GB RAM vs ~870 MiB usable),
+any failure leaves the Pi untouched, PSKs never enter the store, the signing key
+and the auth token exist only as GitHub Actions secrets.
 
 ## 2. Status
+
+### The reusable library (plan M0–M7)
+
+Linear, unsigned commits on `main`, one per task (`git log --oneline 4577aa2..main`;
+re-sign when pushing; no merge commits). Plan checkboxes were not ticked.
+
+| milestone | content | commits | state |
+|---|---|---|---|
+| M0 | flake moved from `nixos/` to the root (`G mv`), pointer `deploy/neptun.json`, baseline B0 (`.scratch/lib/baseline`) | `cfa4089` | done, **[V]** I1 drvPath identical to B0 |
+| M1 | scaffold: `tests/drv-diff.sh`, `rl_hosts`/`rl_host_info` in `rpi-lib.sh`, `rpi-ci` package and dispatcher, `tests/workflows-lint.sh` (actionlint check body) | `64c3625`, `34b9a11`, `ad96266`, `e1dad78` | done, **[M]** |
+| M2 | `lib.mkPi`, `nixosModules.default`/`terminal`, modules `base identity network wifi bluetooth profiles/terminal`, `rpi.pull.{repo,branch,cache}`, `hosts/neptun` (keys.nix and configuration.nix retired) | `40018b5` … `95277b0` (7) | done; **[V]** I1 == B0 after every task, I2 differs only by the expected leaf; 16 `eval-*` checks **[M]** |
+| M3 | `rpi-deploy`: `--host`/`RPI_HOST`, target and port from `rpi.deploy.target`/`rpi.ssh.port`, `secrets`, `flash --wifi-env` | `252ac34`, `0d43b33`, `c02d6b0`, `5a4f133` | done, **[M]** 536 assertions |
+| M4 | CI: `ci/gh.sh` (annotations, summaries), `rpi-ci build/publish/pointer/commit`, `.github/workflows/pi.yml` (ours and the template's), `cache-name.sh` and cachix-action removed | `003e555` … `b9090c4` (7) | done, **[M]** 403 assertions + actionlint; a real `rpi-ci build --host neptun` with `GITHUB_ACTIONS=true` and a scratch cache **[V]** (binfmt, 273 s); a real GitHub run **[?]** |
+| M5 | `templates/default` (flake, `hosts/rpi.nix`, devenv files, README), `secretspec.toml`, `devenv.local.nix.example` | `68d5770`, `17de115` | done, **[M]** `eval-template` (15 rows); spikes S2/S3 **[V]** with `git+file://` of this repo |
+| M6 | qemu smokes: boot-smoke on the template's default host, deploy-smoke and pull-smoke on neptun | integrated by the orchestrator | see the acceptance table (T7.4) |
+| M7 | `personal-values` check, README consumer first, this file, generic `rpi-check` | `40fb9cf`, `7c92847`, the HANDOFF commit | docs done; T7.4 acceptance and T7.5 review are the orchestrator's |
+
+### Acceptance of the library (spec §9)
+
+Filled by T7.4; what was known when M7 was written:
+
+| # | criterion | result | evidence |
+|---|---|---|---|
+| 1 | `nix flake check`; no personal value in library code | `personal-values` **[V]** green; the full `nix flake check` is T7.4 | `.scratch/lib/logs/m7-*` |
+| 2 | a template instance evaluates and builds its image; default DHCP, port 22, radios off | evaluation **[M]** (`eval-template`) and spikes S2/S3 **[V]**; image and boot: boot-smoke (M6, T7.4) | `.scratch/lib/logs/s2-s3.md` |
+| 3 | neptun derivation diff equals the expected list | **[V]** per task (I1 empty, I2 one leaf); the final run is T7.4. **M7 edited `rpi-pull.sh`** (`--host` is required now), which changes the expected I2 list, see below | `.scratch/lib/logs/m7-invariant.txt` |
+| 4 | CI green on `main` without a cache, summary per host, notice about the skipped publish | **open, manual**: the user pushes (§4) | |
+| 5 | boot-smoke (template default host), deploy-smoke, pull-smoke | M6 / T7.4 | |
+| 6 | README follows spec §8 | written in that order (M7); human review in T7.5 | |
+
+**Expected differences of the refactor invariant** (`.scratch/lib/expect/`):
+I1 (neptun as committed, pull off): none. I2 (with a test cache, pull on) until
+M7: `unit-rpi-pull.service\tenv:text` (the pointer URL). M7 changed `rpi-pull.sh`
+(the `--host` default `neptun` is gone), so the `rpi-pull` package is now the
+root cause and the unit is no longer a leaf: the I2 list for the M7 tree and
+later is exactly `rpi-pull\tenv:installPhase` and `rpi-pull\tinputSrcs`
+(`.scratch/lib/expect/I2.m7.txt`; I1 does not contain `rpi-pull`; the old
+`I2.txt` reports `MISSING: unit-rpi-pull.service` against the M7 tree). The
+pointer URL change of the unit is then checked by a diff of its text with store
+hashes normalised (`.scratch/lib/logs/m7-unit-text-diff.txt`: only
+`nixos/deploy/neptun.json` → `deploy/neptun.json`).
+
+### Notes from the milestones (deviations that matter)
+
+- **neptun leaves `rpi.pull.cache` unset** (default `null`) instead of
+  `cache = null`: a `nullOr submodule` rejects a null next to a non-null
+  definition, and the invariant's I2 sets the cache with `extendModules`.
+- `rpi.ssh.port` is `ints.between 1 65535`; the image is named
+  `<hostname>-rpi3` (was hard-coded `neptun-rpi3`; unchanged for neptun).
+- `rpi-deploy secrets` creates the directory with `mkdir -p -m 700` (not
+  `install -d`, which would chmod an existing directory); `RPI_PART_WAIT` is a
+  test hook for `flash --wifi-env`.
+- **download-artifact v8 extracts a lone artifact straight into `path`**, so
+  with one host `rpi-ci commit --artifacts DIR` treats a DIR that holds
+  `flake.lock` or `deploy/` as the only artifact (tests k7, k7b). The commit job
+  downloads to `${{ runner.temp }}/artifacts`.
+- **eval-tools quirk (M1, `tests/eval/tools.nix`):** the first
+  `nix flake check --no-build` after changes in `ci/` can fail with
+  `path '…-source' is not valid` (`builtins.pathExists` on a fileset source that
+  is not in the store yet); it passes after `chk eval-tools`. A fix would test
+  membership through `lib.fileset`.
+- `nix flake init -t` needs `--accept-flake-config` inside the agent sandbox only
+  (unreadable trusted-settings); devenv in nixpkgs is 2.1.2 (the plan said 2.4).
+- M7: `rpi-lib.sh` defaults are the options' defaults (`rpi`, `root@rpi`, 22);
+  `rpi-pull --host` has no default (the module always passes `config.system.name`);
+  `personal-values` also allows `github.com/GRBurst/nix-raspi` (the template's
+  README links the library); tests, README, HANDOFF and `hosts/` are excluded by
+  design. Tests that name neptun on purpose (fixtures and neptun's own values):
+  `tests/ci-unit.sh` and `tests/pull-unit.sh` (fixture host and store paths),
+  `tests/deploy-unit.sh` (store paths, `--attr neptun`), `tests/lib-unit.sh`,
+  `tests/eval/{pi-config,pull-update,image,lib}.nix`, the smoke tests (M6).
+
+### Earlier work (before the library)
+
+The image/push-deploy plan (M1–M7, accepted 2026-10-23) and the CI pull addendum
+(M1–M9, finished 2026-10-24) are on `feat/image-push-deploy` and part of `main`.
+Paths and names in this block are as they were then (`nixos/`, `keys.nix`,
+`configuration.nix`, `neptun.yml`, `cache-name.sh`, the nixosConfiguration `rpi`);
+untracked evidence lives under `.scratch/` (earlier `nixos/.scratch/`).
 
 Image/push-deploy milestones M1–M7 (first plan) are done and were accepted on
 2026-10-23. The addendum plan (CI pull) is implemented on
@@ -49,7 +137,7 @@ Image/push-deploy milestones M1–M7 (first plan) are done and were accepted on
 | M9 | README and HANDOFF; final acceptance | `8fa8299` (docs), the acceptance commit after it | docs and acceptance done (below) |
 | T9.3 | final whole-branch review (`nixos/.scratch/ci/final-review.md`) and its fixes | `00eaea7` … `b4a4b47` (13), this HANDOFF commit | done except S2 (user decision), see below |
 
-### Final whole-branch review (plan T9.3): findings
+#### Final whole-branch review (plan T9.3): findings
 
 One commit per finding, test first where a test is possible (each test of a
 code fix was red before the fix; the N7 tests pin existing behaviour). Re-checked after the fixes, on `b4a4b47` (only this
@@ -71,15 +159,15 @@ checks (what CI now runs) built under binfmt: rc 0, 309 s, same counts;
 | **S5** CI publishes without running any check | step `unit tests` between build and push: `nix build .#checks.aarch64-linux.rpi-{deploy-syntax,pull-unit,ci-unit,deploy-unit}` (unit checks are now defined for both systems; sandboxed with the pinned tools, as on the host, no apt on the runner); `actionlint` check asserts build < checks < publish | `01bc0f1` |
 | **N1** `time-sync.target` was a no-op | `systemd-time-wait-sync.service` installed (not enabled), `rpi-pull` wants and orders after it, `TimeoutStartSec=30min`: only rpi-pull waits for NTP, boot does not (qemu VM test `.scratch/ci/n1-vm.nix`, untracked) | `0ce554a` |
 | **N2** unusable state dir exits 37 | exit 1 `state dir not writable` | `579b48b` |
-| **N3** manual deploy and the pull share no lock | documented (README §4, §4 below); `flock` in `rpi-deploy` deferred | `1e9f78e` |
+| **N3** manual deploy and the pull share no lock | documented (README "Pull: CI builds, the Pi pulls", §4 below); `flock` in `rpi-deploy` deferred | `1e9f78e` |
 | **N4** downgrade check freshness | documented below (intended, D14) | `5db1c22` |
-| **N5** `status` age is the apply time | documented (README §3, below) | `2a15f11` |
+| **N5** `status` age is the apply time | documented (README "Push from the build host", below) | `2a15f11` |
 | **N6** publish not main-guarded | job-level `if: github.ref == 'refs/heads/main'`, asserted by the `actionlint` check | `a4f6a06` |
-| **N7** pin overclaim; run_number reset; bad `$STATE/seq` | README wording (pin exempts the toplevels; closure protection unverified) and the two recoveries (README §5), pinned by ci-unit w11 and pull-unit p7 | `066c4d4` |
-| **N8** `built` only refreshes with a new toplevel | documented (README §4 step 7, below) | `cd171e7` |
+| **N7** pin overclaim; run_number reset; bad `$STATE/seq` | README wording (pin exempts the toplevels; closure protection unverified) and the two recoveries (README "Recovery and rollback"), pinned by ci-unit w11 and pull-unit p7 | `066c4d4` |
+| **N8** `built` only refreshes with a new toplevel | documented (README "Pull: CI builds, the Pi pulls" step 7, below) | `cd171e7` |
 | **N9** dependency trust (A12 residual risk) | documented (README Trust box, below) | `b4a4b47` |
 
-### Acceptance of the CI pull addendum (addendum §5)
+#### Acceptance of the CI pull addendum (addendum §5)
 
 Run on 2026-10-24 (andromeda), on commit `3b84a3d` (code-complete tree; the later
 commits only touch `README.md` and `HANDOFF.md`): the flake check in the clean
@@ -111,7 +199,7 @@ Findings during the CI pull work (the full list is in `nixos/.scratch/ci/`):
   registration, resize); the smoke tests wait for `is-system-running`. `degraded`
   with only `session-1.scope` failed is the script's own killed login attempt.
 
-### Previous acceptance (image-push-deploy spec §8, M7 of the first plan, 2026-10-23)
+#### Previous acceptance (image-push-deploy spec §8, M7 of the first plan, 2026-10-23)
 
 Evidence in `nixos/.scratch/m7/` (untracked). Still valid except where noted.
 
@@ -124,7 +212,40 @@ Evidence in `nixos/.scratch/m7/` (untracked). Still valid except where noted.
 | 5 | `rpi-autoupdate --no-deploy` | **retired**: the host auto-update was removed by the addendum |
 | 6 | real hardware | **open, manual**: §5 |
 
-## 3. Decisions (short; the full table is plan §3 and §17)
+
+## 3. Decisions (short; the full tables are plan §3 and §17 of each plan)
+
+### The library (plan §3 D1–D25)
+
+- **D1** The root move came first, in one commit (`G mv nixos/<entry> <entry>`, all path fixups, pointer `deploy/neptun.json`); untracked `nixos/` leftovers (`.scratch`, `.cache-nix`, `.nixcache`, `result`) stayed.
+- **D2** Refactor invariant = root-cause ("leaf") diff of `nix derivation show -r` JSON (`tests/drv-diff.sh`) against baseline B0; two probes: I1 = neptun as committed (pull off), I2 = neptun with a test cache (pull on).
+- **D3** The library modules were built against a fixture host through `self.lib.mkPi` while neptun stayed on the old module list; neptun switched in one task (T2.7), so no list option merged twice.
+- **D4** `modules/base.nix` holds the kept `mkDefault`s (+ `daemonIOSchedPriority = 7`, `i18n.defaultLocale`, `networking.useNetworkd`, `security.sudo.enable`); `modules/default.nix` is an import list.
+- **D5** `nixosModules.default` = the `rpi.*` modules without the terminal profile; `nixosModules.terminal` = the profile (it defines `home-manager.*`); `mkPi` imports both and home-manager.
+- **D6** `mkPi` module order: nvmd `raspberry-pi-3.base`, `default`, `terminal`, the user's `modules`, the home-manager module and its block; `modules/default.nix` imports `sd-image sd-wear headless external-storage pull-update base identity network wifi bluetooth` in this order (list options merge like before).
+- **D7** `specialArgs = { inherit inputs; } // specialArgs`; library modules never read `inputs`.
+- **D8** Static network keeps `systemd.network.networks."10-lan-static"`; DHCP mode defines no network (NixOS's default DHCP network applies).
+- **D9** Wi-Fi: `pskRaw = "ext:<VAR>"`, `secretsFile` is a string (never a store path), firmware `hardware.firmware = mkOverride 49 [ … ]` (beats sd-wear's `mkForce [ ]`); Bluetooth likewise.
+- **D10** Host discovery and host info are two nix expressions in `rpi-lib.sh` (`RL_HOSTS_EXPR`, `RL_HOST_INFO_EXPR`) shared by `rpi-deploy` and `rpi-ci`; `nixosConfigurations.rpi` is `neptun // { rpiHost = false; }` (deprecated alias, one release).
+- **D11** Pointer file, pin name and `rpi-ci pointer --host` key on `config.system.name` (the hostname), not the attribute name.
+- **D12** `rpi-ci` = `ci/rpi-ci.sh` dispatcher over the scripts; every CI script defaults `--flake` to `$PWD`; package layout `$out/libexec/rpi-ci/{ci/*.sh,rpi-lib.sh,rpi-fp.sh}`.
+- **D13** CI substitutes from the host's cache through `--option extra-substituters/extra-trusted-public-keys` in `rpi-ci build` (needs a trusted runner user: install-nix-action's default); `cachix-action` dropped. Risk R3, verified only locally.
+- **D14** Each matrix job updates the lock itself; `rpi-ci commit --artifacts DIR` requires all locks byte-identical, else `::error::` and no commit; the commit job runs only when every build succeeded.
+- **D15** Build jobs `permissions: contents: read`; only the commit job writes.
+- **D16** `rpi-ci build` also builds every `checks.<system>` of the flake after the toplevel (none: a notice).
+- **D17** `ci/gh.sh`: notices, warnings, errors, groups and summaries only under `GITHUB_ACTIONS=true` (plain `rpi-ci: <level>: …` on stderr otherwise); messages are escaped.
+- **D18** The pointer gains `bootFp` (sha256 of the boot fingerprint); the summary says switch, reboot or unknown; `rpi-pull` ignores unknown fields.
+- **D19** Ours `.github/workflows/pi.yml` = the template's with `nix run .#rpi-ci` for `nix run --inputs-from . rpi#rpi-ci`; asserted textually (`actionlint` check).
+- **D20** Push trigger `paths-ignore: ["deploy/**", "docs/**", "**.md"]`.
+- **D21** PSKs reach `rpi-deploy` as env variables; the content goes over stdin (`ssh … install -m 600 /dev/stdin`, `sudo install … /dev/stdin`), never a temp file or argv.
+- **D22** Template: `hosts/rpi.nix`, `nixosConfigurations.rpi`, input named `rpi`, re-exports `apps` and `packages`, copies our `nixConfig`, minimal devenv files.
+- **D23** `personal-values` scans the library paths (`lib/ modules/ templates/ ci/ .github/ rpi-*.sh devenv.nix devenv.yaml secretspec.toml devenv.local.nix.example`) and `flake.nix` minus the lines wiring neptun in; the library URL is allowed.
+- **D24** The `actionlint` check body lives in `tests/workflows-lint.sh`.
+- **D25** `eval-template` evaluates the real `templates/default/flake.nix` with our flake as its `rpi` input.
+
+### Earlier decisions (image/push flow, CI pull; still valid unless noted)
+
+(Superseded by the library: D12 below (the cache name read from `keys.nix` by `ci/cache-name.sh`) became `rpi.pull.cache` read per host by `rpi-ci` (library D13); the workflow `neptun.yml` became `pi.yml`; the `ci/*.sh` scripts are `rpi-ci` commands.)
 
 Image/push flow (first plan):
 
@@ -172,39 +293,66 @@ CI pull addendum (plan §3 D1–D18; amendments A1–A13):
 - **A7** store-path regex `^STORE/[0-9a-df-np-sv-z]{32}-nixos-system-HOST-…`, `--host` `^[A-Za-z0-9_-]+$`, control characters rejected, `curl --max-filesize 65536`; `built` must be `YYYY-MM-DDTHH:MM:SSZ`.
 - **A12** trust: the verify is ours-only; the load-bearing binding is the pointer's narHash compared after the realise; dependencies rely on `require-sigs` and the three trusted keys. Final review S1: nix accepts a content-addressed path without any signature, so before the realise the toplevel's narinfo must be input-addressed, name a signature by our key and carry the pointer's narHash, and after it the local path must be input-addressed too.
 
+
 ## 4. What to do next (user)
 
-The agent cannot do these (addendum §6, plan A5/A13):
+The agent cannot do these (spec §10; the library plan's §10 coverage gaps):
 
-1. **GitHub.** A public repo (`GRBurst/nix-raspi`: the pointer URL in
-   `configuration.nix`), push `main`. Settings → Actions → General → Workflow
-   permissions: **Read and write**. No branch protection or ruleset on `main` that
-   blocks `github-actions[bot]` (or give it a bypass). Schedules of public repos
-   are disabled after 60 days without activity; the staleness alarm (exit 39 after
-   21 days) catches that.
-   Dependabot (`.github/dependabot.yml`) opens weekly PRs that bump the
-   actions' commit-SHA pins (final review S4): review each one, the workflow
-   holds the signing key.
-2. **Cachix.** Create a cache with **your own signing key** (self-signed;
+1. **Push and watch the first CI run** (agents never push). The checklist for
+   acceptance criterion 4 is in §5 ("GitHub, first run of the library CI").
+   Settings → Actions → General → Workflow permissions: **Read and write**; no
+   branch protection or ruleset on `main` that blocks `github-actions[bot]` (or
+   give it a bypass): the commit job pushes. Schedules of public repos are
+   disabled after 60 days without activity; the staleness alarm (exit 39 after
+   21 days) catches that. Dependabot (`.github/dependabot.yml`) opens weekly PRs
+   that bump the actions' commit-SHA pins: review each, the workflow holds the
+   signing key.
+2. **Create the Cachix cache** with **your own signing key** (self-signed;
    `cachix generate-keypair <cache>`), secret key only as the GitHub secret
-   `CACHIX_SIGNING_KEY`, a write token as `CACHIX_AUTH_TOKEN`.
-3. **`nixos/keys.nix`:** `cache = { name = "<cache>"; publicKey = "<cache>.cachix.org-1:…"; };`,
-   commit, push.
-4. **First CI run**: Actions → `neptun` → *Run workflow*. Then **dispatch a second
-   time and confirm it produces no pointer commit** (same storePath, A13). A new
-   pointer commit on every run means the toplevel is not reproducible: investigate
-   before relying on the timer.
-5. **Enable the timer on the Pi**: `git pull`, one manual `rpi-deploy deploy switch`
-   with `keys.cache` set. Until then the Pi does not pull (the module is off).
-6. **Hardware acceptance (AC6, §5) and the CI pull checklist (AC3).**
-7. **Merge**: the commits are unsigned; re-sign when merging (history is linear:
+   `CACHIX_SIGNING_KEY`, a write token as `CACHIX_AUTH_TOKEN`; then set
+   `rpi.pull.cache = { name = "<cache>"; publicKey = "<cache>.cachix.org-1:…"; };`
+   in `hosts/neptun/default.nix` (plain assignment, not `cache = null` before),
+   commit, push. Until then CI builds and tests neptun and prints the notice
+   `no cache configured for neptun: built and tested, not published`; a cache
+   without the two secrets fails the job with `::error::` naming the secret.
+3. **First run with a cache**: Actions → `pi` → *Run workflow*, then **dispatch a
+   second time and confirm it produces no pointer commit** (same storePath, A13).
+   A new pointer commit on every run means the toplevel is not reproducible:
+   investigate before relying on the timer. Then `git pull` and one manual
+   `rpi-deploy deploy switch --host neptun` with `rpi.pull.cache` set; until
+   then the Pi does not pull (the module is off).
+4. **Wi-Fi PSKs** into a SecretSpec provider if a host enables Wi-Fi (neptun has
+   it off; `secretspec.toml` declares the example variable `RPI_WIFI_HOME`).
+5. **`rpi.buildHost.flakePath`** (host modules, README "Optional: `rpi-deploy`
+   on the host's PATH"): it must now point at the repository root
+   (`…/projects/raspberry-pi`), not `…/nixos`. The devenv shell sets `RPI_FLAKE`
+   to the root by itself.
+6. **`nix flake init -t github:GRBurst/nix-raspi`** works only after the push (the
+   spikes S2/S3 used the local path); try it once from a scratch directory.
+7. **Optional cleanup**: `nixos/` now holds only untracked caches (`.cache-nix`,
+   `.nixcache`, `.scratch`, `result*`); the maintainer helper
+   `.scratch/ci-env.sh` still points `XDG_CACHE_HOME` and `NIXPKGS_CONFIG`
+   there, so move them before deleting the directory. `.rpi-build/` and
+   `.rpi-build.log` at the repo root are artifacts of the old install flow:
+   delete them and drop their two `.gitignore` lines. `.worktrees/lib-baseline`
+   goes away after the acceptance (T7.4).
+8. **Hooks**: `devenv shell` regenerates `.pre-commit-config.yaml`; the main
+   tree's generated one still excludes `^nixos/tests/fixtures/` until then
+   (worktrees use a copy with `^tests/fixtures/`).
+9. **Merge**: the commits are unsigned; re-sign when pushing (history is linear:
    fast-forward or rebase, never a merge commit).
-8. **Local leftovers**: `.rpi-build/` and `.rpi-build.log` at the repo root are
-   artifacts of the old flow; delete them and drop their two `.gitignore` lines.
-9. **Review flags**: `wheelNeedsPassword = false` for `pi`; `hardware.enableAllHardware`
-   kept for parity with the tested image; the closure size (re-measure, §2).
+10. **Review flags** (earlier plans): `wheelNeedsPassword = false` for `pi` (now a
+    library default, key-only login); `hardware.enableAllHardware` kept for
+    parity with the tested image; re-measure the closure size (§2, earlier
+    acceptance) after the library change.
 
 Open points (documented, not fixed):
+
+- *Wi-Fi and Bluetooth* are covered by evaluation checks only (qemu has neither
+  radio); the Bluetooth UART attach on the Pi 3 (`dtparam krnbt=on`, firmware at
+  priority 49) is unverified (plan A8). Checklist in §5.
+- *The `rpi` alias* (`nixosConfigurations.rpi`, `rpiHost = false`) and `--attr`
+  of `rpi-deploy` are deprecated and go in a later release.
 
 - *Release bump (26.05 → 26.11)*: the pinned deploy tool is the flake's release, so
   the first deploy after the bump runs the 26.11 nixos-rebuild against the Pi's
@@ -227,24 +375,24 @@ Open points (documented, not fixed):
 - *Manual deploy vs. a running pull* (final review N3): `rpi-deploy deploy` does
   not take `/var/lib/rpi-pull/lock`, so a manual deploy and a running `rpi-pull`
   can interleave `nix-env --set` and the pull may replace the manual deploy.
-  Documented (README section 4: not while `rpi-pull` is active). Deferred fix:
+  Documented (README "Pull: CI builds, the Pi pulls": not while `rpi-pull` is active). Deferred fix:
   wrap `deploy`'s remote steps in `flock -n /var/lib/rpi-pull/lock` (refuse when
   busy), with a deploy-unit test of the busy case.
 - *Downgrade check freshness* (final review N4): it is only as fresh as the last
   `git fetch` and compares only the `nixpkgs` and `nixos-raspberrypi` locks
-  (D14, intended, README section 3). A cheaper, stronger alternative if it ever
+  (D14, intended, README "Push from the build host"). A cheaper, stronger alternative if it ever
   matters: compare the local toplevel's label date (`26.05.YYYYMMDD.<rev>`) with
   the Pi's `/var/lib/rpi-pull/store-path`, which `status` already reads over
   ssh (no fetch needed).
 - *`status` age* (final review N5): the age in `pull applied: seq N … (3h ago)` is
   the mtime of `$STATE/seq`, i.e. when the Pi applied it, not the pointer's age
   that A5 asked for; a stale pointer shows only as `pull last run: stale (exit
-  39)`. Documented in README section 3. Deferred: `rpi-pull` records `built`
+  39)`. Documented in README "Push from the build host". Deferred: `rpi-pull` records `built`
   in its state dir and `status` prints it.
 - *Staleness means "no new system"* (final review N8): `ci/pointer.sh` keeps the
   pointer (and its `built`) when the toplevel is unchanged, so a lock-only
   commit or a frozen channel trips exit 39 after 21 days although CI is
-  healthy. Accepted and documented (README section 4, step 7): after the 26.05
+  healthy. Accepted and documented (README "Pull: CI builds, the Pi pulls", step 7): after the 26.05
   end of life this is the wanted alarm. If the channel is quiet for long
   stretches, raise `rpi.pull.maxAgeDays`.
 - *Dependency trust* (final review N9, accepted residual risk of A12): the
@@ -254,10 +402,57 @@ Open points (documented, not fixed):
   on the Pi, though not the toplevel (narHash). One sentence in the README
   Trust box.
 
+
 ## 5. Hardware and CI acceptance checklist (manual, ~1 h plus the CI setup)
 
 Needs the Pi, a card ≥ 8 GiB, the LAN cable, ideally a 3.3 V USB-UART on GPIO
 14/15. Tick in this file when done and note surprises.
+
+### GitHub, first run of the library CI (acceptance criterion 4)
+
+- [ ] Push `main`: the `pi` workflow starts (push trigger) with the jobs `hosts`
+      (matrix `["neptun"]`), `build neptun` and `commit`.
+- [ ] Without a cache: all green; `build neptun` shows the notice `no cache
+      configured for neptun: built and tested, not published`; the step
+      summaries name the host, nixpkgs/nvmd revisions, toplevel path, closure size
+      and `published=false`; `commit` finds nothing to commit (`pushed=false`).
+- [ ] Dispatch with `update-lock` ticked: the build job updates the lock, the
+      `commit` job (the only one with `contents: write`) pushes a `flake.lock`
+      commit as `github-actions[bot]` (checks the `GITHUB_TOKEN` push and the
+      download-artifact layout; one host = a lone artifact, M4 note).
+- [ ] With a cache and both secrets (§4 step 2): the host's cache works as an
+      extra substituter for the runner user (R3: the guard dry run and the
+      builds fetch from it, no "ignoring untrusted substituter" in the log);
+      the pointer commit `deploy/neptun.json` follows; the pointer summary says
+      `boot: unknown (no previous pointer)` the first time, later switch or reboot.
+- [ ] With a cache but one secret missing (remove one temporarily): `::error::`
+      naming it, `build neptun` fails, `commit` does not run.
+- [ ] A scratch repo from `nix flake init -t github:GRBurst/nix-raspi`:
+      `nix run --inputs-from . rpi#rpi-ci -- hosts` prints `hosts=["rpi"]` and
+      its `pi` workflow is green without a cache.
+
+### Wi-Fi and Bluetooth (spec §10.2; qemu has neither radio)
+
+- [ ] Wi-Fi: a host with `rpi.wifi.enable = true; rpi.wifi.networks = { "<ssid>" = "RPI_WIFI_HOME"; };`,
+      `secretspec run -- rpi-deploy secrets` (or `flash … --wifi-env`):
+      `iw dev wlan0 link` shows the association, `ip -4 addr show wlan0` an
+      address, `ls -l /var/lib/rpi/wireless.env` is `-rw------- root`; the PSK
+      appears nowhere under `/nix/store` (`grep -r` the toplevel closure).
+      `dmesg | grep -i brcmfmac` shows the firmware loading.
+- [ ] Bluetooth: `rpi.bluetooth.enable = true;`: `bluetoothctl show` lists a
+      controller; `dmesg | grep -i hci_uart` (the UART attach is unverified, A8).
+- [ ] Both off again: no `wlan0`, no `hci0` (the overlays are back).
+
+### A template host on the Pi
+
+- [ ] `nix flake init -t github:GRBurst/nix-raspi` in an empty directory, a key in
+      `hosts/rpi.nix`, `git init && git add -A`, `nix run .#rpi-deploy -- image`,
+      flash, boot (DHCP): `ssh pi@<address>` works on port 22;
+      `RPI_TARGET=root@<address> nix run .#rpi-deploy -- deploy` applies a
+      one-line change.
+
+### neptun (the earlier checklist; the commands name our host)
+
 
 - [ ] `rpi-deploy image` then `rpi-deploy flash <image> /dev/<card>`: the typed
       confirmation is asked, the read-back prints `verified: … sha256 …`.
@@ -285,15 +480,15 @@ Needs the Pi, a card ≥ 8 GiB, the LAN cable, ideally a 3.3 V USB-UART on GPIO
       returns to the previous generation (verified in qemu by `deploy-smoke.sh`).
 - [ ] Recovery drill (recommended once, with the serial console): reboot, stop
       U-Boot's countdown, boot an older `nixos-N-default` entry; or edit `DEFAULT`
-      in `/boot/extlinux/extlinux.conf` on the card from the host (README section 5).
+      in `/boot/extlinux/extlinux.conf` on the card from the host (README "Recovery and rollback").
 - [ ] Optional write-volume measurement (s6 §6): `cat /sys/block/mmcblk0/stat`
       before/after a day of idling.
-- [ ] External disk (only when you want it): README section 6.
+- [ ] External disk (only when you want it): README "External storage".
 
-CI pull (after §4 steps 1–5):
+CI pull (after §4 steps 1–3):
 
-- [ ] First `workflow_dispatch` on `main`: green; a commit `neptun: build <N> (workflow_dispatch)`
-      by `github-actions[bot]` with `nixos/deploy/neptun.json` where `seq` = the run number
+- [ ] First `workflow_dispatch` on `main`: green; a commit `pi: build <N> (workflow_dispatch)`
+      by `github-actions[bot]` with `deploy/neptun.json` where `seq` = the run number
       and `built` is `YYYY-MM-DDTHH:MM:SSZ`; `cachix pin` `neptun` visible in the Cachix
       UI; runner disk (`df -h` in the log) and run time noted.
 - [ ] Second dispatch: **no** new pointer commit (A13).
@@ -311,36 +506,48 @@ CI pull (after §4 steps 1–5):
       `pointer is N days old (CI stalled?)` and exits 39.
 - [ ] Next day's run with no new pointer: `pull last run: up-to-date (exit 0)`.
 
-Recovery if the new kernel or firmware does not boot: README section 5 (serial menu,
+Recovery if the new kernel or firmware does not boot: README "Recovery and rollback" (serial menu,
 `DEFAULT` edit in `/boot/extlinux/extlinux.conf` from the host, or restoring
 NIXOS_BOOT from the host). A rollback stays rolled back until the next CI build.
+
 
 ## 6. Environment and sandbox gotchas
 
 - The agent sandbox has **no sudo**, cannot flash devices, must never ssh to
   the real Pi (192.168.100.20), never pushes or fetches from git remotes
   (`origin` = `git@github.com:GRBurst/nix-raspi.git`).
-- **Commit recipe** (signing is unavailable; `~/.config/git/ignore` is unreadable):
-  `git -c core.excludesFile=/dev/null commit --no-gpg-sign …`, with
-  `GIT_CONFIG_GLOBAL=/dev/null XDG_CONFIG_HOME=/tmp/nogit` exported (the unit tests
-  need them too). `nixos/.scratch/ci-env.sh` sets all of it and defines `chk`, `ev`,
-  `commit`; it `cd`s into `nixos/`.
+- **The helper** `.scratch/ci-env.sh` (gitignored, in the main tree; created by
+  plan T0.1): `. /home/pallon/projects/raspberry-pi/.scratch/ci-env.sh [TREE]`
+  `cd`s into TREE (default the main tree) and sets `XDG_CACHE_HOME` and
+  `NIXPKGS_CONFIG` (the untracked caches under `nixos/`), the git identity and
+  `GIT_CONFIG_GLOBAL=/dev/null XDG_CONFIG_HOME=/tmp/nogit` (the unit tests need
+  them too). It defines `G` (git without the unreadable global excludes file,
+  unsigned, with the identity: use it for **every** git command that writes,
+  also `G worktree add`), `chk NAME` (build `checks.x86_64-linux.NAME`), `ev`,
+  `unit NAME` (`bash tests/NAME.sh`), `top` (evaluates neptun's toplevel
+  `drvPath`: yazi's IFD, needed before `nix flake check --no-build`), and the
+  refactor-invariant functions `snap`/`snap2`/`inv` (plan §12) with the logs
+  under `.scratch/lib/` (`baseline`, `snap`, `expect`, `logs`).
 - **Linear history, no merge commits.** Parallel work lives in worktrees
-  (`.worktrees/`, gitignored) and is integrated with `git merge --ff-only` or
-  `git cherry-pick`; never plain `git merge`.
-- Env for nix: `XDG_CACHE_HOME=<repo>/nixos/.cache-nix NIXPKGS_CONFIG=<repo>/nixos/.nixcache/nixpkgs-config.nix`,
-  `--accept-flake-config`. `/tmp` is not writable for some paths; scratch goes
-  to `nixos/.scratch/` (gitignored).
-- New files are invisible to the flake until `git add` (flake source is `git+file`),
-  and **edits to tracked files during a long run change its source**: run
-  long smoke tests from a clean worktree (`git worktree add --detach ../.worktrees/x <rev>`
-  with `RPI_SMOKE_DIR` pointing at the shared scratch dir), not from a tree you keep editing.
-- `nix flake check --no-build` may need a prior
-  `nix eval --raw .#nixosConfigurations.rpi.config.system.build.toplevel.drvPath`
-  (yazi IFD); the full check needs none but evaluates it anyway.
+  (`G worktree add .worktrees/lib-mN -b lib/mN main`, gitignored) and the
+  orchestrator integrates with `G cherry-pick`; never `git merge`. A worktree
+  needs the gitignored `.pre-commit-config.yaml` (copy it from another
+  worktree; the hook runs shellcheck and actionlint).
+- Always pass `--accept-flake-config` to nix (the checks and `rpi-deploy` do).
+  `/tmp` is not writable for some paths; scratch goes to `.scratch/`.
+- New files are invisible to the flake until `G add` (flake source is `git+file`;
+  `G add -N` right after creating them), and **edits to tracked files during a
+  long run change its source**: run long smoke tests from a clean worktree
+  (`G worktree add --detach .worktrees/x <rev>` with `RPI_SMOKE_DIR` pointing at
+  the shared scratch dir), not from a tree you keep editing. Never use `path:` on
+  the repo root (it copies `.worktrees/`, `.scratch/`, `.devenv/`): scratch flakes
+  use `git+file://<root>`.
+- `nix flake check --no-build` needs a prior `top` (yazi IFD; `rpi-check` does it
+  for every host). After changes in `ci/` run `chk eval-tools` first (the eval-tools
+  quirk, §2).
 - `cache.nixos.org` drops long transfers on this network (curl rc 56 after
   ~60 MB): retry with `--option download-attempts 10`, or mirror the NARs into
-  a local `file://` binary cache (`.scratch/m1/fetch-nars.sh`).
+  a local `file://` binary cache.
 - The host's system `ssh_config` includes files plain `ssh` rejects in the
   sandbox (`Bad owner or permissions`): use `ssh -F /dev/null` (the smoke tests do).
 - python3 is not on PATH (use `node`, `perl`, or `nix run nixpkgs#…`); busybox comes
@@ -352,6 +559,9 @@ NIXOS_BOOT from the host). A rollback stays rolled back until the next CI build.
 - Bash test gotchas: the nix sandbox has no `pgrep`/`pkill`; stdenv *sources*
   every file in `nativeBuildInputs` (scripts must come in as `src`); a unit-test
   PATH that has `bash` hides bugs of units whose PATH has none (the `f9dc426` bug).
+- `tests/personal-values.sh` and the `personal-values` check list the same paths
+  (the script is the source; the flake's fileset must match): a new library
+  directory needs both.
 
 ## 7. History
 
@@ -371,3 +581,11 @@ commit and before the M7 commit of the first plan). Experiment reports
 `s7` (community, autoUpgrade), `s8` (Cachix sizes, pin API, trust, Pi RAM),
 `m1`–`m7` (first-plan milestone reports), `ci/` (second plan: `plan-review.md`,
 `m8-report.md`, acceptance logs).
+
+The library work (2026-10-25, plan M0–M7) turned the repository into a flake
+others can use: the flake moved from `nixos/` to the root, `configuration.nix`
+and `keys.nix` became `hosts/neptun`, every Pi-specific value an `rpi.*` option
+or a default, and CI a host matrix. neptun's system derivation was held
+unchanged by the refactor invariant (leaf diff against baseline B0). Evidence
+and per-milestone reports (untracked): `.scratch/lib/m0-report.md` …
+`m7-report.md`, logs in `.scratch/lib/logs/`.

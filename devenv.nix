@@ -1,14 +1,15 @@
 # Local development shell for this repo (`devenv shell`, or automatic
 # activation). Everything the README's workflows need besides nix itself:
-# cachix (cache setup, README §4), the lint tools `nix flake check` runs,
-# and the tools the qemu smoke tests check for (tests/qemu-pi.sh qp_need).
+# cachix (cache setup, README "Pull: CI builds, the Pi pulls"), the lint tools
+# `nix flake check` runs, and the tools the qemu smoke tests check for
+# (tests/qemu-pi.sh qp_need).
 {
   pkgs,
   config,
   ...
 }: {
   packages = with pkgs; [
-    # binary cache setup (README §4: create the cache, signing key)
+    # binary cache setup (README "Setup": create the cache, signing key)
     cachix
     # Wi-Fi PSKs from the user's provider into rpi-deploy, never into the
     # store: `secretspec run -- rpi-deploy secrets` (secretspec.toml)
@@ -32,18 +33,18 @@
   # rpi-deploy needs no --flake (what rpi.buildHost.flakePath does on a host).
   env.RPI_FLAKE = config.devenv.root;
 
-  # The two things only the host can provide (README section 1); warns, never
-  # blocks the shell.
+  # The two things only the host can provide (README "Build host
+  # prerequisites"); warns, never blocks the shell.
   scripts.rpi-doctor = {
     exec = ''
       ok=0
       if [[ "$(uname -m)" != aarch64 ]] &&
         ! nix config show extra-platforms 2>/dev/null | grep -qw aarch64-linux; then
-        echo 'rpi: no aarch64 emulation: add  boot.binfmt.emulatedSystems = [ "aarch64-linux" ];  to the host NixOS config (README section 1)' >&2
+        echo 'rpi: no aarch64 emulation: add  boot.binfmt.emulatedSystems = [ "aarch64-linux" ];  to the host NixOS config (README "Build host prerequisites")' >&2
         ok=1
       fi
       if ! nix store info 2>&1 | grep -q '^Trusted: 1'; then
-        echo "rpi: $USER is not a trusted nix user: the nvmd cache is ignored and the kernel gets compiled; add  nix.settings.trusted-users = [ \"$USER\" ];  (README section 1)" >&2
+        echo "rpi: $USER is not a trusted nix user: the nvmd cache is ignored and the kernel gets compiled; add  nix.settings.trusted-users = [ \"$USER\" ];  (README \"Build host prerequisites\")" >&2
         ok=1
       fi
       exit "$ok"
@@ -78,12 +79,17 @@
     exec = ''
       set -e
       cd "$DEVENV_ROOT"
-      # yazi's IFD: evaluate the toplevel once before the check (HANDOFF §6)
-      nix eval --raw --accept-flake-config \
-        .#nixosConfigurations.rpi.config.system.build.toplevel.drvPath >/dev/null
+      # yazi's IFD: evaluate every Pi host's toplevel once before the check
+      # (HANDOFF, "Environment and sandbox gotchas"); the hosts come from
+      # the flake itself (lib.mkPi hosts), so no host is named here
+      hosts=$(bash -c '. ./rpi-lib.sh; rl_hosts .')
+      for h in $hosts; do
+        nix eval --raw --accept-flake-config \
+          ".#nixosConfigurations.$h.config.system.build.toplevel.drvPath" >/dev/null
+      done
       nix flake check --accept-flake-config "$@"
     '';
-    description = "nix flake check at the repository root (all checks incl. the host VM test; --no-build for eval only)";
+    description = "nix flake check at the repository root, after evaluating every Pi host (all checks incl. the host VM test; --no-build for eval only)";
   };
 
   # `devenv test`
