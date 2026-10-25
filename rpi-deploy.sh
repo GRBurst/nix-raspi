@@ -17,7 +17,7 @@ usage() {
     cat <<'EOF'
 Usage:
   rpi-deploy image [--out DIR] [--flake DIR] [--host NAME] [--max-builds N]
-  rpi-deploy flash IMAGE DEVICE
+  rpi-deploy flash IMAGE DEVICE [--wifi-env] [--flake DIR] [--host NAME]
   rpi-deploy deploy [switch|boot|test] [--host NAME] [--target USER@HOST] [--port N] [--flake DIR] [--max-builds N] [--force]
   rpi-deploy status [--host NAME] [--target USER@HOST] [--port N] [--flake DIR]
   rpi-deploy secrets [--host NAME] [--target USER@HOST] [--port N] [--flake DIR]
@@ -25,7 +25,10 @@ Usage:
   image    build config.system.build.sdImage of the flake's Pi system (after
            the cache and build guards) and print the image path and size
   flash    write IMAGE (.img.zst) to the removable DEVICE with sudo dd, after
-           you type the device name; then read it back and compare hashes
+           you type the device name; then read it back and compare hashes;
+           --wifi-env: then also write the host's Wi-Fi secrets file (see
+           secrets) into the card's root partition; the PSK variables are
+           checked before anything is written
   deploy   push the system to the Pi with the flake's pinned nixos-rebuild
            (default action: switch; boot = activate on next reboot; test =
            activate without making it the boot default), then sync on
@@ -56,7 +59,8 @@ Environment: RPI_FLAKE (default flake dir), RPI_HOST (default host),
   RPI_TARGET, RPI_PORT (default target and port), RPI_SSH_OPTS (extra ssh
   options),
   RPI_NIXOS_REBUILD (nixos-rebuild to use instead of the flake's pinned one),
-  RPI_LIB (path of rpi-lib.sh); test hooks RPI_ALLOW_NONBLOCK=1, RPI_SYSFS.
+  RPI_LIB (path of rpi-lib.sh); test hooks RPI_ALLOW_NONBLOCK=1, RPI_SYSFS,
+  RPI_PART_WAIT (seconds to wait for the card's root partition, 10).
 Exit codes: 2 usage, 10 kernel not cached, 11 forbidden local build,
   12 too many local builds, 13 build/eval failed, 14 deploy/secrets failed,
   15 would downgrade, 16 device refused, 17 verify failed.
@@ -304,10 +308,68 @@ flash_verify() {
     echo "verified: $len bytes, sha256 $want"
 }
 
-# flash IMAGE DEVICE
+# flash_present PATH: PATH is a block device (a regular file with
+# RPI_ALLOW_NONBLOCK=1, the test hook of flash_check_device).
+flash_present() {
+    [[ -b "$1" ]] || [[ "${RPI_ALLOW_NONBLOCK:-0}" == 1 && -f "$1" ]]
+}
+
+# flash_umount: unmount FLASH_MNT (once; also the EXIT trap while mounted)
+# and remove the mount point.
+FLASH_MNT=""
+flash_umount() {
+    [[ -n "$FLASH_MNT" ]] || return 0
+    local m="$FLASH_MNT"
+    FLASH_MNT=""
+    if ! sudo umount "$m"; then
+        warn "cannot unmount $m: unmount it (sudo umount $m) before removing the card"
+        return 1
+    fi
+    rmdir "$m" 2>/dev/null || true
+}
+
+# flash_wifi DEV FILE CONTENT: after the verify, write CONTENT (the Wi-Fi
+# secrets file) as FILE (root:root 600) into DEV's root partition 2
+# (/dev/sdb -> /dev/sdb2, /dev/mmcblk0 -> /dev/mmcblk0p2). udev re-reads
+# the partition table when dd closes the device; wait for the node. CONTENT
+# reaches install through its stdin only. The card is unmounted on failure.
+flash_wifi() {
+    local dev="$1" file="$2" content="$3" part mnt rc=0 urc=0 i wait="${RPI_PART_WAIT:-10}"
+    [[ "$wait" =~ ^[0-9]+$ ]] || wait=10
+    if [[ "$dev" =~ [0-9]$ ]]; then part="${dev}p2"; else part="${dev}2"; fi
+    for ((i = 0; i < wait; i++)); do
+        flash_present "$part" && break
+        sleep 1
+    done
+    flash_present "$part" ||
+        die "the root partition $part did not appear; the Wi-Fi secrets were not written"
+    mnt="$(mktemp -d)" || die "cannot create a mount point; the Wi-Fi secrets were not written"
+    log "writing $file (600) onto $part (sudo mount)"
+    if ! sudo mount "$part" "$mnt"; then
+        rmdir "$mnt"
+        die "cannot mount $part; the Wi-Fi secrets were not written"
+    fi
+    FLASH_MNT="$mnt"
+    trap flash_umount EXIT
+    # \n: $(...) dropped the last line's newline
+    printf '%s\n' "$content" |
+        sudo install -D -m 600 -o root -g root /dev/stdin "$mnt$file" || rc=$?
+    flash_umount || urc=$?
+    trap - EXIT
+    ((rc == 0)) || die "writing $file onto $part failed; the Wi-Fi secrets were not written"
+    ((urc == 0)) || die "$file was written onto $part, but the card is still mounted"
+    echo "wifi: $file written onto $part"
+}
+
+# flash IMAGE DEVICE [--wifi-env]
 do_flash() {
-    local img="$1" dev
+    local img="$1" dev file="" content=""
     [[ -f "$img" ]] || usage_error "flash: no such image file: $img"
+    if ((WIFI_ENV)); then # every PSK problem before the card is touched
+        load_info
+        file="$(wifi_secrets_file)" || exit
+        content="$(wifi_env_content)" || exit
+    fi
     dev="$(readlink -f -- "$2")" || dev="$2"
     flash_check_device "$dev"
     flash_confirm "$dev" "$2"
@@ -315,6 +377,7 @@ do_flash() {
     flash_write "$img" "$dev" || die "writing $dev failed"
     log "reading $dev back (sudo)"
     flash_verify "$img" "$dev"
+    ((WIFI_ENV == 0)) || flash_wifi "$dev" "$file" "$content"
     echo "done: the card can be removed"
 }
 
@@ -488,6 +551,7 @@ SUBCOMMAND=""
 OUT_DIR="$PWD"
 MAX_BUILDS=500
 FORCE=0
+WIFI_ENV=0
 ACTION=""
 POSITIONAL=()
 RL_FLAKE="${RPI_FLAKE:-$PWD}"
@@ -499,7 +563,7 @@ HOST_INFO=""                  # load_info
 # Options each subcommand accepts.
 declare -A ALLOWED=(
     [image]=" --out --flake --host --attr --max-builds "
-    [flash]=" "
+    [flash]=" --wifi-env --flake --host --attr "
     [deploy]=" --target --port --flake --host --attr --max-builds --force "
     [status]=" --target --port --flake --host --attr "
     [secrets]=" --target --port --flake --host --attr "
@@ -531,8 +595,8 @@ parse_args() {
         -*)
             [[ "${ALLOWED[$SUBCOMMAND]}" == *" $opt "* ]] ||
                 usage_error "$SUBCOMMAND: unknown option: $opt"
-            if [[ "$opt" == --force ]]; then
-                FORCE=1
+            if [[ "$opt" == --force || "$opt" == --wifi-env ]]; then
+                if [[ "$opt" == --force ]]; then FORCE=1; else WIFI_ENV=1; fi
                 shift
                 continue
             fi

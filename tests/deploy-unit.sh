@@ -1288,5 +1288,134 @@ run_cmd sc11 -- sec --force
 expect_exit "sc11 secrets rejects --force -> exit 2" 2
 
 expect_eq "sc4 PSK values never in argv" 0 "$leaked"
-unset RPI_WIFI_HOME RPI_WIFI_LAB
+
+# =============================================================================
+# T3.4 flash --wifi-env: the same secrets file (P8) onto the card's root
+# partition after the read-back verify; PSK problems -> exit 2 before dd
+# =============================================================================
+# mount/umount log (MOCK_MOUNT_RC / MOCK_UMOUNT_RC fail them); install copies
+# its stdin to $MOCK_ROOT/root/<DEST> (MOCK_INSTALL_RC fails it; argv = mode)
+mock mount <<'EOF'
+exit "${MOCK_MOUNT_RC:-0}"
+EOF
+mock umount <<'EOF'
+exit "${MOCK_UMOUNT_RC:-0}"
+EOF
+mock install <<'EOF'
+[[ -z "${MOCK_INSTALL_RC:-}" ]] || { echo "install: cannot create regular file" >&2; exit "$MOCK_INSTALL_RC"; }
+dest="${!#}"
+mkdir -p "$MOCK_ROOT/root$(dirname "$dest")"
+cat >"$MOCK_ROOT/root$dest"
+EOF
+export RPI_ALLOW_NONBLOCK=1 TMPDIR="$T/tmp"
+mkdir -p "$TMPDIR"
+WIFI="$(wifi_info "$NETS")"
+PART="${DEV}2"
+: >"$PART"  # the root partition node the kernel creates after dd
+fl() { MOCK_INFO="$WIFI" rd flash "$IMG" "$@"; }
+# mnt_of: the mount point of the (first) mount call
+mnt_of() { sed -nE 's|^mount [^ ]+ ([^ ]+)$|\1|p' "$MOCK_LOG" | head -n1; }
+fwleaked=0
+
+reset_log; new_dev; rm -rf "$T/root"
+run_cmd fw1 -- fl "$DEV" --wifi-env <<<"sdz"
+expect_exit "fw1 flash --wifi-env succeeds" 0
+expect_grepf "fw1 the image is verified" "verified" "$OUT"
+expect_true "fw1 the device still starts with the image" \
+    cmp -s -n "$(zstdcat "$IMG" | wc -c)" <(zstdcat "$IMG") "$DEV"
+M="$(mnt_of)"
+expect_grep "fw1 sudo mount of partition 2 on a temp dir" "^sudo mount $PART $TMPDIR/[^ ]+$" "$MOCK_LOG"
+expect_grepf "fw1 sudo install of stdin, 600 root:root" \
+    "sudo install -D -m 600 -o root -g root /dev/stdin $M/var/lib/rpi/wireless.env" "$MOCK_LOG"
+expect_true "fw1 the card's secrets file = the sorted VAR=PSK lines (P8)" \
+    cmp -s <(p8 RPI_WIFI_HOME RPI_WIFI_LAB) "$T/root$M/var/lib/rpi/wireless.env"
+expect_eq "fw1 sudo umount of the mount point" 1 "$(log_count "^sudo umount $M\$")"
+expect_true "fw1 order: verify < mount < install < umount" test \
+    "$(first_line '^sudo head ')" -lt "$(first_line '^sudo mount ')" -a \
+    "$(first_line '^sudo mount ')" -lt "$(first_line '^sudo install ')" -a \
+    "$(first_line '^sudo install ')" -lt "$(first_line '^sudo umount ')"
+expect_true "fw1 the mount point is removed" test ! -e "$M"
+expect_grepf "fw1 the card can be removed" "done: the card can be removed" "$OUT"
+expect_eq "fw1 the host info is evaluated once" 1 "$(log_count "$INFO_RE")"
+fwleaked=$((fwleaked + $(leaks)))
+
+export RPI_SYSFS="$T/sys"
+mmc_type SD
+: >"${MMC}p2"
+reset_log
+MOCK_RM=0 run_cmd fw1 -- fl "$MMC" --wifi-env <<<"mmcblk0"
+expect_exit "fw1 mmcblk0 --wifi-env succeeds" 0
+expect_grep "fw1 mmcblk0 -> partition mmcblk0p2" "^sudo mount $MMC""p2 " "$MOCK_LOG"
+unset RPI_SYSFS
+
+fw2_ok() { # exit 2, nothing asked, nothing written
+    [[ $RC -eq 2 ]] && [[ $(log_count '^(dd|sudo|lsblk|mount) ') -eq 0 ]] && [[ "$(dev_sum)" == "$ZERO_SUM" ]] &&
+        ! grep -qF 'type the device name' "$OUT"
+}
+reset_log; new_dev
+RPI_WIFI_LAB='' run_cmd fw2 -- fl "$DEV" --wifi-env <<<"sdz"
+expect_true "fw2 missing PSK -> exit 2 before dd" fw2_ok
+expect_grepf "fw2 names the variable" "missing PSK variable RPI_WIFI_LAB" "$ERR"
+fwleaked=$((fwleaked + $(leaks)))
+reset_log; new_dev
+RPI_WIFI_LAB=$'S3cr3tLab\nx' run_cmd fw2 -- fl "$DEV" --wifi-env <<<"sdz"
+expect_true "fw2 PSK with a newline -> exit 2 before dd" fw2_ok
+fwleaked=$((fwleaked + $(leaks)))
+reset_log; new_dev
+MOCK_INFO="$(wifi_info "$NETS" false)" run_cmd fw2 -- rd flash "$IMG" "$DEV" --wifi-env <<<"sdz"
+expect_true "fw2 Wi-Fi disabled -> exit 2 before dd" fw2_ok
+reset_log; new_dev
+MOCK_INFO="$(wifi_info "$NETS" true '/a/../../x')" run_cmd fw2 -- rd flash "$IMG" "$DEV" --wifi-env <<<"sdz"
+expect_true "fw2 secretsFile escaping the mount point -> exit 2 before dd" fw2_ok
+
+reset_log; new_dev
+MOCK_INSTALL_RC=1 run_cmd fw3 -- fl "$DEV" --wifi-env <<<"sdz"
+expect_true "fw3 install fails -> exit != 0" test "$RC" -ne 0
+M="$(mnt_of)"
+expect_eq "fw3 install fails -> umount still called" 1 "$(log_count "^sudo umount $M\$")"
+expect_true "fw3 install fails -> mount point removed" test ! -e "$M"
+expect_not_grep "fw3 install fails -> not 'done'" "done: the card" "$OUT"
+reset_log; new_dev
+MOCK_MOUNT_RC=32 run_cmd fw3 -- fl "$DEV" --wifi-env <<<"sdz"
+expect_true "fw3 mount fails -> exit != 0" test "$RC" -ne 0
+expect_eq "fw3 mount fails -> no install, no umount" 0 "$(log_count '^sudo (install|umount) ')"
+expect_eq "fw3 mount fails -> mount point removed" 0 "$(find "$TMPDIR" -mindepth 1 | wc -l)"
+expect_grepf "fw3 mount fails -> says the secrets were not written" "not written" "$ERR"
+reset_log; new_dev
+MOCK_UMOUNT_RC=32 run_cmd fw3 -- fl "$DEV" --wifi-env <<<"sdz"
+expect_true "fw3 umount fails -> exit != 0" test "$RC" -ne 0
+expect_grep "fw3 umount fails -> tells to unmount" "unmount .*$TMPDIR/" "$ERR"
+rm -rf "${TMPDIR:?}"/*
+reset_log; new_dev; rm -f "$PART"
+RPI_PART_WAIT=0 run_cmd fw3 -- fl "$DEV" --wifi-env <<<"sdz"
+expect_true "fw3 partition 2 never appears -> exit != 0" test "$RC" -ne 0
+expect_eq "fw3 no partition -> no mount" 0 "$(log_count '^sudo mount ')"
+expect_grepf "fw3 no partition -> names it" "$PART" "$ERR"
+: >"$PART"
+fwleaked=$((fwleaked + $(leaks)))
+
+reset_log; new_dev
+run_cmd fw4 -- fl "$DEV" <<<"sdz"
+expect_exit "fw4 flash without --wifi-env succeeds" 0
+expect_eq "fw4 without --wifi-env -> no mount/install" 0 "$(log_count '^(sudo )?(mount|umount|install) ')"
+expect_eq "fw4 without --wifi-env -> no flake eval" 0 "$(log_count '^nix ')"
+expect_eq "fw4 sudo only for the write and the read-back" 2 "$(log_count '^sudo ')"
+
+reset_log; new_dev
+MOCK_HOSTS='["a","b"]' run_cmd fw6 -- fl "$DEV" --wifi-env --host b --flake /flk2 <<<"sdz"
+expect_exit "fw6 --wifi-env --host/--flake succeeds" 0
+expect_grep "fw6 --host/--flake select the host" "^nix eval .* /flk2#nixosConfigurations\.b --apply " "$MOCK_LOG"
+reset_log; new_dev
+MOCK_HOSTS='["a","b"]' run_cmd fw6 -- fl "$DEV" --wifi-env <<<"sdz"
+expect_exit "fw6 --wifi-env, several hosts -> exit 2" 2
+expect_eq "fw6 several hosts -> nothing written" 0 "$(log_count '^(dd|sudo) ')"
+fwleaked=$((fwleaked + $(leaks)))
+run_cmd fw6 -- rd --help
+expect_grepf "fw6 usage lists flash --wifi-env" "flash IMAGE DEVICE [--wifi-env]" "$OUT"
+run_cmd fw6 -- rd flash "$IMG" "$DEV" --force
+expect_exit "fw6 flash rejects --force -> exit 2" 2
+
+expect_eq "fw5 PSK values never in argv (flash)" 0 "$fwleaked"
+rm -f "$BIN/mount" "$BIN/umount" "$BIN/install"
+unset RPI_ALLOW_NONBLOCK RPI_WIFI_HOME RPI_WIFI_LAB
 summary
