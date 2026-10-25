@@ -1,0 +1,8 @@
+{
+  "seq": 2,
+  "storePath": "/nix/store/qqb1anbpsj0z70njvx039ncnj4kfpvm9-nixos-system-neptun-26.05.20261021.da6dc0e",
+  "narHash": "sha256-A6RdZDVWWvrzBe5zRxtFqYo+JwtCiy3ApXuEXaHPdcI=",
+  "rev": "171352f888330f0597071d19d9a680d033f9cf47",
+  "built": "2026-10-25T18:28:40Z",
+  "bootFp": "4b52907853160a117c1ebfb7e85cdf033b89fa95a22214cf30fec606503a9898"
+}
