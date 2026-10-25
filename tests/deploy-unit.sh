@@ -1178,6 +1178,14 @@ RPI_HOST=a RPI_TARGET=pi@envhost run_cmd tp9 -- rd status --host b --target pi@f
 expect_grep "tp9 --target/--port still win for another host" "^ssh -p 2202 pi@flag " "$MOCK_LOG"
 run_cmd tp9 -- rd --help
 expect_grepf "tp9 usage: RPI_TARGET/RPI_PORT only for the default host" "only for the default host" "$OUT"
+# re-review L1: the rule compares --host with $RPI_HOST only, so with
+# RPI_HOST unset even --host <the only host> ignores them; the usage says so
+expect_grepf "tp9 usage: any --host while RPI_HOST is unset ignores them" \
+    "any --host while RPI_HOST is unset" "$OUT"
+reset_log
+MOCK_HOSTS='["a"]' RPI_TARGET=pi@envhost run_cmd tp9 -- rd status --host a
+expect_grep "tp9 RPI_HOST unset, --host <the only host>: its own target" "^ssh -p $INFO_PORT $INFO_TARGET " "$MOCK_LOG"
+expect_grepf "tp9 RPI_HOST unset, --host <the only host>: says RPI_TARGET is ignored" "ignoring RPI_TARGET" "$ERR"
 
 # =============================================================================
 # T3.3 secrets: the Wi-Fi PSKs named in rpi.wifi.networks, from the

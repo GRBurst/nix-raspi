@@ -150,8 +150,8 @@ pre-generated host key at flash time; possible later extension).
   0. `secrets` may run before or after the deploy that enables Wi-Fi.
 - *Amended 2026-10-25 (final review S4):* `RPI_TARGET`/`RPI_PORT` are only
   for the default host (`$RPI_HOST`, else the only one). With a `--host`
-  other than `$RPI_HOST` (any `--host` while `RPI_HOST` is unset) they are
-  ignored with a message, and that host's `rpi.deploy.target`/`rpi.ssh.port`
+  other than `$RPI_HOST` (any `--host` while `RPI_HOST` is unset, even
+  the only host: re-review L1) they are ignored with a message, and that host's `rpi.deploy.target`/`rpi.ssh.port`
   apply (`--target`/`--port` still win), so `deploy --host b` never
   switches Pi a to b's system.
 

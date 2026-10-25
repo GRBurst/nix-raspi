@@ -63,9 +63,10 @@ Host: --host NAME selects the flake's nixosConfigurations.NAME; default
   several -> exit 2. --attr NAME is a deprecated alias of --host.
 Target: --target > $RPI_TARGET > the host's rpi.deploy.target; port: --port >
   $RPI_PORT > the host's rpi.ssh.port (the host is evaluated only when one of
-  the two is missing). RPI_TARGET and RPI_PORT are only for the default host
-  ($RPI_HOST, else the only one): with --host NAME other than $RPI_HOST they
-  are ignored (said on stderr).
+  the two is missing). RPI_TARGET and RPI_PORT are only for the default host:
+  without --host or with --host $RPI_HOST. Any other --host, and
+  any --host while RPI_HOST is unset (even the flake's only host), ignores
+  them (said on stderr).
 Defaults: --flake $RPI_FLAKE or the current directory, --max-builds 500,
   --out the current directory.
 Environment: RPI_FLAKE (default flake dir), RPI_HOST (default host),
@@ -134,8 +135,9 @@ info() { jq -r "($1) // empty" <<<"$HOST_INFO"; }
 # resolve_target: RL_TARGET = --target > $RPI_TARGET > rpi.deploy.target,
 # RL_SSH_PORT = --port > $RPI_PORT > rpi.ssh.port; the host info is evaluated
 # only when one of them is still missing. RPI_TARGET/RPI_PORT belong to the
-# default host ($RPI_HOST, else the only one): with --host NAME other than
-# $RPI_HOST they are ignored (logged), so host b never goes to Pi a.
+# default host: they apply without --host or with --host $RPI_HOST; any
+# other --host (any at all while RPI_HOST is unset: the host list is not
+# evaluated for this) ignores them (logged), so host b never goes to Pi a.
 resolve_target() {
     local env_target="${RPI_TARGET:-}" env_port="${RPI_PORT:-}" ignored=()
     if [[ -n "$HOST_OPT" && "$HOST_OPT" != "${RPI_HOST:-}" ]]; then
