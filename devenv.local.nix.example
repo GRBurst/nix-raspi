@@ -5,8 +5,9 @@
 {
   env = {
     # The host rpi-deploy works on when the flake has several (default: the
-    # only Pi host; several and none set -> exit 2 listing them).
-    RPI_HOST = "rpi";
+    # only Pi host; several and none set -> exit 2 listing them). This flake
+    # has one (`rpi` is only a deprecated alias), so it stays unset here.
+    # RPI_HOST = "<host>";
 
     # Override the host's rpi.deploy.target (default root@<hostname>) and
     # rpi.ssh.port, e.g. while the hostname does not resolve yet. Only for

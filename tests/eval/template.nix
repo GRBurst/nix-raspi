@@ -20,10 +20,13 @@ let
   # T5.2 helpers.
   declaredPsk = f: (fromTOML (builtins.readFile f)).profiles.default.RPI_WIFI_HOME;
   ignores = f: lib.elem "devenv.local.nix" (lib.splitString "\n" (builtins.readFile f));
-  localExampleOk = f:
-    let text = builtins.readFile f; in
-    ((import f) { }).env ? RPI_HOST
-    && lib.hasInfix "RPI_TARGET" text && lib.hasInfix "RPI_PORT" text;
+  # N9 (final review): a set RPI_HOST must name a Pi host of that flake
+  # (ours: `rpi` is the deprecated alias, no Pi host; one is picked anyway)
+  localExampleOk = f: flake:
+    let text = builtins.readFile f; env = ((import f) { }).env; in
+    lib.hasInfix "RPI_HOST" text
+    && lib.hasInfix "RPI_TARGET" text && lib.hasInfix "RPI_PORT" text
+    && (env ? RPI_HOST -> (flake.nixosConfigurations.${env.RPI_HOST}.rpiHost or false));
   pkgs = nixpkgs.legacyPackages.x86_64-linux;
   devenvModule = f: (import f) { inherit pkgs; config.devenv.root = "/repo"; };
   devenvOk = f:
@@ -86,9 +89,9 @@ in
   "devenv.local.nix is gitignored (root, template)" =
     lib.all ignores [ ../../.gitignore ../../templates/default/.gitignore ];
 
-  "devenv.local.nix.example sets RPI_HOST and shows RPI_TARGET, RPI_PORT (root, template)" =
-    lib.all localExampleOk
-      [ ../../devenv.local.nix.example ../../templates/default/devenv.local.nix.example ];
+  "devenv.local.nix.example shows RPI_HOST (a Pi host if set), RPI_TARGET, RPI_PORT (root, template)" =
+    localExampleOk ../../devenv.local.nix.example rpiFlake
+    && localExampleOk ../../templates/default/devenv.local.nix.example tpl;
 
   # devenv itself cannot run in the sandbox; the module is evaluated here
   # with a fake devenv config instead.
