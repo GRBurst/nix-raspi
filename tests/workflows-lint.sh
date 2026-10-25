@@ -74,6 +74,9 @@ for w in "$ours" "$tpl"; do
   before "$build" "$RC pointer" "actions/upload-artifact@" || fail "$w: the pointer is not uploaded after it is written"
   printf '%s\n' "$build" | step pointer | grep -qxF "        if: steps.publish.outputs.published == 'true'" ||
     fail "$w: the pointer step does not run only when published"
+  # N3: the pointer is keyed on system.name (build's name=): --name
+  printf '%s\n' "$build" | grep -qF "$RC pointer --name \"\$NAME\" " ||
+    fail "$w: rpi-ci pointer is not called with --name \"\$NAME\""
   # shellcheck disable=SC2016 # the literal GitHub expression
   printf '%s\n' "$build" | grep -qxF '    name: build ${{ matrix.host }}' ||
     fail "$w: the build job is not named 'build \${{ matrix.host }}'"

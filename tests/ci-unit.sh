@@ -610,7 +610,9 @@ put_pointer() {
 }
 
 reset_log
-run_cmd w1 -- pointer --host neptun --seq 7 --rev abc123 --file "$PF" "$TOP"
+# N3: the option is --name (system.name, not the attribute name rpi-ci
+# build/publish take as --host); --host stays an alias (most rows use it)
+run_cmd w1 -- pointer --name neptun --seq 7 --rev abc123 --file "$PF" "$TOP"
 expect_exit "w1 new pointer" 0
 expect_eq "w1 stdout is changed=true" "changed=true" "$(cat "$OUT")"
 expect_eq "w1 keys are exactly seq storePath narHash rev built bootFp" \
@@ -674,6 +676,8 @@ run_cmd w4h -- pointer --host mars --seq 1 --rev x --file "$T/mars/p.json" "$MAR
 expect_eq "w4 --host mars accepts a mars toplevel" "changed=true" "$(cat "$OUT")"
 run_cmd w4i -- pointer --host 'nep.*' --seq 1 --rev x --file "$T/mars/q.json" "$TOP"
 expect_exit "w4 --host must be a plain name" 1
+run_cmd w4n -- pointer --name 'nep.*' --seq 1 --rev x --file "$T/mars/q.json" "$TOP"
+expect_grepf "w4 the error names --name" "--name must be a plain name" "$ERR"
 
 reset_log
 MOCK_NSQ_RC=1 run_cmd w5f -- pointer --host neptun --seq 30 --rev x --file "$T/w5f/p.json" "$TOP"
@@ -737,11 +741,13 @@ run_cmd w10c -- pointer --host neptun --seq 1 --rev x --file "$T/w10.json"
 expect_exit "w10 missing TOP -> usage" 2
 run_cmd w10h -- pointer --help
 expect_exit "w10 --help" 0
+expect_grepf "w10 usage: --name NAME (the system.name)" "--name NAME  the host's system.name" "$OUT"
+expect_grepf "w10 usage: --host is an alias" "--host NAME  alias of --name" "$OUT"
 
-# pt3: --host is required (the pointer file and the toplevel are per host)
+# pt3: --name is required (the pointer file and the toplevel are per host)
 run_cmd pt3 -- pointer --seq 1 --rev x --file "$T/pt3/neptun.json" "$TOP"
-expect_exit "pt3 no --host -> usage" 2
-expect_grepf "pt3 says --host is missing" "--host" "$ERR"
+expect_exit "pt3 no --name -> usage" 2
+expect_grepf "pt3 says --name is missing" "missing --name" "$ERR"
 expect_true "pt3 no file written" test ! -e "$T/pt3/neptun.json"
 
 # pt4 ("host attribute name != hostname"): the workflow-style call keyed on

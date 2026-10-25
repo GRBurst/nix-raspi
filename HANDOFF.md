@@ -227,7 +227,7 @@ Evidence in `nixos/.scratch/m7/` (untracked). Still valid except where noted.
 - **D8** Static network keeps `systemd.network.networks."10-lan-static"`; DHCP mode defines no network (NixOS's default DHCP network applies).
 - **D9** Wi-Fi: `pskRaw = "ext:<VAR>"`, `secretsFile` is a string (never a store path), firmware `hardware.firmware = mkOverride 49 [ … ]` (beats sd-wear's `mkForce [ ]`); Bluetooth likewise.
 - **D10** Host discovery and host info are two nix expressions in `rpi-lib.sh` (`RL_HOSTS_EXPR`, `RL_HOST_INFO_EXPR`) shared by `rpi-deploy` and `rpi-ci`; `nixosConfigurations.rpi` is `neptun // { rpiHost = false; }` (deprecated alias, one release).
-- **D11** Pointer file, pin name and `rpi-ci pointer --host` key on `config.system.name` (the hostname), not the attribute name.
+- **D11** Pointer file, pin name and `rpi-ci pointer --name` (alias `--host`; final review N3) key on `config.system.name` (the hostname), not the attribute name.
 - **D12** `rpi-ci` = `ci/rpi-ci.sh` dispatcher over the scripts; every CI script defaults `--flake` to `$PWD`; package layout `$out/libexec/rpi-ci/{ci/*.sh,rpi-lib.sh,rpi-fp.sh}`.
 - **D13** CI substitutes from the host's cache through `--option extra-substituters/extra-trusted-public-keys` in `rpi-ci build` (needs a trusted runner user: install-nix-action's default); `cachix-action` dropped. Risk R3, verified only locally.
 - **D14** Each matrix job updates the lock itself; `rpi-ci commit --artifacts DIR` requires all locks byte-identical, else `::error::` and no commit; the commit job runs only when every build succeeded. All jobs build the hosts job's `rev`; `rpi-ci commit --base REV` refuses when main's lock differs from REV's (final review S1).

@@ -4,9 +4,11 @@
 #   { "seq": N, "storePath": TOP, "narHash": "sha256-…", "rev": SHA,
 #     "built": "<UTC ISO>", "bootFp": "<64 hex>" }
 #
-#   ci/pointer.sh --host NAME --seq N --rev SHA --file PATH TOP
+#   ci/pointer.sh --name NAME --seq N --rev SHA --file PATH TOP
 #
-# - NAME is the host's system.name (rpi-ci build's name=, D11): TOP must be
+# - NAME is the host's system.name (rpi-ci build's name=, D11), not the
+#   attribute name build/publish take as --host; --host is an alias of
+#   --name (older callers): TOP must be
 #   a nixos-system-NAME-… toplevel in the store (RL_STORE_DIR, default
 #   /nix/store; the tests use a fake one).
 # - TOP already in PATH (or in PATH's copy on origin/main, see below) →
@@ -26,7 +28,7 @@
 #
 # stdout: `changed=true|false` (for $GITHUB_OUTPUT); logs on stderr. Under
 # GitHub Actions also annotations and a step summary section (ci/gh.sh).
-# Exit: 0 | 1 invalid N/TOP/--host, invalid existing pointer, N not newer,
+# Exit: 0 | 1 invalid N/TOP/--name, invalid existing pointer, N not newer,
 # narHash or boot fingerprint failed | 2 usage.
 set -euo pipefail
 
@@ -38,10 +40,11 @@ source "${RL_FP_LIB:-$HERE/../rpi-fp.sh}"
 
 usage() {
     cat <<'EOF2'
-usage: ci/pointer.sh --host NAME --seq N --rev SHA --file PATH TOP
+usage: ci/pointer.sh --name NAME --seq N --rev SHA --file PATH TOP
 
-  --host NAME  the host's system.name (rpi-ci build's name=); TOP must be
-               a nixos-system-NAME-… toplevel
+  --name NAME  the host's system.name (rpi-ci build's name=, not the
+               attribute name); TOP must be a nixos-system-NAME-… toplevel
+  --host NAME  alias of --name
   --seq N      pointer sequence number (github.run_number), 1..9999999999
   --rev SHA    git revision the system was built from
   --file PATH  pointer file (created with its directory if missing),
@@ -53,14 +56,14 @@ EOF2
 die() { gh_error "$*"; exit 1; }
 die_usage() { echo "ci/pointer.sh: $1" >&2; usage >&2; exit 2; }
 
-unset host seq rev file top
+unset name seq rev file top
 while (($#)); do
     case "$1" in
-    --seq | --rev | --file | --host) (($# >= 2)) || die_usage "$1 needs a value" ;;&
+    --seq | --rev | --file | --name | --host) (($# >= 2)) || die_usage "$1 needs a value" ;;&
     --seq) seq="$2"; shift 2 ;;
     --rev) rev="$2"; shift 2 ;;
     --file) file="$2"; shift 2 ;;
-    --host) host="$2"; shift 2 ;;
+    --name | --host) name="$2"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     -*) die_usage "unknown option '$1'" ;;
     *)
@@ -70,21 +73,21 @@ while (($#)); do
         ;;
     esac
 done
-for v in host seq rev file; do
+for v in name seq rev file; do
     [[ -n "${!v+x}" ]] || die_usage "missing --$v"
 done
 [[ -n "${top+x}" ]] || die_usage "missing TOP"
 
 seq_re='^[1-9][0-9]{0,9}$'
 store="${RL_STORE_DIR:-/nix/store}"
-[[ "$host" =~ ^[A-Za-z0-9_-]+$ ]] || die "--host must be a plain name: '$host'"
+[[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] || die "--name must be a plain name: '$name'"
 [[ "$seq" =~ $seq_re ]] || die "--seq must be an integer 1..9999999999: '$seq'"
 [[ -n "$rev" && "$rev" != *[[:cntrl:]]* ]] || die "--rev must be a non-empty single line"
-[[ "$top" =~ ^"$store"/[0-9a-df-np-sv-z]{32}-nixos-system-"$host"-[A-Za-z0-9+._?=-]+$ ]] ||
-    die "not a nixos-system-$host toplevel in $store: '$top'"
+[[ "$top" =~ ^"$store"/[0-9a-df-np-sv-z]{32}-nixos-system-"$name"-[A-Za-z0-9+._?=-]+$ ]] ||
+    die "not a nixos-system-$name toplevel in $store: '$top'"
 
 # summary LINE...: this step's summary section (GitHub Actions only)
-summary() { { echo "## $host: pointer"; echo; printf '%s\n' "$@"; echo; } | gh_summary; }
+summary() { { echo "## $name: pointer"; echo; printf '%s\n' "$@"; echo; } | gh_summary; }
 
 dir="$(dirname "$file")" base="$(basename "$file")"
 mkdir -p "$dir"

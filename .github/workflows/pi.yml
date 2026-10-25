@@ -128,7 +128,7 @@ jobs:
           SEQ: ${{ github.run_number }}
         run: |
           git fetch origin +refs/heads/main:refs/remotes/origin/main >&2
-          "$RUNNER_TEMP/rpi-ci/bin/rpi-ci" pointer --host "$NAME" --seq "$SEQ" --rev "$(git rev-parse HEAD)" --file "deploy/$NAME.json" "$TOP" >> "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/rpi-ci/bin/rpi-ci" pointer --name "$NAME" --seq "$SEQ" --rev "$(git rev-parse HEAD)" --file "deploy/$NAME.json" "$TOP" >> "$GITHUB_OUTPUT"
       # The lock (updated or not) and the pointer for the commit job.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
