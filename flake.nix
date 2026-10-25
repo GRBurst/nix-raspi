@@ -25,7 +25,8 @@
     home-manager = {
       # master, not release-26.05: nix-terminal needs HM options that only
       # exist on master (programs.devenv). Master against our nixos-26.05
-      # nixpkgs works; the release-mismatch warning is silenced in home.nix.
+      # nixpkgs works; the release-mismatch warning is silenced by the
+      # terminal profile (modules/profiles/terminal.nix).
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
@@ -43,8 +44,6 @@
     self,
     nixpkgs,
     nixos-raspberrypi,
-    home-manager,
-    nix-terminal,
     llm-agents,
     ...
   } @ inputs: let
@@ -162,58 +161,16 @@
             nixosModules.terminal = ./modules/profiles/terminal.nix;
 
             nixosConfigurations = {
-              # nixos-raspberrypi.lib.nixosSystem is a drop-in for
-              # nixpkgs.lib.nixosSystem: it injects the vendor kernel /
-              # firmware overlays and trusts the nvmd binary cache.
-              # (nixosSystemFull would apply RPi overlays globally = more
-              # rebuilds; not needed for this headless system.)
-              rpi = nixos-raspberrypi.lib.nixosSystem {
-                # HYBRID: userspace from our nixpkgs; kernel/firmware stay
-                # nvmd's packages (its own pin), see inputs.
-                inherit nixpkgs;
-                specialArgs = { inherit inputs; };
-                modules = [
-                  # Raspberry Pi 3 base: U-Boot, firmware, config.txt,
-                  # vendor kernel (linuxPackages_rpi3)
-                  nixos-raspberrypi.nixosModules.raspberry-pi-3.base
+              # Our Pi (hosts/neptun) through the library entry point, like
+              # any consumer's host (lib/mkPi.nix: nvmd's nixosSystem with
+              # the hybrid inputs, the rpi.* modules and home-manager).
+              neptun = self.lib.mkPi { modules = [ ./hosts/neptun ]; };
 
-                  # The SD image is a build output of this very system
-                  # (config.system.build.sdImage), see modules/sd-image.nix.
-                  ./modules/sd-image.nix
-                  # Pi modules (rpi.sdWear, rpi.headless: on by default;
-                  # rpi.storage.external: off by default)
-                  ./modules/sd-wear.nix
-                  ./modules/headless.nix
-                  # rpi.wifi / rpi.bluetooth: off by default (their disable-*
-                  # overlays, formerly set by headless)
-                  ./modules/wifi.nix
-                  ./modules/bluetooth.nix
-                  ./modules/external-storage.nix
-                  # rpi-pull timer/service (rpi.pull.*): the Pi pulls CI builds
-                  ./modules/pull-update.nix
-
-                  ./configuration.nix
-
-                  # Integrate Home Manager as a NixOS module
-                  home-manager.nixosModules.home-manager
-                  {
-                    home-manager.useGlobalPkgs = true;
-                    home-manager.useUserPackages = true;
-                    home-manager.extraSpecialArgs = { inherit inputs; };
-                    # nix-terminal options are Home Manager options, so the
-                    # module belongs in the HM scope (sharedModules), not in
-                    # the NixOS list.
-                    home-manager.sharedModules = [ nix-terminal.homeModules.default ];
-                    home-manager.users.pi = import ./home.nix;
-                  }
-                ];
-              };
-
-              # Alias under the Pi's hostname (`.#neptun`). Same derivation as
-              # `rpi`; the image and every push deploy (rpi-deploy, default
-              # --attr rpi) use `rpi`. The Pi has no /etc/nixos and never
-              # evaluates the flake, so nothing on it needs this name.
-              neptun = self.nixosConfigurations.rpi;
+              # Deprecated alias (one release, plan §15 / A13): the old name
+              # of neptun for existing `--attr rpi` / `.#rpi` users. Marked
+              # rpiHost = false, so host discovery (rpi-lib.sh rl_hosts,
+              # rpi-ci hosts) does not list it twice.
+              rpi = self.nixosConfigurations.neptun // { rpiHost = false; };
 
               # x86_64 test configuration for the build-host module:
               #   nix build .#nixosConfigurations.rpiBuildHostTest.config.system.build.toplevel
@@ -397,7 +354,7 @@
                   pkgs = x86Pkgs;
                   args = {
                     inherit lib nixpkgs hostTestSystem;
-                    rpi = self.nixosConfigurations.rpi;
+                    rpi = self.nixosConfigurations.neptun;
                     rpiLib = self.lib;
                     nixosModules = self.nixosModules;
                     fixtures = ./tests/fixtures;

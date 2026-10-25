@@ -29,7 +29,7 @@ in
     hardware.firmware = lib.mkForce [ ];
 
     # Fewer metadata writes: no atime updates, lazy timestamp write-back,
-    # 60 s journal commit (default 5 s). Lists merge with configuration.nix.
+    # 60 s journal commit (default 5 s). Lists merge with a host's options.
     fileSystems."/".options = [ "noatime" "lazytime" "commit=60" ];
 
     # Nix builds use /nix/var/nix/builds, not /tmp, so 256M is plenty.
@@ -65,7 +65,7 @@ in
     # nix.conf when the system is built.
     nix.settings.fsync-store-paths = true;
 
-    # zram swap itself (50 %) is enabled in configuration.nix; with
+    # zram swap itself (50 %) is enabled by modules/base.nix; with
     # compressed RAM as swap, prefer it over dropping page cache and do not
     # read ahead (zram has no seek cost).
     boot.kernel.sysctl = {

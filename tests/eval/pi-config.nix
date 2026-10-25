@@ -1,13 +1,18 @@
-# Pi configuration (spec §3.2): deployment access, removals, boot/GC
-# hygiene. Reads option values only; never forces the toplevel.
+# Pi configuration (spec §3.2) of our host neptun (`rpi` here is
+# nixosConfigurations.neptun): deployment access, removals, boot/GC
+# hygiene, neptun's own values. Reads option values only; never forces the
+# toplevel.
 { lib, rpi, nixpkgs, ... }:
 let
   cfg = rpi.config;
-  keys = import ../../keys.nix;
+  # The user key used to come from keys.nix; the reusable library removed
+  # keys.nix (spec §7), the key is now neptun's rpi.admin.sshKeys.
+  userKeys = cfg.rpi.admin.sshKeys;
   rootKeys = cfg.users.users.root.openssh.authorizedKeys.keys;
   ssh = cfg.services.openssh.settings;
-  # Values defined by configuration.nix itself (not by nixpkgs/nvmd modules).
-  confFile = toString ../../configuration.nix;
+  # Values defined by neptun's host module itself (not by nixpkgs/nvmd or
+  # library modules; formerly configuration.nix).
+  confFile = toString ../../hosts/neptun/default.nix;
   definedInConf = opt:
     lib.concatMap (d: lib.toList d.value)
     (lib.filter (d: d.file == confFile) opt.definitionsWithLocations);
@@ -22,17 +27,19 @@ in
   "root login is key-only" =
     ssh.PermitRootLogin == "prohibit-password" && ssh.PasswordAuthentication == false;
 
-  "root has the user key" = lib.elem keys.user rootKeys;
+  "root has the user key" = userKeys != [ ] && lib.all (k: lib.elem k rootKeys) userKeys;
 
   # Spec §3.5: the host auto-update key is gone; the user key is the only
   # root key (manual `rpi-deploy deploy`).
-  "root has exactly the user key" = rootKeys == [ keys.user ];
+  "root has exactly the user key" = lib.length userKeys == 1 && rootKeys == userKeys;
 
-  "keys.nix has no auto-update key or host address" =
-    !(keys ? autoUpdate) && !(keys ? hostAddress);
+  # keys.nix (with its former auto-update key / host address) is retired
+  # (spec §7); neptun has the one user key.
+  "no keys.nix: no auto-update key or host address" =
+    !builtins.pathExists ../../keys.nix && lib.length userKeys == 1;
 
   "pi has exactly the user key" =
-    cfg.users.users.pi.openssh.authorizedKeys.keys == [ keys.user ];
+    cfg.users.users.pi.openssh.authorizedKeys.keys == userKeys;
 
   "wheel needs no sudo password" = !cfg.security.sudo.wheelNeedsPassword;
 
@@ -53,10 +60,10 @@ in
     !(lib.hasInfix "cf680211" cfg.boot.extraModprobeConfig
       || lib.hasInfix "cfg80211" cfg.boot.extraModprobeConfig);
 
-  # Scoped to configuration.nix: nixpkgs' all-firmware.nix still adds
+  # Scoped to hosts/neptun: nixpkgs' all-firmware.nix still adds
   # wireless-regdb while enableRedistributableFirmware is on (nvmd,
   # all-hardware.nix); modules/sd-wear.nix (rpi.sdWear) removes all firmware.
-  "no wireless-regdb firmware from configuration.nix" =
+  "no wireless-regdb firmware from hosts/neptun" =
     !lib.any (p: lib.hasInfix "wireless-regdb" p.name)
       (definedInConf rpi.options.hardware.firmware);
 
@@ -82,7 +89,20 @@ in
   # --- dead/duplicate config (Task 2.4); journald belongs to rpi.sdWear ---
   "no cma=32M kernel parameter" = !lib.elem "cma=32M" cfg.boot.kernelParams;
 
-  "no stale journald limits in configuration.nix" =
+  "no stale journald limits in hosts/neptun" =
     !lib.hasInfix "SystemMaxUse=" journaldConf
     && !lib.hasInfix "RuntimeMaxUse=8M" journaldConf;
+
+  # --- neptun's own values (plan T2.7, Global Constraints) ---
+  "neptun: port 2222, static 192.168.100.20/24 via .1, Europe/Berlin, neo, terminal on, target root@neptun" =
+    cfg.networking.hostName == "neptun"
+    && cfg.rpi.ssh.port == 2222 && cfg.services.openssh.ports == [ 2222 ]
+    && cfg.rpi.network.mode == "static"
+    && cfg.rpi.network.static.address == "192.168.100.20/24"
+    && cfg.rpi.network.static.gateway == "192.168.100.1"
+    && cfg.systemd.network.networks."10-lan-static".networkConfig.Address == "192.168.100.20/24"
+    && cfg.time.timeZone == "Europe/Berlin"
+    && cfg.console.keyMap == "neo"
+    && cfg.rpi.profiles.terminal.enable
+    && cfg.rpi.deploy.target == "root@neptun";
 }

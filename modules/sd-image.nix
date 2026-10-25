@@ -13,7 +13,7 @@
   # same mount options as the installed `rpi` system
   fileSystems."/boot/firmware".options = lib.mkForce [ "fmask=0077" "dmask=0077" ];
   sdImage = {
-    # keep our labels (configuration.nix mounts by label)
+    # keep our labels (the system mounts its file systems by label)
     firmwarePartitionName = "NIXOS_BOOT";
     # U-Boot: the FAT partition holds only firmware, config.txt,
     # u-boot (kernels live on the ext4 root), see README.

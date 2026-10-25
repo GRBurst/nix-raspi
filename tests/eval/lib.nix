@@ -2,7 +2,7 @@
 # nixosSystem (hybrid inputs), the rpi.* modules and home-manager, and marks
 # its result as a Pi host (`rpiHost`) for host discovery. Evaluated on the
 # fixture host tests/fixtures/hosts/minimal.nix; never forces the toplevel.
-{ lib, rpi, rpiLib, nixosModules, fixtures, ... }:
+{ lib, rpi, rpiLib, nixosModules, nixosConfigurations, fixtures, ... }:
 let
   minimal = fixtures + "/hosts/minimal.nix";
   t = rpiLib.mkPi { modules = [ minimal ]; };
@@ -31,4 +31,11 @@ in
 
   "nixosModules.default and .terminal exist" =
     nixosModules ? default && nixosModules ? terminal;
+
+  # P7: host discovery (rpi-lib.sh RL_HOSTS_EXPR) finds neptun only; the
+  # `rpi` alias (one release) is marked rpiHost = false.
+  "Pi hosts: neptun only (rpi is an alias)" =
+    lib.filter (n: (nixosConfigurations.${n}.rpiHost or false) == true)
+      (lib.attrNames nixosConfigurations)
+    == [ "neptun" ];
 }

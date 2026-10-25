@@ -4,7 +4,6 @@
 # the toplevel.
 { lib, rpi, rpiLib, fixtures, ... }:
 let
-  keys = import ../../keys.nix;
   # Test key: syntactically valid, not any real cache's key (A10).
   testCache = {
     name = "neptun-test";
@@ -12,19 +11,20 @@ let
   };
   extend = modules: rpi.extendModules { inherit modules; };
 
-  # Nothing set: no cache in keys.nix, no pointer URL.
-  off = extend [ { _module.args.rpiKeys = keys // { cache = null; }; rpi.pull.pointerUrl = lib.mkForce null; } ];
+  # (keys.nix and its `cache` are retired, spec §7: the overrides set
+  # rpi.pull.cache; mkForce so they hold whatever neptun sets.)
+  # Nothing set: no cache, no pointer URL.
+  off = extend [ { rpi.pull.cache = lib.mkForce null; rpi.pull.pointerUrl = lib.mkForce null; } ];
 
-  # Everything set: the test cache in keys.nix, a pointer URL (overrides
-  # configuration.nix's).
+  # Everything set: the test cache, a pointer URL (overrides neptun's).
   onWith = pointerUrl: extend [ {
-    _module.args.rpiKeys = keys // { cache = testCache; };
+    rpi.pull.cache = lib.mkForce testCache;
     rpi.pull.pointerUrl = lib.mkForce pointerUrl;
   } ];
   on = onWith "https://raw.githubusercontent.com/o/r/main/deploy/neptun.json";
   onHttp = onWith "http://192.168.100.1:18080/neptun.json";
   # Partial setups (A10): pointer URL only; cache only.
-  pointerOnly = extend [ { _module.args.rpiKeys = keys // { cache = null; }; rpi.pull.pointerUrl = lib.mkForce "https://x/neptun.json"; } ];
+  pointerOnly = extend [ { rpi.pull.cache = lib.mkForce null; rpi.pull.pointerUrl = lib.mkForce "https://x/neptun.json"; } ];
   cacheOnly = on.extendModules { modules = [ { rpi.pull.pointerUrl = lib.mkOverride 10 null; } ]; };
 
   oc = on.config;
@@ -113,7 +113,7 @@ in
     && !(off.config.systemd.services ? rpi-pull)
     && !(off.config.systemd.timers ? rpi-pull);
 
-  # P11 on the real configuration (stays true once keys.nix has the cache).
+  # P11 on the real configuration (stays true once neptun has a cache).
   "enable follows pointerUrl, cacheUrl and cachePublicKey" =
     p.enable == (p.pointerUrl != null && p.cacheUrl != null && p.cachePublicKey != null);
 
@@ -247,16 +247,18 @@ in
 
   "nothing set: no rpi.pull warning" = !warns off "rpi.pull";
 
-  # --- Task 6.3: keys.cache -> rpi.pull ---
-  "cacheUrl and key come from keys.nix cache" =
+  # --- Task 6.3: rpi.pull.cache (formerly keys.nix cache) -> rpi.pull ---
+  "cacheUrl and key come from rpi.pull.cache" =
     o.cacheUrl == "https://neptun-test.cachix.org" && o.cachePublicKey == testCache.publicKey;
 
-  # Spec §6: the user fills keys.nix `cache`; null until then (pull off).
-  "keys.nix has a cache entry: null or { name; publicKey; }" =
-    keys ? cache
-    && (keys.cache == null || (lib.isString keys.cache.name && lib.isString keys.cache.publicKey));
+  # Spec §6: the user fills neptun's rpi.pull.cache; null until then
+  # (pull off).
+  "neptun's rpi.pull.cache: null or { name; publicKey; }" =
+    p ? cache
+    && (p.cache == null || (lib.isString p.cache.name && lib.isString p.cache.publicKey));
 
   # Plan §17 "Remote": the production pointer (raw GitHub, HTTPS).
-  "configuration.nix sets the production pointer URL" =
+  # (derived from neptun's rpi.pull.repo)
+  "neptun sets the production pointer URL" =
     p.pointerUrl == "https://raw.githubusercontent.com/GRBurst/nix-raspi/main/deploy/neptun.json";
 }
