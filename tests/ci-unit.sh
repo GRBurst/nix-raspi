@@ -34,7 +34,18 @@ TOP=/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-neptun-26.05.202610
 export MOCK_TOP="$TOP"
 export K_DEF=/nix/store/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-linux_rpi-bcm2711-6.18.52
 export M_DEF=/nix/store/mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm-linux_rpi-bcm2711-6.18.52-modules
-LOCK0='{ "committed": "lock" }'
+# The committed lock: nixpkgs, nixos-raspberrypi (and home-manager) are root
+# inputs, as in this repository.
+LOCK0='{"nodes":{"home-manager":{"locked":{"rev":"hm0"}},"nixos-raspberrypi":{"locked":{"rev":"rp0"}},"nixpkgs":{"locked":{"rev":"np0"}},"root":{"inputs":{"home-manager":"home-manager","nixos-raspberrypi":"nixos-raspberrypi","nixpkgs":"nixpkgs"}}},"root":"root","version":7}'
+# rl_host_info of a host without a cache (the default answer of the nix mock)
+export INFO0='{"name":"neptun","target":"root@neptun","port":22,"cache":null,"wifi":{"enable":false,"networks":{},"secretsFile":"/var/lib/rpi/wireless.env"}}'
+CKEY="neptun-x.cachix.org-1:$(printf 'A%.0s' $(seq 43))="
+# info_cache NAME [CACHE]: rl_host_info of host NAME with cache CACHE
+# (default neptun-x with $CKEY)
+info_cache() {
+    jq -c --arg n "$1" --arg c "${2:-neptun-x}" --arg k "$CKEY" \
+        '.name = $n | .cache = {name: $c, publicKey: $k}' <<<"$INFO0"
+}
 
 # A bare origin with one commit on main (flake.lock, keys.nix at the root);
 # clone NAME gives a fresh work repo $T/NAME tracking it.
@@ -50,35 +61,62 @@ clone() { rm -rf "${T:?}/$1"; git clone -q "$T/origin.git" "$T/$1"; }
 
 # --- mocks -------------------------------------------------------------------
 # nix: host discovery eval (rl_hosts: ${MOCK_HOSTS-[]}, or rc MOCK_HOSTS_RC),
-# cache-name eval (${MOCK_CACHE_NAME-}), kernel/modules eval,
-# path-info per MOCK_CACHE (hit | always-miss | full-miss = miss only once
-# nixos-raspberrypi was updated in $MOCK_LOCK), flake update (appends its
-# argv to <--flake DIR>/flake.lock), build --dry-run (cat $MOCK_DRY to
-# stderr), build --print-out-paths ($MOCK_TOP, or rc MOCK_BUILD_RC),
-# hash convert (a fixed SRI hash).
+# host info eval (rl_host_info: ${MOCK_INFO:-$INFO0}, or rc MOCK_INFO_RC),
+# the flake-checks eval (getFlake: system ${MOCK_SYS:-aarch64-linux}, check
+# names ${MOCK_CHECKS:-[]}, or rc MOCK_CHECKS_RC), cache-name eval
+# (${MOCK_CACHE_NAME-}), kernel/modules eval, path-info --closure-size (a
+# fixed size) and --recursive (3 paths), path-info per MOCK_CACHE (hit |
+# always-miss | full-miss = miss only once nixos-raspberrypi or rpi was
+# updated in $MOCK_LOCK), flake update (sets the named inputs' revs in
+# <--flake DIR>/flake.lock to <input>-new and appends them to .updated),
+# build --dry-run (logs NIX_CONFIG, cat $MOCK_DRY to stderr), build of
+# checks (rc MOCK_CHECK_RC), build --print-out-paths ($MOCK_TOP, or rc
+# MOCK_BUILD_RC), hash convert (a fixed SRI hash).
 mock nix <<'EOF'
 case " $* " in
+*" eval "*"#nixosConfigurations."*" --apply "*)
+    if [[ -n "${MOCK_INFO_RC:-}" ]]; then echo "error: info eval failed" >&2; exit "$MOCK_INFO_RC"; fi
+    printf '%s\n' "${MOCK_INFO:-$INFO0}" ;;
 *" eval "*" --apply "*)
     if [[ -n "${MOCK_HOSTS_RC:-}" ]]; then echo "error: hosts eval failed" >&2; exit "$MOCK_HOSTS_RC"; fi
     printf '%s\n' "${MOCK_HOSTS-[]}" ;;
+*" eval "*" --expr "*getFlake*)
+    if [[ -n "${MOCK_CHECKS_RC:-}" ]]; then echo "error: checks eval failed" >&2; exit "$MOCK_CHECKS_RC"; fi
+    printf '{"checks":%s,"system":"%s"}\n' "${MOCK_CHECKS:-[]}" "${MOCK_SYS:-aarch64-linux}" ;;
 *" eval "*" --expr "*)
     echo "nix-cwd $PWD" >>"$MOCK_LOG"
     printf '%s' "${MOCK_CACHE_NAME-}" ;;
 *" eval "*".kernel.modules.outPath "*) printf '%s' "$M_DEF" ;;
 *" eval "*".kernel.outPath "*) printf '%s' "$K_DEF" ;;
+*" path-info "*"--closure-size "*) printf '%s\t  1.2 GiB\n' "${!#}" ;;
+*" path-info "*"--recursive "*) printf '/nix/store/p1\n/nix/store/p2\n/nix/store/p3\n' ;;
 *" path-info "*)
     case "${MOCK_CACHE:-hit}" in
     hit) exit 0 ;;
     always-miss) exit 1 ;;
-    full-miss) if grep -q nixos-raspberrypi "$MOCK_LOCK"; then exit 1; fi ;;
+    full-miss)
+        if jq -e '(.updated // []) | any(. == "nixos-raspberrypi" or . == "rpi")' "$MOCK_LOCK" >/dev/null; then
+            exit 1
+        fi ;;
     esac ;;
 *" flake update "*)
-    prev="" dir=""
-    for a in "$@"; do [[ "$prev" == --flake ]] && dir="$a"; prev="$a"; done
-    printf '%s\n' "$*" >>"$dir/flake.lock" ;;
+    prev="" dir="" ins=()
+    for a in "$@"; do
+        [[ -n "$dir" ]] && ins+=("$a")
+        [[ "$prev" == --flake ]] && dir="$a"
+        prev="$a"
+    done
+    jq -c --args '.updated = ((.updated // []) + $ARGS.positional)
+        | reduce $ARGS.positional[] as $i (.; .nodes[.nodes[.root].inputs[$i]].locked.rev = "\($i)-new")' \
+        "${ins[@]}" <"$dir/flake.lock" >"$dir/flake.lock.new" && mv "$dir/flake.lock.new" "$dir/flake.lock" ;;
 *" build "*" --dry-run "*)
+    echo "dry-nix-config ${NIX_CONFIG//$'\n'/; }" >>"$MOCK_LOG"
     cat "${MOCK_DRY:-/dev/null}" >&2 ;;
+*" build "*"#checks."*)
+    echo "check log" >&2
+    if [[ -n "${MOCK_CHECK_RC:-}" ]]; then echo "error: check failed" >&2; exit "$MOCK_CHECK_RC"; fi ;;
 *" build "*" --print-out-paths "*)
+    echo "building toplevel" >&2
     if [[ -n "${MOCK_BUILD_RC:-}" ]]; then echo "error: build failed" >&2; exit "$MOCK_BUILD_RC"; fi
     echo "$MOCK_TOP" ;;
 *" hash convert "*)
@@ -116,17 +154,20 @@ KER="$FIXTURES/dry-run-kernel.txt"
 clone b
 LOCKF="$T/b/flake.lock"
 export MOCK_LOCK="$LOCKF"
-build() { bash "$CI_DIR/build.sh" --flake "$T/b" "$@"; }
+# (--host is required since T4.2: the build is per Pi host; the default
+# host info names it neptun, so every output ends with name=neptun.)
+build() { bash "$CI_DIR/build.sh" --flake "$T/b" --host neptun "$@"; }
+OUT0="top=$TOP"$'\n'"name=neptun"
 relock() { git -C "$T/b" checkout -q -- flake.lock; }
 
 reset_log
 MOCK_DRY="$HYB" run_cmd b1 -- build --event push
 expect_exit "b1 push builds" 0
-expect_eq "b1 stdout is exactly top=<toplevel>" "top=$TOP" "$(cat "$OUT")"
+expect_eq "b1 stdout is exactly top=<toplevel> name=<system.name>" "$OUT0" "$(cat "$OUT")"
 expect_eq "b1 push does not update the lock" 0 "$(log_count 'flake update')"
 expect_eq "b1 push leaves flake.lock as committed" "$LOCK0" "$(cat "$LOCKF")"
 pi=$(first_line '^nix .*path-info') dr=$(first_line '^nix .*build .*--dry-run')
-bo=$(first_line '^nix .*build .*--print-out-paths .*nixosConfigurations\.rpi\.config\.system\.build\.toplevel')
+bo=$(first_line '^nix .*build .*--print-out-paths .*nixosConfigurations\.neptun\.config\.system\.build\.toplevel')
 expect_true "b1 order: cache guard < dry-run guard < build ($pi < $dr < $bo)" \
     test "$pi" -lt "$dr" -a "$dr" -lt "$bo" -a "$bo" -lt 999999
 expect_eq "b1 build is --no-link" 1 "$(log_count '^nix .*build .*--no-link .*--print-out-paths')"
@@ -166,10 +207,10 @@ reset_log
 MOCK_CACHE=full-miss MOCK_DRY="$HYB" run_cmd b3 -- build --event schedule
 expect_exit "b3 kernel miss after the nvmd update -> nixpkgs-only fallback builds" 0
 expect_eq "b3 lock = committed + one nixpkgs-only update" \
-    "$LOCK0"$'\n'"flake update --accept-flake-config --flake $T/b nixpkgs" "$(cat "$LOCKF")"
+    '["nixpkgs"] nixpkgs-new rp0' "$(jq -c '.updated' "$LOCKF") $(jq -r '.nodes.nixpkgs.locked.rev, .nodes."nixos-raspberrypi".locked.rev' "$LOCKF" | xargs)"
 expect_eq "b3 second update has nixpkgs only" 1 "$(log_count 'flake update .* nixpkgs$')"
 expect_grepf "b3 says why it falls back" "nixpkgs only" "$ERR"
-expect_eq "b3 stdout is top=" "top=$TOP" "$(cat "$OUT")"
+expect_eq "b3 stdout is top= name=" "$OUT0" "$(cat "$OUT")"
 relock
 
 reset_log
@@ -211,6 +252,170 @@ expect_exit "b9 non-numeric --max-builds -> usage" 2
 run_cmd b9h -- build --help
 expect_exit "b9 --help" 0
 expect_grepf "b9 --help shows the usage" "--update-lock" "$OUT"
+expect_grepf "b9 --help names --host" "--host" "$OUT"
+
+# --- T4.2: per host, own cache as substituter, flake checks, summary -------
+reset_log
+run_cmd b-host -- bash "$CI_DIR/build.sh" --flake "$T/b" --event push
+expect_exit "b-host --host is required" 2
+expect_grepf "b-host says --host is missing" "--host" "$ERR"
+expect_eq "b-host no nix call" 0 "$(log_count '^nix ')"
+for bad in a.b 'a b' 'x;y'; do
+    reset_log
+    run_cmd b-host-bad -- bash "$CI_DIR/build.sh" --flake "$T/b" --host "$bad" --event push
+    expect_exit "b-host invalid host '$bad' -> 2" 2
+    expect_eq "b-host invalid host '$bad': nothing evaluated or built" 0 "$(log_count '^nix ')"
+done
+
+reset_log
+MOCK_INFO="$(info_cache garden-pi | jq -c '.cache = null')" MOCK_DRY="$HYB" \
+    run_cmd b-host2 -- bash "$CI_DIR/build.sh" --flake "$T/b" --host garden --event push
+expect_exit "b-host2 --host garden builds" 0
+expect_eq "b-host2 host info of garden" 1 \
+    "$(log_count "^nix eval --accept-flake-config --json $T/b#nixosConfigurations\.garden --apply ")"
+expect_eq "b-host2 guard evaluates garden's kernel" 1 \
+    "$(log_count "^nix eval .*$T/b#nixosConfigurations\.garden\.config\.boot\.kernelPackages\.kernel\.outPath")"
+expect_eq "b-host2 dry run of garden" 1 \
+    "$(log_count "^nix build .*--dry-run .*$T/b#nixosConfigurations\.garden\.config\.system\.build\.toplevel")"
+expect_eq "b-host2 builds garden's toplevel" 1 \
+    "$(log_count "^nix build .*--print-out-paths .*$T/b#nixosConfigurations\.garden\.config\.system\.build\.toplevel\$")"
+expect_eq "b-host2 no other configuration" 0 "$(log_count 'nixosConfigurations\.(rpi|neptun)')"
+expect_eq "b-host2 name= is system.name (not the attribute)" "top=$TOP"$'\n'"name=garden-pi" "$(cat "$OUT")"
+
+reset_log
+MOCK_INFO_RC=1 MOCK_DRY="$HYB" run_cmd b-info -- build --event push
+expect_exit "b-info host info eval error -> RL_E_BUILD" 13
+expect_eq "b-info nothing built" 0 "$(log_count '^nix build ')"
+expect_eq "b-info stdout empty" "" "$(cat "$OUT")"
+
+reset_log
+MOCK_INFO="$(info_cache neptun)" MOCK_CHECKS='["x"]' MOCK_DRY="$HYB" run_cmd b-sub -- build --event push
+expect_exit "b-sub host with a cache builds" 0
+SUBST="--option extra-substituters https://neptun-x.cachix.org --option extra-trusted-public-keys $CKEY"
+expect_eq "b-sub toplevel build substitutes from the host's cache" 1 \
+    "$(log_count "^nix build .*$SUBST .*--print-out-paths |^nix build .*--print-out-paths .*$SUBST")"
+expect_eq "b-sub checks build substitutes from the host's cache" 1 \
+    "$(log_count "^nix build .*$SUBST.*#checks\.")"
+expect_eq "b-sub the guard's dry run sees the host's cache too" 1 \
+    "$(log_count "^dry-nix-config .*extra-substituters = https://neptun-x\.cachix\.org; extra-trusted-public-keys = $CKEY")"
+reset_log
+MOCK_CHECKS='["x"]' MOCK_DRY="$HYB" run_cmd b-sub0 -- build --event push
+expect_exit "b-sub no cache builds" 0
+expect_eq "b-sub no cache -> no extra substituter" 0 "$(log_count 'extra-substituters|extra-trusted-public-keys')"
+for bad in Neptun 'a b' '-x' 'x.y'; do
+    reset_log
+    MOCK_INFO="$(info_cache neptun "$bad")" MOCK_DRY="$HYB" run_cmd b-sub-bad -- build --event push
+    expect_exit "b-sub cache name '$bad' is not a Cachix name -> 1" 1
+    expect_grepf "b-sub cache name '$bad': names rpi.pull.cache" "rpi.pull.cache" "$ERR"
+    expect_eq "b-sub cache name '$bad': nothing built" 0 "$(log_count '^nix build ')"
+done
+
+reset_log
+MOCK_CHECKS='["x","y"]' MOCK_SYS=aarch64-linux MOCK_DRY="$HYB" run_cmd b-chk -- build --event push
+expect_exit "b-chk builds with checks" 0
+expect_eq "b-chk checks of the built flake for the current system" 1 \
+    "$(log_count "^nix eval .*--impure .*getFlake .*$T/b.*currentSystem")"
+expect_eq "b-chk builds checks x and y in one call" 1 \
+    "$(log_count "^nix build .* $T/b#checks\.aarch64-linux\.x $T/b#checks\.aarch64-linux\.y\$")"
+bo=$(first_line '^nix build .*--print-out-paths') ck=$(first_line '^nix build .*#checks\.')
+expect_true "b-chk checks after the toplevel ($bo < $ck)" test "$bo" -lt "$ck" -a "$ck" -lt 999999
+expect_eq "b-chk stdout is top= name=" "$OUT0" "$(cat "$OUT")"
+reset_log
+MOCK_CHECKS='["x"]' MOCK_CHECK_RC=1 MOCK_DRY="$HYB" run_cmd b-chk-fail -- build --event push
+expect_exit "b-chk a failing check -> RL_E_BUILD" 13
+expect_eq "b-chk a failing check -> no top= (nothing to publish)" "" "$(cat "$OUT")"
+expect_grepf "b-chk a failing check is reported" "checks failed for neptun" "$ERR"
+reset_log
+MOCK_CHECKS_RC=1 MOCK_DRY="$HYB" run_cmd b-chk-eval -- build --event push
+expect_exit "b-chk checks eval error -> RL_E_BUILD" 13
+expect_eq "b-chk checks eval error -> no top=" "" "$(cat "$OUT")"
+reset_log
+MOCK_CHECKS='[]' MOCK_SYS=aarch64-linux MOCK_DRY="$HYB" run_cmd b-chk-none -- build --event push
+expect_exit "b-chk no checks -> builds" 0
+expect_grep "b-chk no checks -> notice" '^rpi-ci: notice: no checks for aarch64-linux' "$ERR"
+expect_eq "b-chk no checks -> no checks build" 0 "$(log_count '#checks\.')"
+expect_eq "b-chk no checks: stdout is top= name=" "$OUT0" "$(cat "$OUT")"
+
+# b-sum: the step summary (P9: only under GitHub Actions)
+SUM="$T/b-sum.md"
+rm -f "$SUM"
+reset_log
+GITHUB_STEP_SUMMARY="$SUM" MOCK_CHECKS='["x","y"]' MOCK_DRY="$HYB" run_cmd b-sum0 -- build --event push
+expect_exit "b-sum outside GitHub Actions builds" 0
+expect_true "b-sum outside GitHub Actions: no summary" test ! -e "$SUM"
+expect_eq "b-sum outside GitHub Actions: no :: lines" 0 "$(grep -c '^::' "$ALL")"
+expect_eq "b-sum outside GitHub Actions: no closure-size query" 0 "$(log_count 'path-info .*--closure-size')"
+reset_log
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" MOCK_CHECKS='["x","y"]' MOCK_DRY="$HYB" \
+    run_cmd b-sum -- build --event push
+expect_exit "b-sum under GitHub Actions builds" 0
+expect_eq "b-sum stdout unchanged by GitHub Actions" "$OUT0" "$(cat "$OUT")"
+expect_grep "b-sum section ## <host>: build" '^## neptun: build$' "$SUM"
+expect_grep "b-sum nixpkgs revision" 'nixpkgs.*np0' "$SUM"
+expect_grep "b-sum nixos-raspberrypi revision" 'nixos-raspberrypi.*rp0' "$SUM"
+expect_grep "b-sum lock as committed" 'lock.*as committed' "$SUM"
+expect_grepf "b-sum toplevel" "$TOP" "$SUM"
+expect_grep "b-sum closure size" 'closure.*1\.2 GiB' "$SUM"
+expect_grep "b-sum checks" 'checks.*x, y' "$SUM"
+expect_eq "b-sum one section" 1 "$(grep -c '^## ' "$SUM")"
+rm -f "$SUM"
+reset_log
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" MOCK_DRY="$HYB" run_cmd b-sum-lock -- build --event push --update-lock
+expect_exit "b-sum --update-lock builds" 0
+expect_grep "b-sum lock: updated with old -> new revisions" \
+    'lock: updated.*nixpkgs `np0` → `nixpkgs-new`.*nixos-raspberrypi `rp0` → `nixos-raspberrypi-new`' "$SUM"
+expect_grep "b-sum the revisions are the updated ones" 'nixpkgs.*nixpkgs-new' "$SUM"
+expect_grep "b-sum no checks -> said so" 'checks.*none' "$SUM"
+relock
+rm -f "$SUM"
+reset_log
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" MOCK_CACHE=always-miss MOCK_DRY="$HYB" \
+    run_cmd b-sum-guard -- build --event push
+expect_exit "b-sum guard failure -> RL_E_CACHE" 10
+expect_grep "b-sum guard failure -> ::error line" '^::error::.*neptun.*guard' "$ERR"
+expect_grep "b-sum guard failure in the summary" '^## neptun: build$' "$SUM"
+expect_grep "b-sum guard failure: says why" 'failed.*kernel' "$SUM"
+reset_log
+GITHUB_ACTIONS=true MOCK_DRY="$HYB" MOCK_BUILD_RC=1 run_cmd b-sum-build -- build --event push
+expect_exit "b-sum build failure -> RL_E_BUILD" 13
+expect_grep "b-sum build failure -> ::error line" '^::error::.*build of neptun failed' "$ERR"
+
+# b-grp: the toplevel build's log is a collapsible group
+reset_log
+GITHUB_ACTIONS=true MOCK_CHECKS='["x"]' MOCK_DRY="$HYB" run_cmd b-grp -- build --event push
+gs=$(grep -n '^::group::build neptun$' "$ERR" | cut -d: -f1 | head -n1)
+bl=$(grep -n '^building toplevel$' "$ERR" | cut -d: -f1 | head -n1)
+ge=$(grep -n '^::endgroup::$' "$ERR" | cut -d: -f1 | head -n1)
+expect_true "b-grp group build <host> < build log < endgroup (${gs:-none} < ${bl:-none} < ${ge:-none})" \
+    test -n "$gs" -a -n "$bl" -a -n "$ge" -a "${gs:-0}" -lt "${bl:-0}" -a "${bl:-0}" -lt "${ge:-0}"
+expect_grep "b-grp the checks have their own group" '^::group::checks neptun$' "$ERR"
+expect_eq "b-grp groups are closed" "$(grep -c '^::group::' "$ERR")" "$(grep -c '^::endgroup::$' "$ERR")"
+
+# b-rpi: a consumer flake (the template): its only Pi input is the library
+# `rpi` (nixpkgs and nixos-raspberrypi come with it), so the lock update
+# updates rpi; the summary reads the revisions through rpi.
+clone c
+CLOCK='{"nodes":{"nixos-raspberrypi":{"locked":{"rev":"rp1"}},"nixpkgs":{"locked":{"rev":"np1"}},"root":{"inputs":{"rpi":"rpi"}},"rpi":{"inputs":{"nixos-raspberrypi":"nixos-raspberrypi","nixpkgs":"nixpkgs"},"locked":{"rev":"lib1"}}},"root":"root","version":7}'
+printf '%s\n' "$CLOCK" >"$T/c/flake.lock"
+git -C "$T/c" commit -q -am "consumer lock"
+reset_log
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$T/c.md" MOCK_LOCK="$T/c/flake.lock" MOCK_DRY="$HYB" \
+    run_cmd b-rpi -- bash "$CI_DIR/build.sh" --flake "$T/c" --host neptun --event schedule
+expect_exit "b-rpi consumer lock update builds" 0
+expect_eq "b-rpi updates the library input rpi only" 1 \
+    "$(log_count "^nix flake update --accept-flake-config --flake $T/c rpi\$")"
+expect_eq "b-rpi one lock update" 1 "$(log_count 'flake update')"
+expect_grep "b-rpi nixpkgs revision through rpi" 'nixpkgs.*np1' "$T/c.md"
+expect_grep "b-rpi nixos-raspberrypi revision through rpi" 'nixos-raspberrypi.*rp1' "$T/c.md"
+expect_grep "b-rpi lock diff names rpi" 'lock: updated.*rpi `lib1` → `rpi-new`' "$T/c.md"
+git -C "$T/c" checkout -q -- flake.lock
+reset_log
+MOCK_CACHE=full-miss MOCK_LOCK="$T/c/flake.lock" MOCK_DRY="$HYB" \
+    run_cmd b-rpi3 -- bash "$CI_DIR/build.sh" --flake "$T/c" --host neptun --event schedule
+expect_exit "b-rpi kernel miss after the rpi update -> builds the committed lock" 0
+expect_eq "b-rpi fallback: lock as committed" "$CLOCK" "$(cat "$T/c/flake.lock")"
+expect_eq "b-rpi fallback: no second update" 1 "$(log_count 'flake update')"
+expect_grepf "b-rpi fallback: says so" "committed lock" "$ERR"
 
 # =============================================================================
 # T7.2 ci/cache-name.sh, ci/publish.sh
@@ -621,9 +826,9 @@ reset_log
 MOCK_CACHE_NAME=neptun-y run_cmd r6c -- bash -c 'cd "$1" && bash "$2/cache-name.sh"' _ "$T/r6" "$CI_DIR"
 expect_eq "r6 cache-name without --flake uses \$PWD" 1 "$(log_count "^nix-cwd $T/r6\$")"
 reset_log
-MOCK_DRY="$HYB" run_cmd r6b -- bash -c 'cd "$1" && bash "$2/build.sh" --event push' _ "$T/r6" "$CI_DIR"
+MOCK_DRY="$HYB" run_cmd r6b -- bash -c 'cd "$1" && bash "$2/build.sh" --host neptun --event push' _ "$T/r6" "$CI_DIR"
 expect_exit "r6 build without --flake -> exit 0" 0
 expect_eq "r6 build without --flake uses \$PWD" 1 \
-    "$(log_count "^nix build .*--print-out-paths $T/r6#nixosConfigurations\.rpi\.config\.system\.build\.toplevel\$")"
+    "$(log_count "^nix build .*--print-out-paths $T/r6#nixosConfigurations\.neptun\.config\.system\.build\.toplevel\$")"
 
 summary
