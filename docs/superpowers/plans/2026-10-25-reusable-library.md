@@ -430,20 +430,20 @@ All `uses:` SHA-pinned `@<40 hex> # <tag>`; no `signingKey`/`authToken` under `w
 
 ### M0 — Baseline + root move (serial, first)
 
-#### Task 0.1: Helper and baseline B0 (no commit) `[ ]`
-- [ ] Write `/home/pallon/projects/raspberry-pi/.scratch/ci-env.sh` (§0).
-- [ ] `. …/ci-env.sh; G worktree add --detach .worktrees/lib-baseline main; G -C .worktrees/lib-baseline rev-parse HEAD > $S/baseline/commit; . …/ci-env.sh $MAIN/.worktrees/lib-baseline/nixos`.
-- [ ] S1 `[mid]`: `snap B0-I1 && cp $S/snap/B0-I1.drv $S/baseline/first.drv && snap B0-I1 && cmp $S/baseline/first.drv $S/snap/B0-I1.drv` (determinism); `snap B0-I2 "$I2_OLD"`; record in `$S/baseline/S1.md`: `jq -r 'keys[0]'`, the field names of one entry, the inputDrvs shape, and K = the env keys of the `unit-rpi-pull.service` entry in `B0-I2.json` that contain `--pointer-url`.
-- [ ] `ev .#checks.x86_64-linux --apply builtins.attrNames --json > $S/baseline/checks.json`; `for t in tests/*-unit.sh; do echo "$t $(bash $t 2>&1 | tail -n1)"; done > $S/baseline/units.txt`; per `eval-*`: `chk eval-X 2>&1 | grep -o '[0-9]* assertions passed'` → `$S/baseline/evals.txt`.
-- [ ] `: > $S/expect/I1.txt; printf 'unit-rpi-pull.service\tenv:%s\n' "$K" > $S/expect/I2.txt`.
-- [ ] Done when: all files exist, B0-I1 reproducible, K recorded. Keep the worktree until T7.4.
+#### Task 0.1: Helper and baseline B0 (no commit) `[x]`
+- [x] Write `/home/pallon/projects/raspberry-pi/.scratch/ci-env.sh` (§0).
+- [x] `. …/ci-env.sh; G worktree add --detach .worktrees/lib-baseline main; G -C .worktrees/lib-baseline rev-parse HEAD > $S/baseline/commit; . …/ci-env.sh $MAIN/.worktrees/lib-baseline/nixos`.
+- [x] S1 `[mid]`: `snap B0-I1 && cp $S/snap/B0-I1.drv $S/baseline/first.drv && snap B0-I1 && cmp $S/baseline/first.drv $S/snap/B0-I1.drv` (determinism); `snap B0-I2 "$I2_OLD"`; record in `$S/baseline/S1.md`: `jq -r 'keys[0]'`, the field names of one entry, the inputDrvs shape, and K = the env keys of the `unit-rpi-pull.service` entry in `B0-I2.json` that contain `--pointer-url`.
+- [x] `ev .#checks.x86_64-linux --apply builtins.attrNames --json > $S/baseline/checks.json`; `for t in tests/*-unit.sh; do echo "$t $(bash $t 2>&1 | tail -n1)"; done > $S/baseline/units.txt`; per `eval-*`: `chk eval-X 2>&1 | grep -o '[0-9]* assertions passed'` → `$S/baseline/evals.txt`.
+- [x] `: > $S/expect/I1.txt; printf 'unit-rpi-pull.service\tenv:%s\n' "$K" > $S/expect/I2.txt`.
+- [x] Done when: all files exist, B0-I1 reproducible, K recorded. Keep the worktree until T7.4.
 
-#### Task 0.2: Move the flake to the root `[ ]`
+#### Task 0.2: Move the flake to the root `[x]`
 **Files:** see M0 row (§14).
-- [ ] `G worktree add .worktrees/lib-m0 -b lib/m0 main; . …/ci-env.sh $MAIN/.worktrees/lib-m0`.
-- [ ] `for e in $(G ls-files nixos | cut -d/ -f2 | sort -u); do G mv "nixos/$e" "$e"; done`; `G ls-files nixos` prints nothing.
-- [ ] RED `[cheap]`: `chk actionlint` → evaluation error (`../.github` is outside the flake). Fix, then run the next item; one red at a time in this order: actionlint → `unit ci-unit` → `unit deploy-unit` → `chk eval-pull-update`.
-- [ ] GREEN (all fixups, nothing else):
+- [x] `G worktree add .worktrees/lib-m0 -b lib/m0 main; . …/ci-env.sh $MAIN/.worktrees/lib-m0`.
+- [x] `for e in $(G ls-files nixos | cut -d/ -f2 | sort -u); do G mv "nixos/$e" "$e"; done`; `G ls-files nixos` prints nothing.
+- [x] RED `[cheap]`: `chk actionlint` → evaluation error (`../.github` is outside the flake). Fix, then run the next item; one red at a time in this order: actionlint → `unit ci-unit` → `unit deploy-unit` → `chk eval-pull-update`.
+- [x] GREEN (all fixups, nothing else):
   1. `flake.nix`: actionlint `root = ./.; fileset = ./.github;`.
   2. Pointer location: `configuration.nix` `pointerUrl = "https://raw.githubusercontent.com/GRBurst/nix-raspi/main/deploy/neptun.json"`; `modules/pull-update.nix` comment + `example` → `…/main/deploy/<host>.json`; `rpi-pull.sh` comment `deploy/<host>.json`; `tests/eval/pull-update.nix` URLs `…/main/deploy/neptun.json`.
   3. `ci/*.sh` messages/comments: `nixos/keys.nix` → `keys.nix`, `(nixos/)` → `(the repository root)`. `tests/ci-unit.sh`: seed repo at the root (`$T/seed/flake.lock`, `$T/seed/keys.nix`, `deploy/neptun.json`; every `nixos/` segment removed; c1 greps `keys.nix`). Existing tests change only because the real layout changed; assertions and counts unchanged.
@@ -452,16 +452,16 @@ All `uses:` SHA-pinned `@<40 hex> # <tag>`; no `signingKey`/`authToken` under `w
   6. `.github/workflows/neptun.yml`: delete `defaults.run.working-directory`; `push:` → `branches: [main]`, `paths-ignore: ["deploy/**", "docs/**", "**.md"]`.
   7. `devenv.nix`: `env.RPI_FLAKE = config.devenv.root;`, `$DEVENV_ROOT/rpi-deploy.sh`, `cd "$DEVENV_ROOT"`, `excludes = ["^tests/fixtures/"]`, comments; `devenv.yaml` comment (`flake.nix`).
   8. Remaining hits of `G grep -nE '(^|[^a-z/.])nixos/' -- . ':!docs' ':!README.md' ':!HANDOFF.md'` that name our directory (nixpkgs paths `nixos/modules/…`, `/boot/nixos/`, manual URLs stay).
-- [ ] Verify `[mid]`: `G add -A`; `top >/dev/null`; `snap M0-I1 && cmp $S/snap/{B0,M0}-I1.drv` (P1 strong form); `snap M0-I2 "$I2_OLD"` (differs by design; leaves checked in T1.1); `ev .#checks.x86_64-linux --apply builtins.attrNames --json | diff - $S/baseline/checks.json`; unit last lines equal `$S/baseline/units.txt` (paths without `nixos/`); `nix flake check --no-build --accept-flake-config`; `chk actionlint && chk rpi-deploy-syntax && chk rpi-deploy-unit && chk rpi-ci-unit && chk rpi-pull-unit && chk eval-pull-update`; `nix run --accept-flake-config .#rpi-deploy -- --help`.
-- [ ] Planted (§9 row 1) seen.
-- [ ] Commit "Move the flake from nixos/ to the repository root"; `G show -M --stat HEAD` lists renames.
+- [x] Verify `[mid]`: `G add -A`; `top >/dev/null`; `snap M0-I1 && cmp $S/snap/{B0,M0}-I1.drv` (P1 strong form); `snap M0-I2 "$I2_OLD"` (differs by design; leaves checked in T1.1); `ev .#checks.x86_64-linux --apply builtins.attrNames --json | diff - $S/baseline/checks.json`; unit last lines equal `$S/baseline/units.txt` (paths without `nixos/`); `nix flake check --no-build --accept-flake-config`; `chk actionlint && chk rpi-deploy-syntax && chk rpi-deploy-unit && chk rpi-ci-unit && chk rpi-pull-unit && chk eval-pull-update`; `nix run --accept-flake-config .#rpi-deploy -- --help`.
+- [x] Planted (§9 row 1) seen.
+- [x] Commit "Move the flake from nixos/ to the repository root"; `G show -M --stat HEAD` lists renames.
 
 **M0 acceptance:** I1 drvPath identical, check names and unit counts equal, `nix flake check --no-build` rc 0. Orchestrator cherry-picks; main tree `G status` = ` M README.md` + untracked `nixos/` leftovers.
 
 ### M1 — Scaffold (serial)
 
-#### Task 1.1: `tests/drv-diff.sh` + unit test `[ ]`
-- [ ] RED: `tests/drv-diff-unit.sh` (harness; synthetic JSON written with `jq -n`; `DD=${DD:-$HERE/drv-diff.sh}`):
+#### Task 1.1: `tests/drv-diff.sh` + unit test `[x]`
+- [x] RED: `tests/drv-diff-unit.sh` (harness; synthetic JSON written with `jq -n`; `DD=${DD:-$HERE/drv-diff.sh}`):
   - dd1 identical files → rc 0, empty stdout
   - dd2 chain `unit-x.service → system-units → etc → top`, unit `env.text` changed → stdout exactly `unit-x.service	env:text` (`dd2 only the leaf is reported`)
   - dd3 a new drv `neovim` added as input of `system-path` → `neovim	new`
@@ -471,34 +471,34 @@ All `uses:` SHA-pinned `@<40 hex> # <tag>`; no `signingKey`/`authToken` under `w
   - dd7 path-keyed and basename-keyed inputs (and a `{derivations: …}` wrapper) give the same output
   - dd8 non-JSON input → rc 2
   `unit drv-diff-unit` → fails (script missing).
-- [ ] GREEN: `tests/drv-diff.sh` per §12 (one `jq -n --slurpfile` program + bash wrapper).
-- [ ] Verify: `unit drv-diff-unit`; `shellcheck -x -P SCRIPTDIR -S warning tests/drv-diff{,-unit}.sh`; `G add`; `chk rpi-drv-diff-unit`.
-- [ ] M0 evidence: `bash tests/drv-diff.sh $S/snap/B0-I1.json $S/snap/M0-I1.json $S/expect/I1.txt && bash tests/drv-diff.sh $S/snap/B0-I2.json $S/snap/M0-I2.json $S/expect/I2.txt` rc 0 → `$S/logs/m0-invariant.txt`. If I2 shows another leaf: stop, report (E is wrong or the move leaked).
-- [ ] Planted dd2 seen. Commit "tests: drv-diff, root-cause diff of derivation closures (refactor invariant)".
+- [x] GREEN: `tests/drv-diff.sh` per §12 (one `jq -n --slurpfile` program + bash wrapper).
+- [x] Verify: `unit drv-diff-unit`; `shellcheck -x -P SCRIPTDIR -S warning tests/drv-diff{,-unit}.sh`; `G add`; `chk rpi-drv-diff-unit`.
+- [x] M0 evidence: `bash tests/drv-diff.sh $S/snap/B0-I1.json $S/snap/M0-I1.json $S/expect/I1.txt && bash tests/drv-diff.sh $S/snap/B0-I2.json $S/snap/M0-I2.json $S/expect/I2.txt` rc 0 → `$S/logs/m0-invariant.txt`. If I2 shows another leaf: stop, report (E is wrong or the move leaked).
+- [x] Planted dd2 seen. Commit "tests: drv-diff, root-cause diff of derivation closures (refactor invariant)".
 
-#### Task 1.2: `rl_hosts`, `rl_host_info` `[ ]`
-- [ ] RED `tests/lib-unit.sh` (harness, nix mock logging argv, printing `$MOCK_NIX_OUT`, rc `$MOCK_NIX_RC`):
+#### Task 1.2: `rl_hosts`, `rl_host_info` `[x]`
+- [x] RED `tests/lib-unit.sh` (harness, nix mock logging argv, printing `$MOCK_NIX_OUT`, rc `$MOCK_NIX_RC`):
   - lh1 mock `["b","a"]` → stdout `a\nb`; argv has `--json`, `F#nixosConfigurations`, `--apply`, and `rpiHost or false`
   - lh2 `MOCK_NIX_RC=1` → rc ≠ 0, nix's stderr passed through
   - lh3 `rl_host_info F h1` → stdout = mock JSON; argv has `F#nixosConfigurations.h1` and each of `system.name rpi.deploy.target rpi.ssh.port rpi.pull.cache rpi.wifi`
   - lh4 host ∈ {`a.b`, `a b`, `` , `x;y`} → rc 2, stderr `invalid host name`, 0 nix calls
   `unit lib-unit` → `rl_hosts: command not found`.
-- [ ] GREEN: §15 functions in `rpi-lib.sh` (after `rl_conf_ref`).
-- [ ] Verify: `unit lib-unit`; `chk rpi-lib-unit && chk rpi-deploy-unit && chk rpi-deploy-syntax`. Planted lh4 seen. Commit "rpi-lib: host discovery and host info (rl_hosts, rl_host_info)".
+- [x] GREEN: §15 functions in `rpi-lib.sh` (after `rl_conf_ref`).
+- [x] Verify: `unit lib-unit`; `chk rpi-lib-unit && chk rpi-deploy-unit && chk rpi-deploy-syntax`. Planted lh4 seen. Commit "rpi-lib: host discovery and host info (rl_hosts, rl_host_info)".
 
-#### Task 1.3: `rpi-ci` package, dispatcher, `hosts` `[ ]`
-- [ ] RED:
+#### Task 1.3: `rpi-ci` package, dispatcher, `hosts` `[x]`
+- [x] RED:
   - `tests/eval/tools.nix` (`p = packages.x86_64-linux.rpi-ci`): "rpi-ci package ships ci/*.sh, rpi-lib.sh and rpi-fp.sh" (`p.installPhase` hasInfix `libexec/rpi-ci`, `rpi-lib.sh`, `rpi-fp.sh`, and `ci/build.sh` ∈ `p.src` files via `builtins.pathExists (p.src + "/ci/build.sh")`); "rpi-ci wraps cachix, jq and git on PATH" (`p.installPhase` hasInfix `${cachix}/bin`, `${jq}/bin`, `${git}/bin` of x86 pkgs; compare via `builtins.unsafeDiscardStringContext` if `hasInfix` objects to string context).
   - `tests/ci-unit.sh`: r1 `rpi-ci.sh --help` lists `hosts build publish pointer commit`; r2 unknown subcommand → 2; r3 `hosts --flake F` with `rl_hosts` mocked output `neptun` → stdout exactly `hosts=["neptun"]` (`r3 hosts= is a JSON array`); r4 none → `hosts=[]`; r5 `rpi-ci.sh build --x` execs `build.sh --x` (mock log); r6 every CI script without `--flake` uses `$PWD` (run from `$T/repo`).
   `chk eval-tools` red first, then `unit ci-unit`.
-- [ ] GREEN: `ci/rpi-ci.sh` (case → `exec bash "$HERE/<script>.sh" "$@"`; `commit` → `commit-push.sh`; `cache-name` kept until T4.7); `ci/hosts.sh` (`rl_hosts` → `jq -Rcs 'split("\n")|map(select(. != ""))'`); defaults `dir=$PWD` in every CI script (tests that relied on `$HERE/..` now pass `--flake` or `cd`: stated in the test comment); `ci/package.nix` `{ lib, stdenvNoCC, makeWrapper, git, jq, coreutils, gnugrep, gnused, findutils, util-linux, cachix }:` with `src = lib.fileset.toSource { root = ../.; fileset = lib.fileset.unions [ ./. ../rpi-lib.sh ../rpi-fp.sh ]; }`; flake `packages.<sys>.rpi-ci = (pkgsFor system).callPackage ./ci/package.nix { };`.
-- [ ] Verify `[cheap]`: `chk eval-tools && chk rpi-ci-unit && chk rpi-deploy-syntax`; `nix run --accept-flake-config .#rpi-ci -- hosts` → `hosts=[]` (no mkPi host yet). Planted r3 + eval-tools seen. Commit "rpi-ci: package and dispatcher (hosts|build|publish|pointer|commit)".
+- [x] GREEN: `ci/rpi-ci.sh` (case → `exec bash "$HERE/<script>.sh" "$@"`; `commit` → `commit-push.sh`; `cache-name` kept until T4.7); `ci/hosts.sh` (`rl_hosts` → `jq -Rcs 'split("\n")|map(select(. != ""))'`); defaults `dir=$PWD` in every CI script (tests that relied on `$HERE/..` now pass `--flake` or `cd`: stated in the test comment); `ci/package.nix` `{ lib, stdenvNoCC, makeWrapper, git, jq, coreutils, gnugrep, gnused, findutils, util-linux, cachix }:` with `src = lib.fileset.toSource { root = ../.; fileset = lib.fileset.unions [ ./. ../rpi-lib.sh ../rpi-fp.sh ]; }`; flake `packages.<sys>.rpi-ci = (pkgsFor system).callPackage ./ci/package.nix { };`.
+- [x] Verify `[cheap]`: `chk eval-tools && chk rpi-ci-unit && chk rpi-deploy-syntax`; `nix run --accept-flake-config .#rpi-ci -- hosts` → `hosts=[]` (no mkPi host yet). Planted r3 + eval-tools seen. Commit "rpi-ci: package and dispatcher (hosts|build|publish|pointer|commit)".
 
-#### Task 1.4: Extract the workflow lint (refactor) `[ ]`
-- [ ] Before: `chk actionlint` passes; `grep -c 'FAIL:' flake.nix` noted.
-- [ ] Change: body verbatim into `tests/workflows-lint.sh` (`w=.github/workflows/neptun.yml` stays); check `src = lib.fileset.toSource { root = ./.; fileset = lib.fileset.unions [ ./.github ./tests/workflows-lint.sh (lib.fileset.maybeMissing ./templates) ]; }`, body `cd $src; bash tests/workflows-lint.sh; touch $out`.
-- [ ] After: `chk actionlint` passes; the same FAIL literals are in the script; planted (§9 actionlint T1.4) seen.
-- [ ] Commit "flake: actionlint check runs tests/workflows-lint.sh".
+#### Task 1.4: Extract the workflow lint (refactor) `[x]`
+- [x] Before: `chk actionlint` passes; `grep -c 'FAIL:' flake.nix` noted.
+- [x] Change: body verbatim into `tests/workflows-lint.sh` (`w=.github/workflows/neptun.yml` stays); check `src = lib.fileset.toSource { root = ./.; fileset = lib.fileset.unions [ ./.github ./tests/workflows-lint.sh (lib.fileset.maybeMissing ./templates) ]; }`, body `cd $src; bash tests/workflows-lint.sh; touch $out`.
+- [x] After: `chk actionlint` passes; the same FAIL literals are in the script; planted (§9 actionlint T1.4) seen.
+- [x] Commit "flake: actionlint check runs tests/workflows-lint.sh".
 
 **M1 acceptance `[mid]`:** `top && nix flake check --no-build --accept-flake-config`; `snap M1-I1 && cmp $S/snap/{M0,M1}-I1.drv`.
 
@@ -506,48 +506,48 @@ All `uses:` SHA-pinned `@<40 hex> # <tag>`; no `signingKey`/`authToken` under `w
 
 Fixtures: `tests/fixtures/hosts/minimal.nix` = `{ rpi.admin.sshKeys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEvalOnlyTestKeyEvalOnlyTestKeyEvalOnly00 eval@test" ]; system.stateVersion = "26.05"; }`. Eval args gain `rpiLib = self.lib; nixosModules = self.nixosModules; fixtures = ./tests/fixtures;`. In each eval file: `t = rpiLib.mkPi { modules = [ (fixtures + "/hosts/minimal.nix") ] ++ extra; }`, `cfg = t.config`, `failedAssertion = sys: s: lib.any (a: !a.assertion && lib.hasInfix s a.message) sys.config.assertions`, `rejects = v: !(builtins.tryEval (builtins.deepSeq v v)).success`. After each task: `snap T2N-I1 && cmp` with the previous I1 drv (neptun untouched until T2.7).
 
-#### Task 2.1: `lib.mkPi`, `nixosModules`, module skeleton `[ ]`
-- [ ] RED `tests/eval/lib.nix`: "mkPi returns a nixosSystem marked rpiHost" (`t.rpiHost == true && t ? extendModules`); "mkPi keeps nvmd's kernel (hybrid inputs)" (`cfg.boot.kernelPackages.kernel.outPath == rpi.config.boot.kernelPackages.kernel.outPath`); "mkPi passes specialArgs to modules" (`mkPi { modules = [ minimal ({ marker, ... }: { environment.etc.m.text = marker; }) ]; specialArgs.marker = "x"; }` → `"x"`); "mkPi imports the rpi.* modules" (`t.options.rpi ? headless && t.options.rpi ? pull && t.options.rpi ? sdWear`); "home-manager is wired, no HM users by default" (`t.options ? home-manager && cfg.home-manager.users == { }`); "nixosModules.default and .terminal exist". `chk eval-lib` → evaluation error.
-- [ ] GREEN: `lib/mkPi.nix` (§15), `modules/default.nix` (D6 order), stubs `modules/{base,identity,network,wifi,bluetooth}.nix` and `modules/profiles/terminal.nix` = `{ ... }: { }`, flake outputs `lib.mkPi`, `nixosModules.{default,terminal}`, eval args; `G add -N` new files.
-- [ ] Verify: `chk eval-lib`; neptun I1 unchanged. Planted (eval-lib) seen. Commit "lib.mkPi and nixosModules.default (library entry point)".
+#### Task 2.1: `lib.mkPi`, `nixosModules`, module skeleton `[x]`
+- [x] RED `tests/eval/lib.nix`: "mkPi returns a nixosSystem marked rpiHost" (`t.rpiHost == true && t ? extendModules`); "mkPi keeps nvmd's kernel (hybrid inputs)" (`cfg.boot.kernelPackages.kernel.outPath == rpi.config.boot.kernelPackages.kernel.outPath`); "mkPi passes specialArgs to modules" (`mkPi { modules = [ minimal ({ marker, ... }: { environment.etc.m.text = marker; }) ]; specialArgs.marker = "x"; }` → `"x"`); "mkPi imports the rpi.* modules" (`t.options.rpi ? headless && t.options.rpi ? pull && t.options.rpi ? sdWear`); "home-manager is wired, no HM users by default" (`t.options ? home-manager && cfg.home-manager.users == { }`); "nixosModules.default and .terminal exist". `chk eval-lib` → evaluation error.
+- [x] GREEN: `lib/mkPi.nix` (§15), `modules/default.nix` (D6 order), stubs `modules/{base,identity,network,wifi,bluetooth}.nix` and `modules/profiles/terminal.nix` = `{ ... }: { }`, flake outputs `lib.mkPi`, `nixosModules.{default,terminal}`, eval args; `G add -N` new files.
+- [x] Verify: `chk eval-lib`; neptun I1 unchanged. Planted (eval-lib) seen. Commit "lib.mkPi and nixosModules.default (library entry point)".
 
-#### Task 2.2: `base.nix`, `identity.nix` `[ ]`
-- [ ] RED `tests/eval/identity.nix`: "admin user: normal, wheel, key-only" (isNormalUser, `wheel ∈ extraGroups`, keys = `cfg.rpi.admin.sshKeys`, no password/hashedPassword); "root has exactly the admin keys"; "sshd: rpi.ssh.port only, no passwords, root prohibit-password" (ports = `[ cfg.rpi.ssh.port ]`, also with port 2200); "rpi.admin.user renames the admin" (alice; no `pi` user defined by us); "empty rpi.admin.sshKeys fails an assertion naming the option" (message contains `rpi.admin.sshKeys is empty`); "deploy target follows the hostname" (`root@rpi`; hostName `garden` → `root@garden`; explicit wins); "rpi.ssh.port rejects 0 and 70000".
+#### Task 2.2: `base.nix`, `identity.nix` `[x]`
+- [x] RED `tests/eval/identity.nix`: "admin user: normal, wheel, key-only" (isNormalUser, `wheel ∈ extraGroups`, keys = `cfg.rpi.admin.sshKeys`, no password/hashedPassword); "root has exactly the admin keys"; "sshd: rpi.ssh.port only, no passwords, root prohibit-password" (ports = `[ cfg.rpi.ssh.port ]`, also with port 2200); "rpi.admin.user renames the admin" (alice; no `pi` user defined by us); "empty rpi.admin.sshKeys fails an assertion naming the option" (message contains `rpi.admin.sshKeys is empty`); "deploy target follows the hostname" (`root@rpi`; hostName `garden` → `root@garden`; explicit wins); "rpi.ssh.port rejects 0 and 70000".
   `tests/eval/defaults.nix`: "hostname rpi, time zone UTC" ; "kept defaults" (zram 50, gc weekly `--delete-older-than 21d`, extlinux 5, `nix.channel.enable == false`, registry + NIX_PATH, `wheelNeedsPassword == false`, `documentation.enable == false`, `boot.tmp.cleanOnBoot`, `max-jobs == 3`, `cores == 3`, allowUnfree, `daemonIOSchedPriority == 7`, `useNetworkd`); "a host overrides every kept default" (P3: fixture module defining another value for each, plainly; row = `(builtins.tryEval (builtins.deepSeq vs vs)).success && vs == wanted`, so a conflicting plain definition in base prints the FAIL line instead of aborting).
   `chk eval-identity` red first, then `chk eval-defaults`.
-- [ ] GREEN: options §6/§15; identity config always on (no enable); base = `lib.mkDefault` for each (if `nixpkgs.config.allowUnfree` rejects `mkDefault`, set `nixpkgs.config = lib.mkDefault { allowUnfree = true; }` and note it).
-- [ ] Verify; planted (identity, defaults) seen. Commit "modules: identity (admin, ssh, deploy target) and base defaults".
+- [x] GREEN: options §6/§15; identity config always on (no enable); base = `lib.mkDefault` for each (if `nixpkgs.config.allowUnfree` rejects `mkDefault`, set `nixpkgs.config = lib.mkDefault { allowUnfree = true; }` and note it).
+- [x] Verify; planted (identity, defaults) seen. Commit "modules: identity (admin, ssh, deploy target) and base defaults".
 
-#### Task 2.3: `network.nix` `[ ]`
-- [ ] RED `tests/eval/network.nix`: "dhcp (default): no 10-lan-static; networkd; some network matches ether with DHCP" (property over `attrValues cfg.systemd.network.networks`, not a name); "static: 10-lan-static with Address and Gateway" (`matchConfig.Type == "ether"`, Address = `static.address`, Gateway = `static.gateway`, no `DNS` key); "static with dns sets DNS"; "static without address fails an assertion naming rpi.network.static.address"; "address must be CIDR"; "mode accepts dhcp or static only". `eval-defaults` += "default network is DHCP".
-- [ ] GREEN per D8. Verify; planted seen. Commit "modules: network (dhcp default, static)".
+#### Task 2.3: `network.nix` `[x]`
+- [x] RED `tests/eval/network.nix`: "dhcp (default): no 10-lan-static; networkd; some network matches ether with DHCP" (property over `attrValues cfg.systemd.network.networks`, not a name); "static: 10-lan-static with Address and Gateway" (`matchConfig.Type == "ether"`, Address = `static.address`, Gateway = `static.gateway`, no `DNS` key); "static with dns sets DNS"; "static without address fails an assertion naming rpi.network.static.address"; "address must be CIDR"; "mode accepts dhcp or static only". `eval-defaults` += "default network is DHCP".
+- [x] GREEN per D8. Verify; planted seen. Commit "modules: network (dhcp default, static)".
 
-#### Task 2.4: `wifi.nix`, `bluetooth.nix`; headless stops touching radios `[ ]`
-- [ ] Step 0 (S5, S7) `[cheap]`: find the Pi 3 wireless/BT firmware attr and any nvmd bluetooth module; note in `$S/logs/s5.md`.
-- [ ] RED `tests/eval/wifi.nix`: "off: disable-wifi overlay on, no wpa_supplicant, firmware list empty"; "on: overlay gone, wpa_supplicant on, secretsFile /var/lib/rpi/wireless.env"; "every network uses ext:<VAR>, never psk" (P6 over `{ "Home Net" = "RPI_WIFI_HOME"; Lab = "RPI_WIFI_LAB"; }`); "secretsFile is a string outside the store"; "on: Pi 3 wireless firmware despite rpi.sdWear"; "/var/lib/rpi is a 0700 root dir"; "network values must be variable names". `tests/eval/bluetooth.nix`: "off: disable-bt overlay on, bluetooth off"; "bluetooth on: disable-bt overlay gone, hardware.bluetooth on, firmware". `tests/eval/headless.nix`: rows asserting the two overlays move here (stated why: spec §4 headless no longer touches radios); new "headless leaves disable-wifi/disable-bt to rpi.wifi/rpi.bluetooth" (headless on + wifi on → no `disable-wifi`). `eval-defaults` += "Wi-Fi and Bluetooth overlays off".
-- [ ] GREEN per D9; overlay definitions copied verbatim from `headless.nix` (`disable-wifi.enable = true`, `disable-bt.enable = true`) under `mkIf (!cfg.enable)`; move the PL011/UART comment to `bluetooth.nix`; **add `./modules/wifi.nix ./modules/bluetooth.nix` to the old `rpi` module list** (after `headless.nix`) so neptun keeps both overlays.
-- [ ] Verify: the four eval checks; neptun I1 `cmp` unchanged (the overlay moved modules, config.txt identical). Planted (wifi, bluetooth) seen. Commit "modules: rpi.wifi and rpi.bluetooth (off by default); headless no longer disables radios".
+#### Task 2.4: `wifi.nix`, `bluetooth.nix`; headless stops touching radios `[x]`
+- [x] Step 0 (S5, S7) `[cheap]`: find the Pi 3 wireless/BT firmware attr and any nvmd bluetooth module; note in `$S/logs/s5.md`.
+- [x] RED `tests/eval/wifi.nix`: "off: disable-wifi overlay on, no wpa_supplicant, firmware list empty"; "on: overlay gone, wpa_supplicant on, secretsFile /var/lib/rpi/wireless.env"; "every network uses ext:<VAR>, never psk" (P6 over `{ "Home Net" = "RPI_WIFI_HOME"; Lab = "RPI_WIFI_LAB"; }`); "secretsFile is a string outside the store"; "on: Pi 3 wireless firmware despite rpi.sdWear"; "/var/lib/rpi is a 0700 root dir"; "network values must be variable names". `tests/eval/bluetooth.nix`: "off: disable-bt overlay on, bluetooth off"; "bluetooth on: disable-bt overlay gone, hardware.bluetooth on, firmware". `tests/eval/headless.nix`: rows asserting the two overlays move here (stated why: spec §4 headless no longer touches radios); new "headless leaves disable-wifi/disable-bt to rpi.wifi/rpi.bluetooth" (headless on + wifi on → no `disable-wifi`). `eval-defaults` += "Wi-Fi and Bluetooth overlays off".
+- [x] GREEN per D9; overlay definitions copied verbatim from `headless.nix` (`disable-wifi.enable = true`, `disable-bt.enable = true`) under `mkIf (!cfg.enable)`; move the PL011/UART comment to `bluetooth.nix`; **add `./modules/wifi.nix ./modules/bluetooth.nix` to the old `rpi` module list** (after `headless.nix`) so neptun keeps both overlays.
+- [x] Verify: the four eval checks; neptun I1 `cmp` unchanged (the overlay moved modules, config.txt identical). Planted (wifi, bluetooth) seen. Commit "modules: rpi.wifi and rpi.bluetooth (off by default); headless no longer disables radios".
 
-#### Task 2.5: `rpi.pull.repo`, `branch`, `cache` `[ ]`
-- [ ] RED `tests/eval/pull-update.nix` (new rows on fixture hosts): "pointer URL derives from repo, branch and hostName" (P4 table incl. hostName ≠ attr); "explicit pointerUrl wins"; "cache sets cacheUrl and cachePublicKey"; "enabled iff repo and cache are set" (P5); "repo must be owner/name".
-- [ ] GREEN: options in `modules/pull-update.nix`; `configuration.nix`: `rpi.pull = { repo = "GRBurst/nix-raspi"; cache = keys.cache or null; };` (drop the literal URL and the cacheUrl/key `mkIf`).
-- [ ] Verify: `chk eval-pull-update`; `snap2 T25 && cmp $S/snap/{M0,T25}-I1.drv && cmp $S/snap/{M0,T25}-I2.drv`. Planted seen. Commit "pull-update: rpi.pull.repo/branch/cache derive pointer and cache".
+#### Task 2.5: `rpi.pull.repo`, `branch`, `cache` `[x]`
+- [x] RED `tests/eval/pull-update.nix` (new rows on fixture hosts): "pointer URL derives from repo, branch and hostName" (P4 table incl. hostName ≠ attr); "explicit pointerUrl wins"; "cache sets cacheUrl and cachePublicKey"; "enabled iff repo and cache are set" (P5); "repo must be owner/name".
+- [x] GREEN: options in `modules/pull-update.nix`; `configuration.nix`: `rpi.pull = { repo = "GRBurst/nix-raspi"; cache = keys.cache or null; };` (drop the literal URL and the cacheUrl/key `mkIf`).
+- [x] Verify: `chk eval-pull-update`; `snap2 T25 && cmp $S/snap/{M0,T25}-I1.drv && cmp $S/snap/{M0,T25}-I2.drv`. Planted seen. Commit "pull-update: rpi.pull.repo/branch/cache derive pointer and cache".
 
-#### Task 2.6: Terminal profile `[ ]`
-- [ ] RED `tests/eval/terminal.nix` (profile on): "HM user is rpi.admin.user with zsh login shell" (`users.users.${u}.shell` is zsh, `programs.zsh.enable`, `home-manager.users ? ${u}`); "terminal profile follows rpi.admin.user" (alice); "terminalKit on with Pi defaults (osc52, dev packages off, release check off, fzf nushell off)" (HM option values only; never force packages). `eval-defaults` += "no HM users by default".
-- [ ] GREEN `modules/profiles/terminal.nix`: option `rpi.profiles.terminal.enable`; `mkIf`: shell, zsh, `home-manager.users.${u} = { programs.terminalKit = { enable = mkDefault true; clipboard = mkDefault "osc52"; packages.dev.enable = mkDefault false; }; home.enableNixpkgsReleaseCheck = mkDefault false; programs.fzf.enableNushellIntegration = mkDefault false; programs.home-manager.enable = mkDefault true; home.stateVersion = mkDefault "26.05"; }`.
-- [ ] Verify; planted seen. Commit "modules: rpi.profiles.terminal (home-manager + nix-terminal)".
+#### Task 2.6: Terminal profile `[x]`
+- [x] RED `tests/eval/terminal.nix` (profile on): "HM user is rpi.admin.user with zsh login shell" (`users.users.${u}.shell` is zsh, `programs.zsh.enable`, `home-manager.users ? ${u}`); "terminal profile follows rpi.admin.user" (alice); "terminalKit on with Pi defaults (osc52, dev packages off, release check off, fzf nushell off)" (HM option values only; never force packages). `eval-defaults` += "no HM users by default".
+- [x] GREEN `modules/profiles/terminal.nix`: option `rpi.profiles.terminal.enable`; `mkIf`: shell, zsh, `home-manager.users.${u} = { programs.terminalKit = { enable = mkDefault true; clipboard = mkDefault "osc52"; packages.dev.enable = mkDefault false; }; home.enableNixpkgsReleaseCheck = mkDefault false; programs.fzf.enableNushellIntegration = mkDefault false; programs.home-manager.enable = mkDefault true; home.stateVersion = mkDefault "26.05"; }`.
+- [x] Verify; planted seen. Commit "modules: rpi.profiles.terminal (home-manager + nix-terminal)".
 
-#### Task 2.7: neptun through `mkPi` (the refactor) `[ ]`
-- [ ] RED `tests/eval/lib.nix`: "Pi hosts: neptun only (rpi is an alias)" (P7 over `nixosConfigurations`) → `FAIL` (`[ ]`).
-- [ ] GREEN:
+#### Task 2.7: neptun through `mkPi` (the refactor) `[x]`
+- [x] RED `tests/eval/lib.nix`: "Pi hosts: neptun only (rpi is an alias)" (P7 over `nixosConfigurations`) → `FAIL` (`[x]`).
+- [x] GREEN:
   - `G mv configuration.nix hosts/neptun/default.nix; G mv home.nix hosts/neptun/home.nix; G rm keys.nix`.
   - `hosts/neptun/default.nix` = neptun values only (Global Constraints list + EDITOR/SUDO_EDITOR, `programs.screen`, `boot.kernel.sysctl`, `extraGroups = [ "docker" "video" ]`, `rpi.admin.sshKeys = [ "<the key from keys.nix>" ]`, `rpi.pull = { repo = "GRBurst/nix-raspi"; cache = null; }` with the cache comment, `home-manager.users.pi = import ./home.nix;`, `system.stateVersion = "26.05";`); everything now provided by library modules deleted.
   - `flake.nix`: `neptun` via `self.lib.mkPi`, `rpi` alias (§15), old module list removed, eval arg `rpi = self.nixosConfigurations.neptun`.
   - `tests/eval/pi-config.nix`: rows reading `keys.nix` now read `rpi.config.rpi.admin.sshKeys` (stated why: keys.nix removed by spec §7); add "neptun: port 2222, static 192.168.100.20/24 via .1, Europe/Berlin, neo, terminal on, target root@neptun". `tests/eval/pull-update.nix`: `_module.args.rpiKeys` overrides → `rpi.pull.cache = testCache` (same assertions).
-- [ ] Invariant `[mid]`: `snap2 T27 && inv T27` rc 0 (I1 drvPath = B0; I2 leaves = E). Otherwise fix order (D6) and repeat; unexplained leaf → stop and report.
-- [ ] Verify: `bash -c '. rpi-lib.sh; rl_hosts .'` → `neptun`; all `eval-*`; `nix run .#rpi-ci -- hosts` → `hosts=["neptun"]`; `top && nix flake check --no-build --accept-flake-config`. Planted (`inv`) seen.
-- [ ] Commit "neptun: a host module through lib.mkPi (keys.nix and configuration.nix retired)"; save `$S/logs/t27-invariant.txt`.
+- [x] Invariant `[mid]`: `snap2 T27 && inv T27` rc 0 (I1 drvPath = B0; I2 leaves = E). Otherwise fix order (D6) and repeat; unexplained leaf → stop and report.
+- [x] Verify: `bash -c '. rpi-lib.sh; rl_hosts .'` → `neptun`; all `eval-*`; `nix run .#rpi-ci -- hosts` → `hosts=["neptun"]`; `top && nix flake check --no-build --accept-flake-config`. Planted (`inv`) seen.
+- [x] Commit "neptun: a host module through lib.mkPi (keys.nix and configuration.nix retired)"; save `$S/logs/t27-invariant.txt`.
 
 **M2 acceptance:** all eval checks, `inv T27`, P14 for eval counts.
 
@@ -555,102 +555,102 @@ Fixtures: `tests/fixtures/hosts/minimal.nix` = `{ rpi.admin.sshKeys = [ "ssh-ed2
 
 Mocks: `nix` answers `rl_hosts` (`$MOCK_HOSTS`, default `["rpi"]` so existing tests keep `.#nixosConfigurations.rpi`; stated in the mock) and `rl_host_info` (`$MOCK_INFO`, default `{"name":"rpi","target":"root@rpi","port":22,"cache":null,"wifi":{"enable":false,"networks":{},"secretsFile":"/var/lib/rpi/wireless.env"}}`); `sudo` runs its argv; `mount`/`umount` log; `install` mock copies stdin into `$T/root/<path>` and logs mode; `ssh` logs argv and saves stdin to `$T/ssh.stdin`.
 
-#### Task 3.1: Host selection `[ ]`
-- [ ] RED: hs1 one host `["neptun"]` → `nixosConfigurations.neptun` in build argv; hs2 `RPI_HOST=b` with hosts `["a","b"]` → b, 0 host listing calls; hs3 hosts `["a","b"]` → exit 2, stderr `several Pi hosts: a b; pick one with --host or RPI_HOST`; hs4 `[]` → exit 2 `no Pi host (lib.mkPi) in`; hs5 `--host x` overrides `RPI_HOST`, no listing; hs6 `--attr x` = `--host x` + deprecation line; hs7 `RPI_HOST=` (empty) → falls back to listing. Existing tests with `--attr` keep passing.
-- [ ] GREEN: `resolve_host` (§15). Commit "rpi-deploy: --host / RPI_HOST / the only Pi host".
+#### Task 3.1: Host selection `[x]`
+- [x] RED: hs1 one host `["neptun"]` → `nixosConfigurations.neptun` in build argv; hs2 `RPI_HOST=b` with hosts `["a","b"]` → b, 0 host listing calls; hs3 hosts `["a","b"]` → exit 2, stderr `several Pi hosts: a b; pick one with --host or RPI_HOST`; hs4 `[]` → exit 2 `no Pi host (lib.mkPi) in`; hs5 `--host x` overrides `RPI_HOST`, no listing; hs6 `--attr x` = `--host x` + deprecation line; hs7 `RPI_HOST=` (empty) → falls back to listing. Existing tests with `--attr` keep passing.
+- [x] GREEN: `resolve_host` (§15). Commit "rpi-deploy: --host / RPI_HOST / the only Pi host".
 
-#### Task 3.2: Target and port from the host `[ ]`
-- [ ] RED: tp1 no flags/env → `root@rpi` port 22 from `$MOCK_INFO` (ssh argv `-p 22 root@rpi`); tp2 `RPI_TARGET`/`RPI_PORT` win over info; tp3 flags win over env; tp4 both env set and no Wi-Fi need → 0 `rpi.deploy.target` eval calls; tp5 `RPI_PORT=abc` → exit 2; tp6 usage text no longer names `neptun` or `2222`. Existing status/deploy tests: expectations derive target/port from the mock (stated why: defaults moved into the host config).
-- [ ] GREEN. Planted tp2 (§9) seen. Commit "rpi-deploy: target and port from rpi.deploy.target / rpi.ssh.port".
+#### Task 3.2: Target and port from the host `[x]`
+- [x] RED: tp1 no flags/env → `root@rpi` port 22 from `$MOCK_INFO` (ssh argv `-p 22 root@rpi`); tp2 `RPI_TARGET`/`RPI_PORT` win over info; tp3 flags win over env; tp4 both env set and no Wi-Fi need → 0 `rpi.deploy.target` eval calls; tp5 `RPI_PORT=abc` → exit 2; tp6 usage text no longer names `neptun` or `2222`. Existing status/deploy tests: expectations derive target/port from the mock (stated why: defaults moved into the host config).
+- [x] GREEN. Planted tp2 (§9) seen. Commit "rpi-deploy: target and port from rpi.deploy.target / rpi.ssh.port".
 
-#### Task 3.3: `secrets` `[ ]`
-- [ ] RED: sc1 wifi on, networks `{"Home Net":"RPI_WIFI_HOME","Lab":"RPI_WIFI_LAB"}`, both set → `$T/ssh.stdin` = `RPI_WIFI_HOME=…\nRPI_WIFI_LAB=…\n` (P8, sorted), remote command contains `install -m 600 /dev/stdin /var/lib/rpi/wireless.env` and `systemctl try-restart wpa_supplicant.service`; sc2 wifi off → exit 2 `rpi.wifi is disabled for rpi`; sc3 `RPI_WIFI_LAB` unset → exit 2 `missing PSK variable RPI_WIFI_LAB`, 0 ssh; sc4 no PSK value in `$MOCK_LOG` (`sc4 PSK values never in argv`) and none on stdout/stderr; sc5 value with LF → exit 2 `contains a newline`; sc6 empty networks → exit 2.
-- [ ] GREEN: `wifi_env_content HOSTINFO` (stdout = content; used by T3.4), `do_secrets`. Planted sc4 seen. Commit "rpi-deploy secrets: Wi-Fi PSKs from the environment to the Pi".
+#### Task 3.3: `secrets` `[x]`
+- [x] RED: sc1 wifi on, networks `{"Home Net":"RPI_WIFI_HOME","Lab":"RPI_WIFI_LAB"}`, both set → `$T/ssh.stdin` = `RPI_WIFI_HOME=…\nRPI_WIFI_LAB=…\n` (P8, sorted), remote command contains `install -m 600 /dev/stdin /var/lib/rpi/wireless.env` and `systemctl try-restart wpa_supplicant.service`; sc2 wifi off → exit 2 `rpi.wifi is disabled for rpi`; sc3 `RPI_WIFI_LAB` unset → exit 2 `missing PSK variable RPI_WIFI_LAB`, 0 ssh; sc4 no PSK value in `$MOCK_LOG` (`sc4 PSK values never in argv`) and none on stdout/stderr; sc5 value with LF → exit 2 `contains a newline`; sc6 empty networks → exit 2.
+- [x] GREEN: `wifi_env_content HOSTINFO` (stdout = content; used by T3.4), `do_secrets`. Planted sc4 seen. Commit "rpi-deploy secrets: Wi-Fi PSKs from the environment to the Pi".
 
-#### Task 3.4: `flash --wifi-env` `[ ]`
-- [ ] RED: fw1 success → after the verify: `sudo mount <dev>2`, `install -D -m 600 -o root -g root /dev/stdin <mnt>/var/lib/rpi/wireless.env` with content = P8, `umount`; `mmcblk0` → `mmcblk0p2`; fw2 missing variable → exit 2 before any `dd` (`fw2 missing PSK -> exit 2 before dd`); fw3 install fails → `umount` still called, exit ≠ 0; fw4 without `--wifi-env` → no mount (existing flash tests unchanged); fw5 PSKs never in argv.
-- [ ] GREEN. Planted fw2 seen. Commit "rpi-deploy flash --wifi-env: Wi-Fi secrets onto the card".
+#### Task 3.4: `flash --wifi-env` `[x]`
+- [x] RED: fw1 success → after the verify: `sudo mount <dev>2`, `install -D -m 600 -o root -g root /dev/stdin <mnt>/var/lib/rpi/wireless.env` with content = P8, `umount`; `mmcblk0` → `mmcblk0p2`; fw2 missing variable → exit 2 before any `dd` (`fw2 missing PSK -> exit 2 before dd`); fw3 install fails → `umount` still called, exit ≠ 0; fw4 without `--wifi-env` → no mount (existing flash tests unchanged); fw5 PSKs never in argv.
+- [x] GREEN. Planted fw2 seen. Commit "rpi-deploy flash --wifi-env: Wi-Fi secrets onto the card".
 
 **M3 acceptance `[cheap]`:** `unit deploy-unit && chk rpi-deploy-unit && chk rpi-deploy-syntax`; after M2 is on main: `nix run .#rpi-deploy -- status --help` and `RPI_TARGET=x RPI_PORT=1 …` paths sanity.
 
 ### M4 — CI (worktree `lib/m4`; ∥ M2, M3)
 
-#### Task 4.1: `ci/gh.sh` `[ ]`
-- [ ] RED ci-unit: gh1 `GITHUB_ACTIONS` unset: each helper → no `^::` line on stdout/stderr, `$GITHUB_STEP_SUMMARY` file not created, notice prints `rpi-ci: notice: m` (`gh1 no :: lines outside GitHub Actions`); gh2 `=true`: `::notice::m`, `::warning::m`, `::error file=f,line=3::m`, `::group::t`…`::endgroup::`, `gh_summary <<<'x'` appends; gh3 escaping of `%`, CR, LF.
-- [ ] GREEN per D17. Commit "ci: GitHub annotations and step summaries (only under GitHub Actions)".
+#### Task 4.1: `ci/gh.sh` `[x]`
+- [x] RED ci-unit: gh1 `GITHUB_ACTIONS` unset: each helper → no `^::` line on stdout/stderr, `$GITHUB_STEP_SUMMARY` file not created, notice prints `rpi-ci: notice: m` (`gh1 no :: lines outside GitHub Actions`); gh2 `=true`: `::notice::m`, `::warning::m`, `::error file=f,line=3::m`, `::group::t`…`::endgroup::`, `gh_summary <<<'x'` appends; gh3 escaping of `%`, CR, LF.
+- [x] GREEN per D17. Commit "ci: GitHub annotations and step summaries (only under GitHub Actions)".
 
-#### Task 4.2: `rpi-ci build --host` `[ ]`
-- [ ] RED: b-host `--host` required (exit 2); `RL_ATTR` = host in guard and build argv; outputs `top=` then `name=` (from host info) as the last stdout lines; b-sub cache set → build argv has `--option extra-substituters https://<n>.cachix.org` and `--option extra-trusted-public-keys <k>`, none when null; b-chk checks `["x","y"]` for the current system → `nix build …#checks.<sys>.x` and `.y` after the toplevel; a failing check → rc ≠ 0 and no `top=`; no checks → notice `no checks for <sys>`; b-sum (`GITHUB_ACTIONS=true`) summary has `## <host>: build`, nixpkgs and nixos-raspberrypi revs, `toplevel`, `closure`; with `--update-lock` and a changed lock `lock: updated` + old→new revs; guard failure → `::error` line; b-grp the toplevel build's log lies between `::group::build <host>` and `::endgroup::`. Existing b1–b7 adapted to `--host` (stated why).
-- [ ] GREEN. Commit "rpi-ci build: per host, own cache as substituter, flake checks, summary".
+#### Task 4.2: `rpi-ci build --host` `[x]`
+- [x] RED: b-host `--host` required (exit 2); `RL_ATTR` = host in guard and build argv; outputs `top=` then `name=` (from host info) as the last stdout lines; b-sub cache set → build argv has `--option extra-substituters https://<n>.cachix.org` and `--option extra-trusted-public-keys <k>`, none when null; b-chk checks `["x","y"]` for the current system → `nix build …#checks.<sys>.x` and `.y` after the toplevel; a failing check → rc ≠ 0 and no `top=`; no checks → notice `no checks for <sys>`; b-sum (`GITHUB_ACTIONS=true`) summary has `## <host>: build`, nixpkgs and nixos-raspberrypi revs, `toplevel`, `closure`; with `--update-lock` and a changed lock `lock: updated` + old→new revs; guard failure → `::error` line; b-grp the toplevel build's log lies between `::group::build <host>` and `::endgroup::`. Existing b1–b7 adapted to `--host` (stated why).
+- [x] GREEN. Commit "rpi-ci build: per host, own cache as substituter, flake checks, summary".
 
-#### Task 4.3: `rpi-ci publish` `[ ]`
-- [ ] RED: pb1 cache null → rc 0, stdout `published=false`, notice `no cache configured for <host>: built and tested, not published`, 0 cachix (`pb1 …`); pb2 cache set, `CACHIX_AUTH_TOKEN` unset → rc 1, `::error::CACHIX_AUTH_TOKEN is not set` (with `GITHUB_ACTIONS=true`), 0 cachix; pb3 same for `CACHIX_SIGNING_KEY`; pb4 both set → `cachix push <n> TOP` then `cachix pin <n> <name> TOP --keep-revisions 4`, `published=true`; pb5 push fails → no pin, rc ≠ 0; pb-sum summary `## <host>: publish` with cache and closure size or `skipped: no cache configured (rpi.pull.cache)`. Old u1–u3 replaced by pb4/pb5 (CLI changed from positional `CACHE TOP`).
-- [ ] GREEN. Planted pb1, pb2 seen. Commit "rpi-ci publish: cache from rpi.pull.cache; notice without, error on missing secrets".
+#### Task 4.3: `rpi-ci publish` `[x]`
+- [x] RED: pb1 cache null → rc 0, stdout `published=false`, notice `no cache configured for <host>: built and tested, not published`, 0 cachix (`pb1 …`); pb2 cache set, `CACHIX_AUTH_TOKEN` unset → rc 1, `::error::CACHIX_AUTH_TOKEN is not set` (with `GITHUB_ACTIONS=true`), 0 cachix; pb3 same for `CACHIX_SIGNING_KEY`; pb4 both set → `cachix push <n> TOP` then `cachix pin <n> <name> TOP --keep-revisions 4`, `published=true`; pb5 push fails → no pin, rc ≠ 0; pb-sum summary `## <host>: publish` with cache and closure size or `skipped: no cache configured (rpi.pull.cache)`. Old u1–u3 replaced by pb4/pb5 (CLI changed from positional `CACHE TOP`).
+- [x] GREEN. Planted pb1, pb2 seen. Commit "rpi-ci publish: cache from rpi.pull.cache; notice without, error on missing secrets".
 
-#### Task 4.4: `rpi-ci pointer` (`--host` required, `bootFp`) `[ ]`
-- [ ] RED: pt1 pointer has `bootFp` = sha256 of `rl_fp_local TOP` (fixture toplevel via `make_sys`); pt2 summary `boot: unchanged → the Pi switches` / `changed → the Pi reboots at rpi.pull.rebootTime` / `unknown (no previous pointer)` vs the origin/main pointer; pt3 no `--host` → exit 2; pt4 workflow-style call `--host garden --file deploy/garden.json` with a `nixos-system-garden-…` TOP → file `deploy/garden.json`. pull-unit px1 pointer with `bootFp` and `x` → applies (`px1 extra pointer fields are ignored`); if red, make rpi-pull ignore unknown keys (only that change).
-- [ ] GREEN. Commit "rpi-ci pointer: host required, boot fingerprint in the pointer and summary".
+#### Task 4.4: `rpi-ci pointer` (`--host` required, `bootFp`) `[x]`
+- [x] RED: pt1 pointer has `bootFp` = sha256 of `rl_fp_local TOP` (fixture toplevel via `make_sys`); pt2 summary `boot: unchanged → the Pi switches` / `changed → the Pi reboots at rpi.pull.rebootTime` / `unknown (no previous pointer)` vs the origin/main pointer; pt3 no `--host` → exit 2; pt4 workflow-style call `--host garden --file deploy/garden.json` with a `nixos-system-garden-…` TOP → file `deploy/garden.json`. pull-unit px1 pointer with `bootFp` and `x` → applies (`px1 extra pointer fields are ignored`); if red, make rpi-pull ignore unknown keys (only that change).
+- [x] GREEN. Commit "rpi-ci pointer: host required, boot fingerprint in the pointer and summary".
 
-#### Task 4.5: `rpi-ci commit --artifacts` `[ ]`
-- [ ] RED (real git, bare origin): k1 artifacts `a/` (lock L, `deploy/a.json`) and `b/` (lock L, `deploy/b.json`) → one commit on origin main changing exactly `deploy/a.json deploy/b.json` (+ `flake.lock` if L differs from HEAD), `pushed=true` (P11); k2 locks differ → rc 1, `lock differs between hosts`, origin unchanged (`k2 …`); k3 empty dir → `pushed=false`; k4 artifact with only a lock (cache-less host, updated lock) → commit of `flake.lock` only. g1–g5 unchanged.
-- [ ] GREEN. Planted k2 seen. Commit "rpi-ci commit: one commit of the lock and all pointers".
+#### Task 4.5: `rpi-ci commit --artifacts` `[x]`
+- [x] RED (real git, bare origin): k1 artifacts `a/` (lock L, `deploy/a.json`) and `b/` (lock L, `deploy/b.json`) → one commit on origin main changing exactly `deploy/a.json deploy/b.json` (+ `flake.lock` if L differs from HEAD), `pushed=true` (P11); k2 locks differ → rc 1, `lock differs between hosts`, origin unchanged (`k2 …`); k3 empty dir → `pushed=false`; k4 artifact with only a lock (cache-less host, updated lock) → commit of `flake.lock` only. g1–g5 unchanged.
+- [x] GREEN. Planted k2 seen. Commit "rpi-ci commit: one commit of the lock and all pointers".
 
-#### Task 4.6: `rpi-ci hosts` notice `[ ]`
-- [ ] RED hs1 `hosts=[]` → notice `no Pi hosts (lib.mkPi) in nixosConfigurations`. GREEN. Commit "rpi-ci hosts: notice when there is nothing to build" (may be folded into T4.1's commit if trivial).
+#### Task 4.6: `rpi-ci hosts` notice `[x]`
+- [x] RED hs1 `hosts=[]` → notice `no Pi hosts (lib.mkPi) in nixosConfigurations`. GREEN. Commit "rpi-ci hosts: notice when there is nothing to build" (may be folded into T4.1's commit if trivial).
 
-#### Task 4.7: Workflows, template workflow, lint, cleanup `[ ]`
-- [ ] RED `tests/workflows-lint.sh` for `W=(.github/workflows/pi.yml templates/default/.github/workflows/pi.yml)`: actionlint both; P10 `FAIL: pi.yml is not the template's workflow with the local rpi-ci`; build job order `rpi-ci -- build` < `rpi-ci -- publish` < `rpi-ci -- pointer` < `upload-artifact`; commit job `download-artifact` < `rpi-ci -- commit` and `needs:` contains `build`; `if: github.ref == 'refs/heads/main'` on `hosts` and `commit`; workflow `permissions` `contents: read` and `contents: write` only in `commit` (`FAIL: only the commit job may write`); `name: build ${{ matrix.host }}`; pointer step `if: steps.publish.outputs.published == 'true'`; SHA pins + `# tag`; no `signingKey|authToken`; dependabot github-actions in both; no `working-directory`. With `G mv .github/workflows/neptun.yml .github/workflows/pi.yml` alone → `chk actionlint` red.
-- [ ] GREEN: both workflows (§15), template `.github/dependabot.yml`, SHAs via S8; `G rm ci/cache-name.sh`, drop c1/c2 (stated why: the cache is per host in `rpi.pull.cache`; covered by pb*); dispatcher drops `cache-name`.
-- [ ] Manual `[cheap]` (after M2 on main): `GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY=$S/logs/sum.md nix run .#rpi-ci -- publish --host neptun --top /nix/store/$(printf 'a%.0s' $(seq 32))-nixos-system-neptun-x` → notice line, `published=false`, rc 0, summary section.
-- [ ] Planted P10, D15 seen. Commit "ci: host-matrix workflow pi.yml (ours and the template's), one commit job".
+#### Task 4.7: Workflows, template workflow, lint, cleanup `[x]`
+- [x] RED `tests/workflows-lint.sh` for `W=(.github/workflows/pi.yml templates/default/.github/workflows/pi.yml)`: actionlint both; P10 `FAIL: pi.yml is not the template's workflow with the local rpi-ci`; build job order `rpi-ci -- build` < `rpi-ci -- publish` < `rpi-ci -- pointer` < `upload-artifact`; commit job `download-artifact` < `rpi-ci -- commit` and `needs:` contains `build`; `if: github.ref == 'refs/heads/main'` on `hosts` and `commit`; workflow `permissions` `contents: read` and `contents: write` only in `commit` (`FAIL: only the commit job may write`); `name: build ${{ matrix.host }}`; pointer step `if: steps.publish.outputs.published == 'true'`; SHA pins + `# tag`; no `signingKey|authToken`; dependabot github-actions in both; no `working-directory`. With `G mv .github/workflows/neptun.yml .github/workflows/pi.yml` alone → `chk actionlint` red.
+- [x] GREEN: both workflows (§15), template `.github/dependabot.yml`, SHAs via S8; `G rm ci/cache-name.sh`, drop c1/c2 (stated why: the cache is per host in `rpi.pull.cache`; covered by pb*); dispatcher drops `cache-name`.
+- [x] Manual `[cheap]` (after M2 on main): `GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY=$S/logs/sum.md nix run .#rpi-ci -- publish --host neptun --top /nix/store/$(printf 'a%.0s' $(seq 32))-nixos-system-neptun-x` → notice line, `published=false`, rc 0, summary section.
+- [x] Planted P10, D15 seen. Commit "ci: host-matrix workflow pi.yml (ours and the template's), one commit job".
 
 **M4 acceptance `[cheap]`:** `unit ci-unit && unit pull-unit && chk rpi-ci-unit && chk rpi-pull-unit && chk actionlint && chk rpi-deploy-syntax`.
 
 ### M5 — Template and devenv (worktree `lib/m5`; after M2)
 
-#### Task 5.1: `templates/default` + `eval-template` `[ ]`
-- [ ] RED `tests/eval/template.nix` with `tf = import ../../templates/default/flake.nix; tpl = tf.outputs { self = tpl; rpi = rpiFlake; }; h = tpl.nixosConfigurations.rpi; hk = h.extendModules { modules = [ (fixtures + "/hosts/minimal.nix") ]; };` (eval arg `rpiFlake = self`): "template input is rpi = github:GRBurst/nix-raspi"; "template nixConfig equals ours (nvmd cache)"; "template host is a Pi host through lib.mkPi"; "template default: DHCP, port 22, Wi-Fi and Bluetooth off, hostname rpi, pull off" (P13 on `hk`); "with a key, no failed assertion"; "without a key the sshKeys assertion fires" (`h`); "template re-exports apps and packages of rpi"; "templates.default points at templates/default with a description".
-- [ ] GREEN: `templates/default/flake.nix` (inputs.rpi, nixConfig, outputs per D22), `hosts/rpi.nix` (sshKeys `[ ]` + comments for every option, `system.stateVersion = "26.05"`), `README.md` (short: init, fill key, `nix run .#rpi-deploy -- image|flash|deploy`, pointer to the main README); flake `templates.default = { path = ./templates/default; description = "Raspberry Pi 3 host on the nix-raspi library"; welcomeText = …; }`.
-- [ ] Verify `chk eval-template`; `nix flake check --no-build` (checks `templates`). Planted seen. Commit "templates.default: a Pi host on lib.mkPi".
+#### Task 5.1: `templates/default` + `eval-template` `[x]`
+- [x] RED `tests/eval/template.nix` with `tf = import ../../templates/default/flake.nix; tpl = tf.outputs { self = tpl; rpi = rpiFlake; }; h = tpl.nixosConfigurations.rpi; hk = h.extendModules { modules = [ (fixtures + "/hosts/minimal.nix") ]; };` (eval arg `rpiFlake = self`): "template input is rpi = github:GRBurst/nix-raspi"; "template nixConfig equals ours (nvmd cache)"; "template host is a Pi host through lib.mkPi"; "template default: DHCP, port 22, Wi-Fi and Bluetooth off, hostname rpi, pull off" (P13 on `hk`); "with a key, no failed assertion"; "without a key the sshKeys assertion fires" (`h`); "template re-exports apps and packages of rpi"; "templates.default points at templates/default with a description".
+- [x] GREEN: `templates/default/flake.nix` (inputs.rpi, nixConfig, outputs per D22), `hosts/rpi.nix` (sshKeys `[x]` + comments for every option, `system.stateVersion = "26.05"`), `README.md` (short: init, fill key, `nix run .#rpi-deploy -- image|flash|deploy`, pointer to the main README); flake `templates.default = { path = ./templates/default; description = "Raspberry Pi 3 host on the nix-raspi library"; welcomeText = …; }`.
+- [x] Verify `chk eval-template`; `nix flake check --no-build` (checks `templates`). Planted seen. Commit "templates.default: a Pi host on lib.mkPi".
 
-#### Task 5.2: devenv, SecretSpec `[ ]`
-- [ ] Step 0 S4 `[cheap]`: record in `$S/logs/s4.md`.
-- [ ] RED rows (`eval-template`): "secretspec.toml declares RPI_WIFI_HOME (optional), root and template" (`fromTOML`); "devenv.local.nix is gitignored (root, template)"; "devenv.local.nix.example sets RPI_HOST and shows RPI_TARGET, RPI_PORT (root, template)" (import → function; `(f { }).env ? RPI_HOST`; `hasInfix "RPI_TARGET"` and `"RPI_PORT"` in the text).
-- [ ] GREEN: root `secretspec.toml`, `devenv.local.nix.example`; template copies + `devenv.nix` (`env.RPI_FLAKE = config.devenv.root;` `scripts.rpi-deploy.exec = ''nix run "$DEVENV_ROOT#rpi-deploy" -- "$@"'';`), `devenv.yaml` (nixos-26.05), `.gitignore` (`devenv.local.nix`, `.devenv*`, `result*`); root `devenv.nix` gains `secretspec` if S4 found it in nixpkgs.
-- [ ] Commit "devenv: secretspec.toml and devenv.local.nix.example (root and template)".
+#### Task 5.2: devenv, SecretSpec `[x]`
+- [x] Step 0 S4 `[cheap]`: record in `$S/logs/s4.md`.
+- [x] RED rows (`eval-template`): "secretspec.toml declares RPI_WIFI_HOME (optional), root and template" (`fromTOML`); "devenv.local.nix is gitignored (root, template)"; "devenv.local.nix.example sets RPI_HOST and shows RPI_TARGET, RPI_PORT (root, template)" (import → function; `(f { }).env ? RPI_HOST`; `hasInfix "RPI_TARGET"` and `"RPI_PORT"` in the text).
+- [x] GREEN: root `secretspec.toml`, `devenv.local.nix.example`; template copies + `devenv.nix` (`env.RPI_FLAKE = config.devenv.root;` `scripts.rpi-deploy.exec = ''nix run "$DEVENV_ROOT#rpi-deploy" -- "$@"'';`), `devenv.yaml` (nixos-26.05), `.gitignore` (`devenv.local.nix`, `.devenv*`, `result*`); root `devenv.nix` gains `secretspec` if S4 found it in nixpkgs.
+- [x] Commit "devenv: secretspec.toml and devenv.local.nix.example (root and template)".
 
-#### Task 5.3: Spikes S2/S3 (no commit unless a fix in owned files) `[ ]`
-- [ ] `[mid]` in `$S/tpl` (fresh): `nix flake init -t "git+file://$MAIN/.worktrees/lib-m5"`; `git init`; key into `hosts/rpi.nix`; `G add -A`; `nix flake lock --override-input rpi "git+file://$MAIN/.worktrees/lib-m5"`; `nix eval --raw .#nixosConfigurations.rpi.config.system.build.toplevel.drvPath` rc 0; `nix run --inputs-from . rpi#rpi-ci -- hosts` → `hosts=["rpi"]`; `nix run .#rpi-deploy -- --help` rc 0. Log `$S/logs/s2-s3.md`. Failure → apply the §13 fallback, record as an assumption change.
+#### Task 5.3: Spikes S2/S3 (no commit unless a fix in owned files) `[x]`
+- [x] `[mid]` in `$S/tpl` (fresh): `nix flake init -t "git+file://$MAIN/.worktrees/lib-m5"`; `git init`; key into `hosts/rpi.nix`; `G add -A`; `nix flake lock --override-input rpi "git+file://$MAIN/.worktrees/lib-m5"`; `nix eval --raw .#nixosConfigurations.rpi.config.system.build.toplevel.drvPath` rc 0; `nix run --inputs-from . rpi#rpi-ci -- hosts` → `hosts=["rpi"]`; `nix run .#rpi-deploy -- --help` rc 0. Log `$S/logs/s2-s3.md`. Failure → apply the §13 fallback, record as an assumption change.
 
 ### M6 — qemu smokes (after M2–M5; clean worktree `lib/m6`)
 
-#### Task 6.1: boot-smoke on the template default host `[ ]`
-- [ ] Change `tests/boot-smoke.sh`: build a template instance in `$WORK/tpl` exactly as T5.3 (key = the smoke key), image via `rpi-deploy image --flake "git+file://$WORK/tpl" --host rpi`; guest SSH port 22, login prompt `rpi login:`; `tests/qemu-pi.sh`: `RPI_SMOKE_GUEST_IP` (default `192.168.100.20`; empty → slirp's first DHCP lease, S6).
-- [ ] RED `[expensive ~40 min cold]`: planted `RPI_SMOKE_GUEST_SSH_PORT=2222` → FAIL at SSH. GREEN: PASS (login prompt + SSH banner on 22). Commit "tests: boot-smoke boots the template's default host (DHCP, port 22)".
+#### Task 6.1: boot-smoke on the template default host `[x]`
+- [x] Change `tests/boot-smoke.sh`: build a template instance in `$WORK/tpl` exactly as T5.3 (key = the smoke key), image via `rpi-deploy image --flake "git+file://$WORK/tpl" --host rpi`; guest SSH port 22, login prompt `rpi login:`; `tests/qemu-pi.sh`: `RPI_SMOKE_GUEST_IP` (default `192.168.100.20`; empty → slirp's first DHCP lease, S6).
+- [x] RED `[expensive ~40 min cold]`: planted `RPI_SMOKE_GUEST_SSH_PORT=2222` → FAIL at SSH. GREEN: PASS (login prompt + SSH banner on 22). Commit "tests: boot-smoke boots the template's default host (DHCP, port 22)".
 
-#### Task 6.2: deploy-smoke, pull-smoke on neptun `[ ]`
-- [ ] Change: `--attr` → `--host`; `rpi.nixosConfigurations.rpi` → `.neptun`; pointer via `bash "$FLAKE_DIR/ci/pointer.sh" --host neptun …`. `[expensive ~20 + ~30 min]` both PASS (pull-smoke also RED with `RPI_PULL_SMOKE_PLANT=1` as before). Commit "tests: deploy-smoke and pull-smoke on the library".
+#### Task 6.2: deploy-smoke, pull-smoke on neptun `[x]`
+- [x] Change: `--attr` → `--host`; `rpi.nixosConfigurations.rpi` → `.neptun`; pointer via `bash "$FLAKE_DIR/ci/pointer.sh" --host neptun …`. `[expensive ~20 + ~30 min]` both PASS (pull-smoke also RED with `RPI_PULL_SMOKE_PLANT=1` as before). Commit "tests: deploy-smoke and pull-smoke on the library".
 
 ### M7 — Docs, personal values, acceptance, review (after all)
 
-#### Task 7.1: `personal-values` check `[ ]`
-- [ ] RED: `tests/personal-values.sh` (patterns `neptun`, `\b2222\b`, `192\.168\.100\.`, `GRBurst/nix-raspi` minus `github:GRBurst/nix-raspi`, `Europe/Berlin`, `"neo"`, the key's base64 prefix, `pallon`, `andromeda`; output `FAIL: personal value in library code:` + `file:line:text`; `flake.nix` allowlist: lines matching `nixosConfigurations\.neptun|neptun = |\./hosts/neptun`); flake check `personal-values` (x86_64, src = D23 fileset with `maybeMissing`). Planted (§9) red.
-- [ ] GREEN: fix every real hit (comments in `rpi-deploy.sh`, `ci/*.sh`, `modules/*.nix`, `flake.nix`; if `rpi-pull.sh` defaults `--host` to `neptun`, the option becomes required and `tests/pull-unit.sh` passes it explicitly, stated why: the module always passes `config.system.name`); review `G grep -n -E 'neptun|2222|192\.168\.100\.' -- tests` (only neptun-specific tests). Commit "checks: no personal values in library code".
+#### Task 7.1: `personal-values` check `[x]`
+- [x] RED: `tests/personal-values.sh` (patterns `neptun`, `\b2222\b`, `192\.168\.100\.`, `GRBurst/nix-raspi` minus `github:GRBurst/nix-raspi`, `Europe/Berlin`, `"neo"`, the key's base64 prefix, `pallon`, `andromeda`; output `FAIL: personal value in library code:` + `file:line:text`; `flake.nix` allowlist: lines matching `nixosConfigurations\.neptun|neptun = |\./hosts/neptun`); flake check `personal-values` (x86_64, src = D23 fileset with `maybeMissing`). Planted (§9) red.
+- [x] GREEN: fix every real hit (comments in `rpi-deploy.sh`, `ci/*.sh`, `modules/*.nix`, `flake.nix`; if `rpi-pull.sh` defaults `--host` to `neptun`, the option becomes required and `tests/pull-unit.sh` passes it explicitly, stated why: the module always passes `config.system.name`); review `G grep -n -E 'neptun|2222|192\.168\.100\.' -- tests` (only neptun-specific tests). Commit "checks: no personal values in library code".
 
-#### Task 7.2: README (consumer first) `[ ]`
-- [ ] Precondition Q1 (the user's README change is committed or handed over). Rewrite in the §8 order: what it is → quick start (`nix flake init -t github:GRBurst/nix-raspi`, host file, `rpi-deploy image`/`flash`, first boot, `deploy`) → configuration (`rpi.*` table = Global Constraints; Wi-Fi + `secretspec run -- rpi-deploy secrets`) → updates (push vs pull; cache + CI secrets; `rpi.pull.repo`/`cache`) → caching (§8 content verbatim facts: nvmd cache, cache.nixos.org, ~16 derivations, overlays, 1.1 GB eval, trusting our key is opt-in) → troubleshooting → our neptun (example section) → development (devenv, tests, layout, `.scratch` helper) last. Note for build-host users: `rpi.buildHost.flakePath` → the repo root.
-- [ ] Commit "README: consumer first (library, template, options, updates, caching)".
+#### Task 7.2: README (consumer first) `[x]`
+- [x] Precondition Q1 (the user's README change is committed or handed over). Rewrite in the §8 order: what it is → quick start (`nix flake init -t github:GRBurst/nix-raspi`, host file, `rpi-deploy image`/`flash`, first boot, `deploy`) → configuration (`rpi.*` table = Global Constraints; Wi-Fi + `secretspec run -- rpi-deploy secrets`) → updates (push vs pull; cache + CI secrets; `rpi.pull.repo`/`cache`) → caching (§8 content verbatim facts: nvmd cache, cache.nixos.org, ~16 derivations, overlays, 1.1 GB eval, trusting our key is opt-in) → troubleshooting → our neptun (example section) → development (devenv, tests, layout, `.scratch` helper) last. Note for build-host users: `rpi.buildHost.flakePath` → the repo root.
+- [x] Commit "README: consumer first (library, template, options, updates, caching)".
 
-#### Task 7.3: HANDOFF, devenv leftovers `[ ]`
-- [ ] `devenv.nix` `rpi-check` warms up every Pi host generically (`for h in $(bash -c '. ./rpi-lib.sh; rl_hosts .'); do nix eval --raw --accept-flake-config ".#nixosConfigurations.$h.config.system.build.toplevel.drvPath" >/dev/null; done`; no host name in devenv.nix, `personal-values` stays green); HANDOFF: header (this spec/plan), status table M0–M7, decisions D1–D25 short, user actions (spec §10 + push + AC4 checklist + `flakePath` + optional removal of `nixos/` leftovers + Wi-Fi/BT hardware checklist §10.2), gotchas (new helper). Commit "HANDOFF: reusable library".
+#### Task 7.3: HANDOFF, devenv leftovers `[x]`
+- [x] `devenv.nix` `rpi-check` warms up every Pi host generically (`for h in $(bash -c '. ./rpi-lib.sh; rl_hosts .'); do nix eval --raw --accept-flake-config ".#nixosConfigurations.$h.config.system.build.toplevel.drvPath" >/dev/null; done`; no host name in devenv.nix, `personal-values` stays green); HANDOFF: header (this spec/plan), status table M0–M7, decisions D1–D25 short, user actions (spec §10 + push + AC4 checklist + `flakePath` + optional removal of `nixos/` leftovers + Wi-Fi/BT hardware checklist §10.2), gotchas (new helper). Commit "HANDOFF: reusable library".
 
-#### Task 7.4: Final acceptance `[ ]`
-- [ ] AC1 `[expensive]`: `top && nix flake check --accept-flake-config -L 2>&1 | tee $S/logs/flake-check.log` rc 0; P14 vs `$S/baseline`.
-- [ ] AC3 `[mid]`: on integrated main `snap2 FINAL && inv FINAL` rc 0 → `$S/logs/final-invariant.txt`.
-- [ ] AC2/AC5: T5.3, T6.1, T6.2 logs. `G log --merges <M0 base>..main` empty. HANDOFF acceptance table filled; remove `.worktrees/lib-baseline`. Commit "HANDOFF: acceptance of the reusable library".
+#### Task 7.4: Final acceptance `[x]`
+- [x] AC1 `[expensive]`: `top && nix flake check --accept-flake-config -L 2>&1 | tee $S/logs/flake-check.log` rc 0; P14 vs `$S/baseline`.
+- [x] AC3 `[mid]`: on integrated main `snap2 FINAL && inv FINAL` rc 0 → `$S/logs/final-invariant.txt`.
+- [x] AC2/AC5: T5.3, T6.1, T6.2 logs. `G log --merges <M0 base>..main` empty. HANDOFF acceptance table filled; remove `.worktrees/lib-baseline`. Commit "HANDOFF: acceptance of the reusable library".
 
-#### Task 7.5: Final whole-branch review `[ ]`
-- [ ] Review required: `review` card, Opus (`model: "anthropic/claude-opus-5-5"`), diff `<M0 base>..main`, with the spec, this plan §3, §4, §8, §9, §12, and the Review Focus list; README against §8. Findings: one commit each, test first; unfixed ones to HANDOFF with a reason.
+#### Task 7.5: Final whole-branch review `[x]`
+- [x] Review required: `review` card, Opus (`model: "anthropic/claude-opus-5-5"`), diff `<M0 base>..main`, with the spec, this plan §3, §4, §8, §9, §12, and the Review Focus list; README against §8. Findings: one commit each, test first; unfixed ones to HANDOFF with a reason.
 
 ---
 

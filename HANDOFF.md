@@ -3,9 +3,9 @@
 > **Maintain this file.** Update it at the end of every work step: status,
 > decisions, open problems, what was verified vs. assumed. A new session should
 > be able to start from this file alone.
-> Last updated: M7 docs (README consumer first, this file, `personal-values`
-> check, generic `rpi-check`). The final acceptance (plan T7.4) and the final
-> whole-branch review (T7.5) follow. Full docs: `README.md`.
+> Last updated: final acceptance (plan T7.4) after the final review fixes
+> (T7.5). The library is complete; what is left are the actions only you can
+> do (§4: push and watch the first CI run, Cachix, hardware). Full docs: `README.md`.
 > Spec: `docs/superpowers/specs/2026-10-25-reusable-library-design.md`; plan:
 > `docs/superpowers/plans/2026-10-25-reusable-library.md` (§3 decisions D1–D25,
 > §9 planted violations, §12 refactor invariant, §15 interfaces).
@@ -42,7 +42,7 @@ and the auth token exist only as GitHub Actions secrets.
 ### The reusable library (plan M0–M7)
 
 Linear, unsigned commits on `main`, one per task (`git log --oneline 4577aa2..main`;
-re-sign when pushing; no merge commits). Plan checkboxes were not ticked.
+re-sign when pushing; no merge commits: `git log --merges 4577aa2..main` is empty). The plan's checkboxes (§16) are ticked; the §9 "seen" column is not (the planted-violation evidence is in `.scratch/lib/logs/m*-plant-*.txt`).
 
 | milestone | content | commits | state |
 |---|---|---|---|
@@ -52,21 +52,44 @@ re-sign when pushing; no merge commits). Plan checkboxes were not ticked.
 | M3 | `rpi-deploy`: `--host`/`RPI_HOST`, target and port from `rpi.deploy.target`/`rpi.ssh.port`, `secrets`, `flash --wifi-env` | `252ac34`, `0d43b33`, `c02d6b0`, `5a4f133` | done, **[M]** 536 assertions |
 | M4 | CI: `ci/gh.sh` (annotations, summaries), `rpi-ci build/publish/pointer/commit`, `.github/workflows/pi.yml` (ours and the template's), `cache-name.sh` and cachix-action removed | `003e555` … `b9090c4` (7) | done, **[M]** 403 assertions + actionlint; a real `rpi-ci build --host neptun` with `GITHUB_ACTIONS=true` and a scratch cache **[V]** (binfmt, 273 s); a real GitHub run **[?]** |
 | M5 | `templates/default` (flake, `hosts/rpi.nix`, devenv files, README), `secretspec.toml`, `devenv.local.nix.example` | `68d5770`, `17de115` | done, **[M]** `eval-template` (15 rows); spikes S2/S3 **[V]** with `git+file://` of this repo |
-| M6 | qemu smokes: boot-smoke on the template's default host, deploy-smoke and pull-smoke on neptun | integrated by the orchestrator | see the acceptance table (T7.4) |
-| M7 | `personal-values` check, README consumer first, this file, generic `rpi-check` | `40fb9cf`, `7c92847`, the HANDOFF commit | docs done; T7.4 acceptance and T7.5 review are the orchestrator's |
+| M6 | qemu smokes: boot-smoke on the template's default host, deploy-smoke and pull-smoke on neptun | `0c8467f`, `c2da48d` | done, **[V]**; re-run on the final tree in T7.4 (acceptance table, criterion 5); finding: the serial console, below |
+| M7 | `personal-values` check, README consumer first, this file, generic `rpi-check` | `af1122e`, `c92b2d8`, `8e67520` | done |
+| T7.5 | final whole-branch review (Opus, `.scratch/lib/final-review.md`) and its fixes: B1, S1–S4, N1–N11, one commit each, test first (`.scratch/lib/fix-report.md`) | `4c1bb7a` … `1f22ed6` (16), `1d1d98f` | done, **[M]**; summary below |
+| re-review | Opus re-reviewed the fixes (`.scratch/lib/fix-rereview.md`): SF1, L1–L3, N-a…N-e, one commit each, test first (`.scratch/lib/fix2-report.md`); N-b was fixed in T7.4 | `a5ef056` … `5f5d977` (8), N-b in the T7.4 commits | done, **[M]**; summary below |
+| T7.4 | final acceptance: the `eval-tools` fix, the `pull-smoke` flag, the full `nix flake check`, the invariant, the smokes on the final tree | the `eval-tools` and `pull-smoke` commits and the HANDOFF commit on top of `5f5d977` | done, table below |
 
 ### Acceptance of the library (spec §9)
 
-Filled by T7.4; what was known when M7 was written:
+Final tree: `lib/accept` at `cdb5d73` (= `main` `5f5d977` + the `eval-tools` fix `2b6323f`
++ `cdb5d73`). Evidence in `.scratch/lib/logs/` (details and the failed attempts:
+`.scratch/lib/accept-report.md`).
 
 | # | criterion | result | evidence |
 |---|---|---|---|
-| 1 | `nix flake check`; no personal value in library code | `personal-values` **[V]** green; the full `nix flake check` is T7.4 | `.scratch/lib/logs/m7-*` |
-| 2 | a template instance evaluates and builds its image; default DHCP, port 22, radios off | evaluation **[M]** (`eval-template`) and spikes S2/S3 **[V]**; image and boot: boot-smoke (M6, T7.4) | `.scratch/lib/logs/s2-s3.md` |
-| 3 | neptun derivation diff equals the expected list | **[V]** per task (I1 empty, I2 one leaf); the final run is T7.4. **M7 edited `rpi-pull.sh`** (`--host` is required now), which changes the expected I2 list, see below | `.scratch/lib/logs/m7-invariant.txt` |
-| 4 | CI green on `main` without a cache, summary per host, notice about the skipped publish | **open, manual**: the user pushes (§4) | |
-| 5 | boot-smoke (template default host), deploy-smoke, pull-smoke | M6 / T7.4 | |
-| 6 | README follows spec §8 | written in that order (M7); human review in T7.5 | |
+| 1 | `nix flake check`; no personal value in library code | **[V]** `top && nix flake check --accept-flake-config -L` rc 0 in 94 s on the final tree: 30 checks incl. `rpi-host-vm`, `personal-values`; unit counts ci 479, deploy 609, pull 617, lib 25, drv-diff 22, all 0 failed; 17 eval checks. P14: every baseline check name is present, no count is lower | `logs/flake-check.log`, `logs/accept/p14-eval-counts.txt` (earlier tree `c2da48d`+fix: rc 0, 133 s, `logs/accept/flake-check-c2da48d.log`) |
+| 2 | a template instance evaluates and builds its image; default DHCP, port 22, radios off | **[V]** `eval-template` (15 assertions), spikes S2/S3, and boot-smoke below: the template's image built and booted, DHCP lease, sshd on port 22, `pi` logged in | `logs/s2-s3.md`, `logs/accept/boot-smoke-final.txt` |
+| 3 | neptun derivation diff equals the expected list | **[V]** I1 (pull off): empty, drvPath identical to the baseline (`30jpnvj5kkyvd0jrpw9xzbqi8fdh7z1g`); I2 (test cache, pull on): exactly `rpi-pull env:installPhase` and `rpi-pull inputSrcs` (`expect/I2.m7.txt`, the M7 `--host` change), nothing unexpected, no difference vs the M7 snapshot | `logs/final-invariant.txt` (earlier tree: `logs/accept/final-invariant-c2da48d.txt`) |
+| 4 | CI green on `main` without a cache, summary per host, notice about the skipped publish | **open, manual**: the user pushes `main` and watches the first run (§4) | |
+| 5 | boot-smoke (template default host), deploy-smoke, pull-smoke | **[V]** all three PASS on the final tree, one at a time, from a clean committed worktree: boot-smoke 661 s (`state=running`), deploy-smoke 706 s, pull-smoke 660 s (seq 1 applied by switch, foreign-key seq 2 refused with exit 32). First attempts failed for reasons outside the code, see the next paragraph | `logs/accept/boot-smoke-final.txt`, `deploy-smoke-final.txt`, `pull-smoke-final.txt` |
+| 6 | README follows spec §8 | written in that order (M7), read by the reviewer in T7.5 (no finding on the order) | `.scratch/lib/final-review.md` |
+
+**The smokes' flaky attempts** (all rerun, none a code failure; logs
+`logs/accept/*-FAIL.*`): qemu's `sdhost` model times out under I/O
+(`timeout waiting for hardware interrupt`, the guest's FAT/ext4 goes read-only
+or hangs): deploy-smoke try 1 (host load) and pull-smoke try 3 (idle host, the
+guest hung during the `nix copy` of the closure, killed after 12 min); boot-smoke
+try 1 died in the image build with `libfaketime … Exec format error` (a
+transient binfmt blip, the same build ran afterwards); pull-smoke try 1 failed
+because nix's automatic GC (`min-free`) deleted the unrooted `smoke-evil`
+toplevel, so rerun with GC roots (§6). The earlier tree (`62c44d4`, before the
+re-review fixes) also passed boot-smoke (1045 s) and deploy-smoke (1186 s):
+`logs/accept/boot-smoke-c2da48d.txt`, `deploy-smoke-c2da48d.txt`.
+
+**The `eval-tools` fix** (T7.4, `2b6323f`): `ciShips` checked files in
+`rpi-ci`'s `src` store path, which is not valid on the first
+`nix flake check --no-build` after a `ci/` change. `ci/package.nix` now exposes
+`passthru.fileset`, and the check lists it with `lib.fileset.toList` (RED/GREEN
+and a planted missing file: `logs/accept/ciships-*.txt`).
 
 **Expected differences of the refactor invariant** (`.scratch/lib/expect/`):
 I1 (neptun as committed, pull off): none. I2 (with a test cache, pull on) until
@@ -78,7 +101,8 @@ later is exactly `rpi-pull\tenv:installPhase` and `rpi-pull\tinputSrcs`
 `I2.txt` reports `MISSING: unit-rpi-pull.service` against the M7 tree). The
 pointer URL change of the unit is then checked by a diff of its text with store
 hashes normalised (`.scratch/lib/logs/m7-unit-text-diff.txt`: only
-`nixos/deploy/neptun.json` → `deploy/neptun.json`).
+`nixos/deploy/neptun.json` → `deploy/neptun.json`). The final tree (T7.4, after
+the review fixes) shows exactly the `I2.m7.txt` list and an empty I1.
 
 ### Notes from the milestones (deviations that matter)
 
@@ -94,11 +118,14 @@ hashes normalised (`.scratch/lib/logs/m7-unit-text-diff.txt`: only
   with one host `rpi-ci commit --artifacts DIR` treats a DIR that holds
   `flake.lock` or `deploy/` as the only artifact (tests k7, k7b). The commit job
   downloads to `${{ runner.temp }}/artifacts`.
-- **eval-tools quirk (M1, `tests/eval/tools.nix`):** the first
-  `nix flake check --no-build` after changes in `ci/` can fail with
-  `path '…-source' is not valid` (`builtins.pathExists` on a fileset source that
-  is not in the store yet); it passes after `chk eval-tools`. A fix would test
-  membership through `lib.fileset`.
+- **eval-tools quirk (found in M1, fixed in T7.4):** the first
+  `nix flake check --no-build` after changes in `ci/` failed with
+  `path '…-source' is not valid` (`builtins.pathExists` on the store path of
+  rpi-ci's `lib.fileset.toSource`, which `--no-build` does not realise). The
+  package now exposes `passthru.fileset` and `tests/eval/tools.nix` asks
+  `lib.fileset.toList` (commit "eval-tools: check rpi-ci's fileset, not the store
+  path of its src"; red/green and a planted missing file in
+  `.scratch/lib/logs/accept/ciships-*.txt`).
 - `nix flake init -t` needs `--accept-flake-config` inside the agent sandbox only
   (unreadable trusted-settings); devenv in nixpkgs is 2.1.2 (the plan said 2.4).
 - M7: `rpi-lib.sh` defaults are the options' defaults (`rpi`, `root@rpi`, 22);
@@ -109,6 +136,88 @@ hashes normalised (`.scratch/lib/logs/m7-unit-text-diff.txt`: only
   `tests/ci-unit.sh` and `tests/pull-unit.sh` (fixture host and store paths),
   `tests/deploy-unit.sh` (store paths, `--attr neptun`), `tests/lib-unit.sh`,
   `tests/eval/{pi-config,pull-update,image,lib}.nix`, the smoke tests (M6).
+
+### M6 finding: no login prompt on the serial console in qemu (check on hardware)
+
+In qemu's raspi3b the userspace console (systemd status lines, `rpi login:`) is
+only on the framebuffer (`getty@tty1`); the serial log ends with the kernel
+messages (the PL011 UART is claimed by Bluetooth there). So boot-smoke asserts
+the SSH banner on port 22, a login as `pi` (host name, DHCP lease,
+`getty@tty1` active, `is-system-running` running or degraded) and keeps the
+framebuffer screenshot informational. **[?]** Likely reason: direct kernel boot
+skips the GPU firmware, so `config.txt` and the `disable-bt` overlay that the
+headless profile sets (Bluetooth off, the default) are not applied and the
+PL011 stays with Bluetooth. On the Pi with Bluetooth off the GPIO UART should
+give the serial login the "neptun" checklist (§5) expects: **worth
+checking on hardware** (115200 8N1 on GPIO 14/15), and with
+`rpi.bluetooth.enable = true` expect no PL011 console.
+
+### Final review (T7.5) and its fixes
+
+Opus reviewed `4577aa2..8e67520` (`.scratch/lib/final-review.md`): one blocker,
+four should-fix, eleven nits. All were fixed, one commit each, test first (RED
+seen, then GREEN; `.scratch/lib/fix-report.md`, logs in `.scratch/lib/logs/fix/`);
+none was skipped. Decisions that matter:
+
+- **B1 Wi-Fi secrets file** (`4c1bb7a`): NixOS 26.05's wpa_supplicant runs hardened
+  as the user `wpa_supplicant`, so a root-owned 0600 file was unreadable: no PSK,
+  no association. The module's tmpfiles rule is `z <secretsFile> 0600 wpa_supplicant
+  wpa_supplicant -` (owner = the service's `User`/`Group`, **0600, not 0640 root:group**:
+  members of the group `wpa_supplicant`, i.e. `networking.wireless.userControlled`,
+  could otherwise read every PSK). `rpi-deploy secrets` writes the file 0600 and runs
+  `systemd-tmpfiles --create` on the Pi; `flash --wifi-env` leaves it root 0600 and the
+  first boot's tmpfiles hands it over (the user does not exist on the card yet).
+  Still **[?]** on hardware (checklist "Wi-Fi and Bluetooth").
+- **S2** (`f32a340`): `ConditionPathExists = secretsFile` on `wpa_supplicant` and
+  `wpa_supplicant-<if>`: Wi-Fi switched on before the secrets exist is skipped instead of
+  failing the activation (exit 14 / pull exit 36); `secrets` uses a guarded `restart`
+  (`try-restart` does not start a failed unit).
+- **S1** (`dbec2e6`): the commit job could revert a `flake.lock` change pushed to `main`
+  during the build. The hosts job outputs `rev`, every build checks it out, and
+  `rpi-ci commit --base REV` (required with `--artifacts`) fails with `::error::` when
+  main's lock differs from REV's, before and after the rebase (tests k8, k9).
+- **S3 trust model** (`b8b3de5`, user decision): the consumer's weekly run used to update
+  its root input `rpi`, i.e. auto-follow our `main` and sign it with the consumer's key.
+  Now `rpi-ci build` updates only nixpkgs and nixos-raspberrypi (in a consumer the nested
+  inputs `rpi/nixpkgs`, `rpi/nixos-raspberrypi`; spike: nvmd keeps its own nixpkgs pin, so
+  its kernel stays cached; the exact target rule is refined by SF1 below). `rpi` moves only through the manual dispatch input
+  `update-library` or a local `nix flake update rpi`. The workflows build `rpi-ci` from the
+  committed lock (`$RUNNER_TEMP/rpi-ci`) before any lock update, so the cache signing key
+  and token only meet committed library code. Consequence: whoever can push to our `main`
+  is root on a consumer's pull-enabled Pi only after the consumer bumps `rpi`; spec §11 and
+  the READMEs say so.
+- **S4** (`755f9d6`): `RPI_TARGET`/`RPI_PORT` are ignored (and logged) when `--host` names a
+  host other than `$RPI_HOST` (L1 below: also when `RPI_HOST` is unset): no deploy of host B onto Pi A.
+- Nits: N1 comment, N2 secretspec once, N3 `rpi-ci pointer --name` (`--host` alias), N4
+  secretsFile directly below `/`, N5 internal `rpi.wifi.units` (`secrets` restarts
+  `wpa_supplicant-<if>`), N6 PSKs from an `env -0` snapshot, N7 Home Manager gets the
+  consumer's `specialArgs.inputs`, N8 template README `secretspec run`, N9 `RPI_HOST`
+  commented out in the example, N10 README (multi-host weekly run fails closed), N11
+  `modules/default.nix` header (nvmd's `nixos-raspberrypi` module argument).
+  neptun's toplevel stayed `30jpnvj5…` through all of them.
+
+### Re-review fixes (SF1, L1–L3, N-a…N-e)
+
+The re-review of the fixes above found one should-fix, three low findings and
+five nits (`.scratch/lib/fix2-report.md`; RED/GREEN logs in `.scratch/lib/logs/fix2/`):
+
+- **SF1** (`a5ef056`) corrects the S3 rule: a consumer's lock can hold nixpkgs and
+  nixos-raspberrypi as root inputs *and* as `rpi`'s own nodes (a `follows` is moved by
+  the root input, an own node is not). `rpi-ci build` now updates the root input if
+  present **and** `rpi/<x>` when `rpi`'s input is its own node; the kernel-miss fallback
+  updates every nixpkgs target, not one; the step summary lists the lock paths that
+  moved (`nixpkgs`, `rpi/nixpkgs`, …). Real-nix spike: `.scratch/lib/fix2/sf1-spike.txt`.
+- **L1** (`0911798`): docs aligned to the code: any `--host` while `RPI_HOST` is unset (even
+  the only host) ignores `RPI_TARGET`/`RPI_PORT`. Kept because it is predictable without
+  evaluating the host list and fails safe (S4 above).
+- **L2** (`8bfe1d2`): host info omits `wifi.units` on a library without the option, so
+  `rpi-deploy secrets` falls back to `wpa_supplicant`. **L3** (`e896cfc`): `secrets` says
+  whether writing the file (rc 91), the tmpfiles rule (92) or the restart (93) failed.
+- Nits: N-a README (when the tmpfiles rule runs: at boot, on a switch that changes it, after
+  `secrets`), **N-b** `tests/pull-smoke.sh` uses `ci/pointer.sh --name` (done in T7.4),
+  N-c `rpi.wifi.secretsFile` is checked at eval time like `rpi-deploy` does (absolute, no `..`),
+  N-d a kernel miss that drops `--update-library` is a warning and in the summary, N-e the
+  tmpfiles owner follows the unit's `User`/`Group` (root without hardening; refines B1).
 
 ### Earlier work (before the library)
 
@@ -335,7 +444,8 @@ The agent cannot do these (spec §10; the library plan's §10 coverage gaps):
    there, so move them before deleting the directory. `.rpi-build/` and
    `.rpi-build.log` at the repo root are artifacts of the old install flow:
    delete them and drop their two `.gitignore` lines. `.worktrees/lib-baseline`
-   goes away after the acceptance (T7.4).
+   is gone (removed in T7.4); the other `lib-*` worktrees and `lib/*` branches
+   (`G worktree remove`, `G branch -D`) are yours to prune once `main` is pushed.
 8. **Hooks**: `devenv shell` regenerates `.pre-commit-config.yaml`; the main
    tree's generated one still excludes `^nixos/tests/fixtures/` until then
    (worktrees use a copy with `^tests/fixtures/`).
@@ -345,6 +455,17 @@ The agent cannot do these (spec §10; the library plan's §10 coverage gaps):
     library default, key-only login); `hardware.enableAllHardware` kept for
     parity with the tested image; re-measure the closure size (§2, earlier
     acceptance) after the library change.
+11. **`devenv shell` outside the agent sandbox** (never run there: only the
+    parse and a module-function evaluation of `devenv.nix` are checked): in the
+    repository root and in a template instance, check that the shell starts,
+    `RPI_FLAKE` points at the root, `rpi-check`, `secretspec` and `cachix` are on
+    PATH, `devenv.local.nix` (copied from `devenv.local.nix.example`) is imported,
+    and `secretspec run -- nix run .#rpi-deploy -- secrets` finds its variables.
+    The shell also regenerates `.pre-commit-config.yaml` (item 8).
+12. **Hardware**: the checklist in §5 (Wi-Fi/Bluetooth incl. the B1 file owner,
+    a template host, the serial console of the M6 finding, neptun, CI pull). The
+    library's riskiest unverified parts are the Wi-Fi association and the
+    Bluetooth UART attach (plan A8), then the U-Boot reboot path.
 
 Open points (documented, not fixed):
 
@@ -464,7 +585,9 @@ Needs the Pi, a card ≥ 8 GiB, the LAN cable, ideally a 3.3 V USB-UART on GPIO
       `ssh-keygen -R '[192.168.100.20]:2222'` first if the old Pi's key is cached.
 - [ ] Headless config.txt took effect: `vcgencmd get_mem gpu` → `gpu=16M`;
       `dmesg | grep -i -E 'brcmfmac|hci_uart'` is empty; the serial console
-      (GPIO UART, 115200 8N1) shows kernel messages and a login prompt.
+      (GPIO UART, 115200 8N1) shows kernel messages and a login prompt (M6
+      finding, §2: in qemu the prompt is only on the framebuffer, so this is the
+      first real check; with Bluetooth on, expect no PL011 console).
 - [ ] Root fs expanded to the card (`df -h /`), `findmnt /` shows
       `noatime,lazytime,commit=60`, `/tmp` is tmpfs, `free -m` shows 512 MiB zram.
 - [ ] `rpi-deploy status` → `reboot pending: no`.
@@ -546,11 +669,24 @@ NIXOS_BOOT from the host). A rollback stays rolled back until the next CI build.
   the repo root (it copies `.worktrees/`, `.scratch/`, `.devenv/`): scratch flakes
   use `git+file://<root>`.
 - `nix flake check --no-build` needs a prior `top` (yazi IFD; `rpi-check` does it
-  for every host). After changes in `ci/` run `chk eval-tools` first (the eval-tools
-  quirk, §2).
+  for every host).
 - `cache.nixos.org` drops long transfers on this network (curl rc 56 after
   ~60 MB): retry with `--option download-attempts 10`, or mirror the NARs into
   a local `file://` binary cache.
+- **Disk and nix's auto-GC**: `nix.conf` has `min-free = 10 GiB`, `max-free = 50 GiB`;
+  when the store's disk dips below 10 GiB, the next build deletes every unrooted path
+  down to 50 GiB free. `tests/pull-smoke.sh` builds `smoke-next` and `smoke-evil` with
+  `--no-link` and uses `smoke-evil` half an hour later: in T7.4 a GC in between failed
+  the run (`path '…-nixos-system-neptun-…' is not valid`, `ci/pointer.sh failed for seq 2`).
+  Keep the disk below ~90 % before a smoke (`nix-collect-garbage`, old smoke dirs) or root
+  the toplevels while it runs (`nix-store --add-root … --indirect -r PATH`;
+  `.scratch/lib/accept/root-watch.sh`).
+- **qemu smokes on a loaded host** (load 30+ from other jobs): boot to sshd and the
+  bootloader's `copying firmware...` stretch (6–11 min instead of ~1), the guest's sdhost can
+  time out (`timeout waiting for hardware interrupt`, FAT mounted read-only) and
+  deploy-smoke dies with `Failed to install bootloader`; pull-smoke's single
+  `systemctl start rpi-pull` took 23 min. Rerun once on an idle host (the T7.4 runs and
+  their wall times are in the acceptance table).
 - The host's system `ssh_config` includes files plain `ssh` rejects in the
   sandbox (`Bad owner or permissions`): use `ssh -F /dev/null` (the smoke tests do).
 - python3 is not on PATH (use `node`, `perl`, or `nix run nixpkgs#…`); busybox comes
