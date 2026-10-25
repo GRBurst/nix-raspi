@@ -511,6 +511,49 @@ run_cmd g8h -- cpush g1 --help
 expect_exit "g8 --help" 0
 
 # =============================================================================
+# ci/gh.sh (annotations, groups, step summary; only under GitHub Actions)
+# =============================================================================
+# ghx ENV... -- CODE: run CODE in bash with ci/gh.sh sourced, under env ENV
+# (GITHUB_ACTIONS unset unless ENV sets it)
+ghx() {
+    local -a envs=()
+    while [[ "$1" != -- ]]; do envs+=("$1"); shift; done
+    shift
+    env -u GITHUB_ACTIONS "${envs[@]}" bash -c 'source "$1"; eval "$2"' _ "$CI_DIR/gh.sh" "$1"
+}
+GH_ALL='gh_notice m; gh_warning w; gh_error e f 3; gh_group t; echo inside; gh_endgroup; gh_summary <<<"x"'
+
+SUM="$T/gh1-summary.md"
+run_cmd gh1 -- ghx GITHUB_STEP_SUMMARY="$SUM" -- "$GH_ALL"
+expect_exit "gh1 helpers succeed outside GitHub Actions" 0
+expect_eq "gh1 no :: lines outside GitHub Actions" 0 "$(grep -c '^::' "$ALL")"
+expect_true "gh1 no step summary outside GitHub Actions" test ! -e "$SUM"
+expect_grep "gh1 notice -> 'rpi-ci: notice: m' on stderr" '^rpi-ci: notice: m$' "$ERR"
+expect_grep "gh1 warning -> 'rpi-ci: warning: w' on stderr" '^rpi-ci: warning: w$' "$ERR"
+expect_grep "gh1 error -> 'rpi-ci: error: f:3: e' on stderr" '^rpi-ci: error: f:3: e$' "$ERR"
+expect_eq "gh1 stdout has only the command's own output" inside "$(cat "$OUT")"
+run_cmd gh1f -- ghx GITHUB_ACTIONS=false GITHUB_STEP_SUMMARY="$SUM" -- "$GH_ALL"
+expect_eq "gh1 GITHUB_ACTIONS=false: no :: lines" 0 "$(grep -c '^::' "$ALL")"
+expect_true "gh1 GITHUB_ACTIONS=false: no step summary" test ! -e "$SUM"
+
+run_cmd gh2 -- ghx GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" -- "$GH_ALL"
+expect_exit "gh2 helpers succeed under GitHub Actions" 0
+expect_eq "gh2 annotations and groups on stderr, in order" \
+    "::notice::m ::warning::w ::error file=f,line=3::e ::group::t ::endgroup::" "$(xargs <"$ERR")"
+expect_eq "gh2 stdout has only the command's own output" inside "$(cat "$OUT")"
+expect_eq "gh2 gh_summary appends stdin to \$GITHUB_STEP_SUMMARY" x "$(cat "$SUM")"
+run_cmd gh2a -- ghx GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" -- 'gh_summary <<<"y"; gh_error e2'
+expect_eq "gh2 gh_summary appends (keeps earlier sections)" $'x\ny' "$(cat "$SUM")"
+expect_eq "gh2 gh_error without FILE" "::error::e2" "$(cat "$ERR")"
+run_cmd gh2u -- ghx GITHUB_ACTIONS=true -- 'gh_summary <<<"z"'
+expect_exit "gh2 no \$GITHUB_STEP_SUMMARY -> gh_summary does nothing" 0
+
+run_cmd gh3 -- ghx GITHUB_ACTIONS=true -- $'gh_notice "100% a\r\nb"; gh_error "x" "a,b:c" 7'
+expect_eq "gh3 escaping of %, CR and LF in messages" "::notice::100%25 a%0D%0Ab" "$(head -n1 "$ERR")"
+expect_eq "gh3 escaping of , and : in properties" "::error file=a%2Cb%3Ac,line=7::x" "$(sed -n 2p "$ERR")"
+expect_eq "gh3 one line per annotation" 2 "$(wc -l <"$ERR")"
+
+# =============================================================================
 # ci/rpi-ci.sh (dispatcher), ci/hosts.sh
 # =============================================================================
 run_cmd r1 -- bash "$CI_DIR/rpi-ci.sh" --help
