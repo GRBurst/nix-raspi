@@ -28,7 +28,7 @@
 #      cache key, then of smoke-evil signed with the foreign key (paths that
 #      are already there are skipped: only smoke-evil's own paths carry the
 #      foreign signature), compression none, Priority 10. The pointer is
-#      ci/pointer.sh --host neptun --seq 1 -> smoke-next. busybox httpd (from
+#      ci/pointer.sh --name neptun --seq 1 -> smoke-next. busybox httpd (from
 #      the flake's pinned nixpkgs) serves both on 127.0.0.1:PORT.
 #   5. Boot (tests/qemu-pi.sh), wait for sshd, log in, wait until it settled.
 #   6. Switch path: `systemctl start rpi-pull.service` in the guest -> exit 0;
@@ -224,7 +224,7 @@ stage "nix copy: closure of smoke-evil (foreign key; existing paths are skipped)
 grep -q '^Priority:' "$WWW/cache/nix-cache-info" || echo 'Priority: 10' >>"$WWW/cache/nix-cache-info"
 grep -qx 'Priority: 10' "$WWW/cache/nix-cache-info" || fail "cannot set Priority: 10 in $WWW/cache/nix-cache-info"
 # the pointer: GIT_CEILING_DIRECTORIES keeps pointer.sh from consulting this checkout's origin/main
-GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --host neptun --seq 1 --rev smoke --file "$WWW/neptun.json" "$NEXT" >/dev/null ||
+GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --name neptun --seq 1 --rev smoke --file "$WWW/neptun.json" "$NEXT" >/dev/null ||
   fail "ci/pointer.sh failed for seq 1"
 jq -c . "$WWW/neptun.json"
 
@@ -310,7 +310,7 @@ stage "seq 1 applied by switch: $NEXT"
 
 # 7: the tamper path: seq 2 points at a system signed by a foreign key
 stage "pointer seq 2 -> smoke-evil (foreign key); systemctl start rpi-pull.service"
-GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --host neptun --seq 2 --rev evil --file "$WWW/neptun.json" "$EVIL" >/dev/null ||
+GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --name neptun --seq 2 --rev evil --file "$WWW/neptun.json" "$EVIL" >/dev/null ||
   fail "ci/pointer.sh failed for seq 2"
 rc=0
 gssh timeout 1800 systemctl start rpi-pull.service 2>&1 | ts | tee "$WORK/pull-2.out" || rc=${PIPESTATUS[0]}
