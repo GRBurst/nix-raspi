@@ -160,6 +160,22 @@
             nixosModules.default = ./modules/default.nix;
             nixosModules.terminal = ./modules/profiles/terminal.nix;
 
+            # `nix flake init -t github:GRBurst/nix-raspi`: a consumer repo with one
+            # Pi host (templates/default; evaluated by tests/eval/template.nix).
+            templates.default = {
+              path = ./templates/default;
+              description = "Raspberry Pi 3 host on the nix-raspi library";
+              welcomeText = ''
+                A Raspberry Pi 3 host on the nix-raspi library.
+
+                  1. Add your SSH public key to rpi.admin.sshKeys in hosts/rpi.nix
+                  2. git init && git add -A
+                  3. nix run .#rpi-deploy -- image   (then: flash, deploy)
+
+                See README.md in this directory.
+              '';
+            };
+
             nixosConfigurations = {
               # Our Pi (hosts/neptun) through the library entry point, like
               # any consumer's host (lib/mkPi.nix: nvmd's nixosSystem with
@@ -354,6 +370,8 @@
                   pkgs = x86Pkgs;
                   args = {
                     inherit lib nixpkgs hostTestSystem;
+                    # the flake itself: tests/eval/template.nix evaluates the template with it as its `rpi` input
+                    rpiFlake = self;
                     rpi = self.nixosConfigurations.neptun;
                     rpiLib = self.lib;
                     nixosModules = self.nixosModules;
