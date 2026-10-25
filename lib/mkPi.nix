@@ -16,12 +16,16 @@
 # Module order (D6) mirrors the pre-library configuration (Pi base, rpi.*
 # modules, host, home-manager) so list options merge in the same order.
 # `specialArgs` default to `{ inherit inputs; }` (the library's inputs);
-# a consumer's specialArgs win. Library modules never read `inputs`.
+# a consumer's specialArgs win, also for Home Manager modules
+# (extraSpecialArgs.inputs). Library modules never read `inputs`.
 { inputs }:
 { modules, specialArgs ? { } }:
+let
+  args = { inherit inputs; } // specialArgs;
+in
 (inputs.nixos-raspberrypi.lib.nixosSystem {
   inherit (inputs) nixpkgs;
-  specialArgs = { inherit inputs; } // specialArgs;
+  specialArgs = args;
   modules = [
     inputs.nixos-raspberrypi.nixosModules.raspberry-pi-3.base
     inputs.self.nixosModules.default
@@ -33,7 +37,8 @@
     {
       home-manager.useGlobalPkgs = true;
       home-manager.useUserPackages = true;
-      home-manager.extraSpecialArgs = { inherit inputs; };
+      # the same `inputs` as the NixOS modules (a consumer's win)
+      home-manager.extraSpecialArgs = { inherit (args) inputs; };
       # nix-terminal options are Home Manager options, so the module belongs
       # in the HM scope (sharedModules), not in the NixOS list.
       home-manager.sharedModules = [ inputs.nix-terminal.homeModules.default ];

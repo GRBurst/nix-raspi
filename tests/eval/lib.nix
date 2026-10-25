@@ -11,6 +11,18 @@ let
     modules = [ minimal ({ marker, ... }: { environment.etc.m.text = marker; }) ];
     specialArgs.marker = "x";
   };
+  # N7: a consumer's specialArgs.inputs reach NixOS and Home Manager modules
+  withInputs = (rpiLib.mkPi {
+    modules = [ minimal ({ inputs, ... }: {
+      environment.etc.n.text = inputs.mine;
+      users.users.alice.isNormalUser = true;
+      home-manager.users.alice = { inputs, ... }: {
+        home.stateVersion = "26.05";
+        home.file.n.text = inputs.mine;
+      };
+    }) ];
+    specialArgs.inputs = { mine = "y"; };
+  }).config;
 in
 {
   "mkPi returns a nixosSystem marked rpiHost" =
@@ -22,6 +34,10 @@ in
 
   "mkPi passes specialArgs to modules" =
     withMarker.config.environment.etc.m.text == "x";
+
+  "a consumer's specialArgs.inputs reach NixOS and Home Manager modules" =
+    withInputs.environment.etc.n.text == "y"
+    && withInputs.home-manager.users.alice.home.file.n.text == "y";
 
   "mkPi imports the rpi.* modules" =
     t.options.rpi ? headless && t.options.rpi ? pull && t.options.rpi ? sdWear;
