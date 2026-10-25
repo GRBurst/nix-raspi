@@ -284,7 +284,9 @@ goes to your cache). They live in a file on the Pi,
 line per network), which wpa_supplicant reads (`pskRaw = "ext:VAR"`). Since
 NixOS 26.05 the daemon runs as the user `wpa_supplicant`, so a tmpfiles rule
 of the library makes the file `0600 wpa_supplicant:wpa_supplicant` at every
-boot and switch. You give the values to `rpi-deploy` through the environment of one
+boot, on a switch that adds or changes the rule, and right after `rpi-deploy
+secrets` writes it (a file you replace by hand stays root-owned, so
+unreadable for the daemon, until one of those). You give the values to `rpi-deploy` through the environment of one
 command; a [SecretSpec](https://secretspec.dev) provider (keyring, dotenv,
 1Password, … `secretspec config init`) is the intended source. Declare the
 variable in `secretspec.toml` (the repo has one, the template too), then:
