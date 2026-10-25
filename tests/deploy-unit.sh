@@ -47,16 +47,27 @@ export M_DEF=/nix/store/mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm-linux_rpi-bcm2711-6.18.
 export HOSTS_DEF='["rpi"]'
 # rl_hosts' eval: `nix eval ... FLAKE#nixosConfigurations --apply <filter>`
 LIST_RE='^nix eval .*#nixosConfigurations --apply '
+# Host info (rl_host_info) of every host; target and port defaults moved
+# from rpi-deploy into the host config (rpi.deploy.target, rpi.ssh.port), so
+# the status/deploy expectations derive them from here.
+export INFO_DEF='{"name":"rpi","target":"root@rpi","port":22,"cache":null,"wifi":{"enable":false,"networks":{},"secretsFile":"/var/lib/rpi/wireless.env"}}'
+INFO_TARGET="$(jq -r .target <<<"$INFO_DEF")" INFO_PORT="$(jq -r .port <<<"$INFO_DEF")"
+# rl_host_info's eval: `nix eval ... FLAKE#nixosConfigurations.HOST --apply <info>`
+INFO_RE='^nix eval .*#nixosConfigurations\.[^ ]+ --apply .*rpi\.deploy\.target'
 
 # nix: kernel/modules eval ($MOCK_K/$MOCK_M; MOCK_EVAL_RC fails it),
 # path-info --store (hit iff the path is in $MOCK_CACHED, default both;
 # MOCK_NETERR prints a network error), build --dry-run (cat $MOCK_DRY to
 # stderr; MOCK_DRY_RC fails it), build --out-link L (creates the image under
 # L), run (the pinned nixos-rebuild; logged only); host discovery: the
-# rl_hosts eval prints $MOCK_HOSTS (default $HOSTS_DEF; MOCK_HOSTS_RC fails it).
+# rl_hosts eval prints $MOCK_HOSTS (default $HOSTS_DEF; MOCK_HOSTS_RC fails it),
+# the rl_host_info eval $MOCK_INFO (default $INFO_DEF; MOCK_INFO_RC fails it).
 mock nix <<'EOF'
 k="${MOCK_K-$K_DEF}" m="${MOCK_M-$M_DEF}"
 case " $* " in
+*" eval "*"#nixosConfigurations."*" --apply "*"rpi.deploy.target"*)
+    if [[ -n "${MOCK_INFO_RC:-}" ]]; then echo "error: attribute 'deploy' missing" >&2; exit "$MOCK_INFO_RC"; fi
+    printf '%s\n' "${MOCK_INFO-$INFO_DEF}" ;;
 *" eval "*"#nixosConfigurations --apply "*)
     if [[ -n "${MOCK_HOSTS_RC:-}" ]]; then echo "error: attribute 'nixosConfigurations' missing" >&2; exit "$MOCK_HOSTS_RC"; fi
     printf '%s\n' "${MOCK_HOSTS-$HOSTS_DEF}" ;;
@@ -644,7 +655,7 @@ EOF
 # script (bash -s), sync. MOCK_SSH_FAIL: unreachable.
 mock ssh <<'EOF'
 if [[ -n "${MOCK_SSH_FAIL:-}" ]]; then
-    echo "ssh: connect to host neptun port 2222: Connection refused" >&2
+    echo "ssh: connect to host: port 22: Connection refused" >&2
     exit 255
 fi
 a=("$@")
@@ -727,7 +738,7 @@ reset_log
 run_cmd d1 -- dep
 expect_exit "d1 deploy succeeds" 0
 expect_eq "d1 default action switch, pinned argv" 1 \
-    "$(log_count "^nr-mock switch --no-reexec --flake $FL#rpi --target-host root@neptun\$")"
+    "$(log_count "^nr-mock switch --no-reexec --flake $FL#rpi --target-host $INFO_TARGET\$")"
 expect_true "d1 guards before nixos-rebuild" test "$(first_line ' --dry-run ')" -lt "$(first_line '^nr-mock ')"
 # nixos-rebuild's inner `nix build` of the flake must accept its nixConfig
 # (nvmd cachix) without an interactive prompt
@@ -739,7 +750,7 @@ for action in boot test; do
     run_cmd d2 -- dep "$action" --attr neptun
     expect_exit "d2 deploy $action succeeds" 0
     expect_eq "d2 $action passed through" 1 \
-        "$(log_count "^nr-mock $action --no-reexec --flake $FL#neptun --target-host root@neptun\$")"
+        "$(log_count "^nr-mock $action --no-reexec --flake $FL#neptun --target-host $INFO_TARGET\$")"
     no_poison "d2 $action"
 done
 
@@ -750,7 +761,7 @@ expect_eq "d3 no nixos-rebuild" 0 "$(log_count '^nr-mock ')"
 
 reset_log
 run_cmd d4 -- dep
-expect_grep "d4 NIX_SSHOPTS starts with -p 2222" "^NIX_SSHOPTS=-p 2222( |$)" "$MOCK_LOG"
+expect_grep "d4 NIX_SSHOPTS starts with -p <the host's rpi.ssh.port>" "^NIX_SSHOPTS=-p $INFO_PORT( |$)" "$MOCK_LOG"
 reset_log
 RPI_SSH_OPTS="-F cfg" run_cmd d4 -- dep --port 22 --target root@h
 expect_grep "d4 --port and RPI_SSH_OPTS reach NIX_SSHOPTS" "^NIX_SSHOPTS=-p 22 -F cfg$" "$MOCK_LOG"
@@ -891,7 +902,7 @@ reset_log
 RPI_FLAKE="$FL" run_cmd d9 -- rd deploy
 expect_exit "d9 deploy with the flake's pinned tool succeeds" 0
 expect_grep "d9 runs the flake's nixos-rebuild" \
-    "^nix run --accept-flake-config $FL#nixos-rebuild -- switch --no-reexec --flake $FL#rpi --target-host root@neptun$" "$MOCK_LOG"
+    "^nix run --accept-flake-config $FL#nixos-rebuild -- switch --no-reexec --flake $FL#rpi --target-host $INFO_TARGET$" "$MOCK_LOG"
 no_poison d9
 
 reset_log
@@ -918,7 +929,7 @@ expect_exit "d13 status failing after a good switch -> still 0" 0
 for action in switch boot test; do
     reset_log
     run_cmd d14 -- dep "$action"
-    expect_eq "d14 $action: one sync on the Pi" 1 "$(log_count '^ssh -p 2222 root@neptun sync$')"
+    expect_eq "d14 $action: one sync on the Pi" 1 "$(log_count "^ssh -p $INFO_PORT $INFO_TARGET sync\$")"
     expect_true "d14 $action: sync after nixos-rebuild, before the status" \
         test "$(first_line '^nr-mock ')" -lt "$(first_line ' sync$')" -a \
         "$(first_line ' sync$')" -lt "$(first_line '^ssh .* readlink ')"
@@ -938,7 +949,7 @@ expect_exit "s1 status succeeds" 0
 expect_grep "s1 current line" "^current: $T/sysA2$" "$OUT"
 expect_grep "s1 booted line" "^booted: $T/sysA$" "$OUT"
 expect_grep "s1 boot default line" "^default: $T/sysA2$" "$OUT"
-expect_grep "s1 default target and port" "^ssh -p 2222 root@neptun " "$MOCK_LOG"
+expect_grep "s1 target and port from the host config" "^ssh -p $INFO_PORT $INFO_TARGET " "$MOCK_LOG"
 expect_grep "s2 switched, same boot parts as booted -> reboot pending: no" "^reboot pending: no$" "$OUT"
 
 # s3 a reboot would change the system: the boot default is not running
@@ -972,7 +983,7 @@ expect_grep "s3 --target/--port/RPI_SSH_OPTS honoured" "^ssh -p 22 -F cfg pi@x "
 
 MOCK_SSH_FAIL=1 run_cmd s4 -- rd status
 expect_true "s4 ssh failure -> non-zero" test "$RC" -ne 0
-expect_grepf "s4 cannot reach root@neptun" "cannot reach root@neptun" "$ERR"
+expect_grepf "s4 cannot reach the target" "cannot reach $INFO_TARGET" "$ERR"
 expect_not_grep "s4 no half status" "reboot pending" "$OUT"
 
 
@@ -993,7 +1004,7 @@ expect_grepf "s5 status shows the applied pull seq" "pull applied: seq 7 $P7 (2d
 expect_grepf "s5 status shows the last run" "pull last run: success (exit 0) at 2026-10-25T05:12:03+01:00" "$OUT"
 expect_grep "s5 pull lines come after reboot pending" "reboot pending" "$OUT"
 expect_true "s5 pull state is the last section" test "$(grep -n '^reboot pending:' "$OUT" | cut -d: -f1)" -lt "$(grep -n '^pull applied:' "$OUT" | cut -d: -f1)"
-expect_grep "s5 query goes to the target" "^ssh -p 2222 root@neptun .*rpi-pull" "$MOCK_LOG"
+expect_grep "s5 query goes to the target" "^ssh -p $INFO_PORT $INFO_TARGET .*rpi-pull" "$MOCK_LOG"
 
 # a failed run is shown with its result and exit code
 export MOCK_PULL_OUT="LoadState=loaded
@@ -1021,6 +1032,113 @@ expect_grepf "s7 disabled" "pull: disabled" "$OUT"
 unset MOCK_PULL_OUT
 MOCK_PULL_FAIL=1 run_cmd s8 -- rd status
 expect_exit "s8 pull query failure -> status still 0" 0
-expect_grepf "s8 pull unknown" "pull: unknown (cannot query rpi-pull on root@neptun)" "$OUT"
+expect_grepf "s8 pull unknown" "pull: unknown (cannot query rpi-pull on $INFO_TARGET)" "$OUT"
 expect_grep "s8 booted/reboot lines still printed" "^reboot pending: " "$OUT"
+
+# =============================================================================
+# T3.2 target and port: --target > $RPI_TARGET > rpi.deploy.target,
+# --port > $RPI_PORT > rpi.ssh.port (host info only when one is missing)
+# =============================================================================
+pi_state sysA2 sysA sysA2
+unset RPI_TARGET RPI_PORT RPI_HOST
+
+reset_log
+run_cmd tp1 -- rd status
+expect_exit "tp1 status from the host config succeeds" 0
+expect_grep "tp1 ssh target and port from the host info" "^ssh -p $INFO_PORT $INFO_TARGET " "$MOCK_LOG"
+expect_eq "tp1 host info evaluated once" 1 "$(log_count "$INFO_RE")"
+expect_grep "tp1 info of the only Pi host" "^nix eval .*#nixosConfigurations\.rpi --apply " "$MOCK_LOG"
+reset_log
+MOCK_INFO='{"name":"garden","target":"admin@garden.lan","port":2200,"cache":null,"wifi":{"enable":false,"networks":{},"secretsFile":"/x"}}' \
+    run_cmd tp1 -- dep
+expect_exit "tp1 deploy from the host config succeeds" 0
+expect_grep "tp1 deploy --target-host from rpi.deploy.target" "^nr-mock switch .*--target-host admin@garden\.lan$" "$MOCK_LOG"
+expect_grep "tp1 deploy NIX_SSHOPTS from rpi.ssh.port" "^NIX_SSHOPTS=-p 2200$" "$MOCK_LOG"
+expect_grep "tp1 deploy status/sync on that target" "^ssh -p 2200 admin@garden\.lan sync$" "$MOCK_LOG"
+expect_eq "tp1 deploy evaluates the host info once" 1 "$(log_count "$INFO_RE")"
+
+tp2_ok() {
+    reset_log
+    RPI_TARGET=pi@envhost RPI_PORT=2201 rd status >"$OUT" 2>"$ERR" || return 1
+    grep -qE '^ssh -p 2201 pi@envhost ' "$MOCK_LOG" && ! grep -qE '^ssh -p '"$INFO_PORT $INFO_TARGET " "$MOCK_LOG" || return 1
+    reset_log
+    RPI_TARGET=pi@envhost RPI_PORT=2201 dep switch >"$OUT" 2>"$ERR" || return 1
+    grep -qE '^nr-mock switch .*--target-host pi@envhost$' "$MOCK_LOG" &&
+        grep -qE '^NIX_SSHOPTS=-p 2201$' "$MOCK_LOG" && grep -qE '^ssh -p 2201 pi@envhost sync$' "$MOCK_LOG"
+}
+expect_true "tp2 RPI_TARGET/RPI_PORT override the host config" tp2_ok
+reset_log
+RPI_TARGET=pi@envhost run_cmd tp2 -- rd status
+expect_grep "tp2 RPI_TARGET alone: port still from the host" "^ssh -p $INFO_PORT pi@envhost " "$MOCK_LOG"
+reset_log
+RPI_PORT=2201 run_cmd tp2 -- rd status
+expect_grep "tp2 RPI_PORT alone: target still from the host" "^ssh -p 2201 $INFO_TARGET " "$MOCK_LOG"
+reset_log
+RPI_TARGET='' RPI_PORT='' run_cmd tp2 -- rd status
+expect_grep "tp2 empty RPI_TARGET/RPI_PORT count as unset" "^ssh -p $INFO_PORT $INFO_TARGET " "$MOCK_LOG"
+
+reset_log
+RPI_TARGET=pi@envhost RPI_PORT=2201 run_cmd tp3 -- rd status --target pi@flag --port 2202
+expect_grep "tp3 --target/--port win over RPI_TARGET/RPI_PORT" "^ssh -p 2202 pi@flag " "$MOCK_LOG"
+expect_eq "tp3 flags -> no host info" 0 "$(log_count "$INFO_RE")"
+reset_log
+RPI_TARGET=pi@envhost RPI_PORT=2201 run_cmd tp3 -- dep --target pi@flag --port 2202
+expect_grep "tp3 deploy: --target wins" "^nr-mock switch .*--target-host pi@flag$" "$MOCK_LOG"
+expect_grep "tp3 deploy: --port wins" "^NIX_SSHOPTS=-p 2202$" "$MOCK_LOG"
+
+reset_log
+RPI_TARGET=pi@envhost RPI_PORT=2201 run_cmd tp4 -- rd status
+expect_eq "tp4 status with RPI_TARGET+RPI_PORT -> no rpi.deploy.target eval" 0 "$(log_count "$INFO_RE")"
+expect_eq "tp4 status with RPI_TARGET+RPI_PORT -> no host listing" 0 "$(log_count "$LIST_RE")"
+reset_log
+RPI_TARGET=pi@envhost RPI_PORT=2201 run_cmd tp4 -- dep
+expect_exit "tp4 deploy with RPI_TARGET+RPI_PORT succeeds" 0
+expect_eq "tp4 deploy with RPI_TARGET+RPI_PORT -> no rpi.deploy.target eval" 0 "$(log_count "$INFO_RE")"
+
+for sub in status deploy; do
+    reset_log
+    RPI_PORT=abc run_cmd tp5 -- rd "$sub" --flake "$FL"
+    expect_exit "tp5 $sub: RPI_PORT=abc -> exit 2" 2
+    expect_grepf "tp5 $sub: names RPI_PORT" "RPI_PORT" "$ERR"
+    expect_eq "tp5 $sub: RPI_PORT=abc -> no nix/ssh" 0 "$(log_count '^(nix|ssh|nr-mock) ')"
+done
+
+run_cmd tp6 -- rd --help
+expect_not_grep "tp6 usage no longer names neptun" "neptun" "$OUT"
+expect_not_grep "tp6 usage no longer names port 2222" "2222" "$OUT"
+expect_grepf "tp6 usage names rpi.deploy.target" "rpi.deploy.target" "$OUT"
+expect_grepf "tp6 usage names rpi.ssh.port" "rpi.ssh.port" "$OUT"
+expect_grepf "tp6 usage names RPI_TARGET" "RPI_TARGET" "$OUT"
+expect_grepf "tp6 usage names RPI_PORT" "RPI_PORT" "$OUT"
+expect_grep "tp6 status takes --host" "rpi-deploy status .*--host NAME" "$OUT"
+
+reset_log
+MOCK_INFO_RC=1 run_cmd tp7 -- rd status
+expect_exit "tp7 host info eval fails -> RL_E_BUILD" 13
+expect_grepf "tp7 shows nix's error" "attribute 'deploy' missing" "$ERR"
+expect_grepf "tp7 suggests --target/--port" "RPI_TARGET" "$ERR"
+expect_eq "tp7 -> no ssh" 0 "$(log_count '^ssh ')"
+reset_log
+MOCK_INFO_RC=1 run_cmd tp7 -- dep
+expect_exit "tp7 deploy: host info eval fails -> RL_E_BUILD" 13
+expect_eq "tp7 deploy -> Pi untouched" 0 "$(log_count '^(ssh|nr-mock) ')"
+for bad in '{"target":null,"port":22}' '{"target":"root@x","port":"22; x"}' 'not json'; do
+    reset_log
+    MOCK_INFO="$bad" run_cmd tp7 -- rd status
+    expect_exit "tp7 unusable host info ($bad) -> RL_E_BUILD" 13
+    expect_eq "tp7 unusable host info ($bad) -> no ssh" 0 "$(log_count '^ssh ')"
+done
+
+reset_log
+MOCK_HOSTS='["a","b"]' run_cmd tp8 -- rd status --host b
+expect_exit "tp8 status --host succeeds" 0
+expect_grep "tp8 status --host: info of that host" "^nix eval .* $PWD#nixosConfigurations\.b --apply " "$MOCK_LOG"
+expect_eq "tp8 status --host -> no host listing" 0 "$(log_count "$LIST_RE")"
+reset_log
+MOCK_HOSTS='["a","b"]' run_cmd tp8 -- rd status --flake /flk2 --attr b
+expect_grep "tp8 status --flake/--attr honoured" "^nix eval .* /flk2#nixosConfigurations\.b --apply " "$MOCK_LOG"
+reset_log
+MOCK_HOSTS='["a","b"]' run_cmd tp8 -- rd status
+expect_exit "tp8 status, several hosts, no target -> exit 2" 2
+expect_eq "tp8 several hosts -> no ssh" 0 "$(log_count '^ssh ')"
 summary

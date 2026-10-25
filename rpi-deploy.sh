@@ -19,7 +19,7 @@ Usage:
   rpi-deploy image [--out DIR] [--flake DIR] [--host NAME] [--max-builds N]
   rpi-deploy flash IMAGE DEVICE
   rpi-deploy deploy [switch|boot|test] [--host NAME] [--target USER@HOST] [--port N] [--flake DIR] [--max-builds N] [--force]
-  rpi-deploy status [--target USER@HOST] [--port N]
+  rpi-deploy status [--host NAME] [--target USER@HOST] [--port N] [--flake DIR]
 
   image    build config.system.build.sdImage of the flake's Pi system (after
            the cache and build guards) and print the image path and size
@@ -41,10 +41,14 @@ Usage:
 Host: --host NAME selects the flake's nixosConfigurations.NAME; default
   $RPI_HOST, else the flake's only Pi host (built with lib.mkPi); none or
   several -> exit 2. --attr NAME is a deprecated alias of --host.
-Defaults: --flake $RPI_FLAKE or the current directory, --target root@neptun,
-  --port 2222, --max-builds 500, --out the current directory.
+Target: --target > $RPI_TARGET > the host's rpi.deploy.target; port: --port >
+  $RPI_PORT > the host's rpi.ssh.port (the host is evaluated only when one of
+  the two is missing).
+Defaults: --flake $RPI_FLAKE or the current directory, --max-builds 500,
+  --out the current directory.
 Environment: RPI_FLAKE (default flake dir), RPI_HOST (default host),
-  RPI_SSH_OPTS (extra ssh options),
+  RPI_TARGET, RPI_PORT (default target and port), RPI_SSH_OPTS (extra ssh
+  options),
   RPI_NIXOS_REBUILD (nixos-rebuild to use instead of the flake's pinned one),
   RPI_LIB (path of rpi-lib.sh); test hooks RPI_ALLOW_NONBLOCK=1, RPI_SYSFS.
 Exit codes: 2 usage, 10 kernel not cached, 11 forbidden local build,
@@ -89,6 +93,37 @@ resolve_host() {
     fi
     [[ "$RL_ATTR" =~ ^[A-Za-z0-9_-]+$ ]] ||
         die_rc "$RL_E_USAGE" "invalid host name: '$RL_ATTR'"
+}
+
+# load_info: HOST_INFO = rl_host_info of the selected host (evaluated once).
+load_info() {
+    [[ -z "$HOST_INFO" ]] || return 0
+    resolve_host
+    HOST_INFO="$(rl_host_info "$RL_FLAKE" "$RL_ATTR")" ||
+        die_rc "$RL_E_BUILD" "cannot evaluate the host config of $(rl_conf_ref)" \
+            "(rpi.deploy.target, rpi.ssh.port, rpi.wifi); give --target and --port" \
+            "or set RPI_TARGET and RPI_PORT"
+}
+
+# info FILTER: a jq -r FILTER of HOST_INFO ('' for null/missing).
+info() { jq -r "($1) // empty" <<<"$HOST_INFO"; }
+
+# resolve_target: RL_TARGET = --target > $RPI_TARGET > rpi.deploy.target,
+# RL_SSH_PORT = --port > $RPI_PORT > rpi.ssh.port; the host info is evaluated
+# only when one of them is still missing.
+resolve_target() {
+    RL_TARGET="${TARGET_OPT:-${RPI_TARGET:-}}"
+    RL_SSH_PORT="${PORT_OPT:-${RPI_PORT:-}}"
+    [[ -n "$RL_TARGET" && -n "$RL_SSH_PORT" ]] && return 0
+    load_info
+    if [[ -z "$RL_TARGET" ]]; then
+        RL_TARGET="$(info .target)" && [[ -n "$RL_TARGET" ]] ||
+            die_rc "$RL_E_BUILD" "no rpi.deploy.target in the host config of $(rl_conf_ref)"
+    fi
+    if [[ -z "$RL_SSH_PORT" ]]; then
+        RL_SSH_PORT="$(info .port)" && [[ "$RL_SSH_PORT" =~ ^[0-9]+$ ]] ||
+            die_rc "$RL_E_BUILD" "no valid rpi.ssh.port in the host config of $(rl_conf_ref)"
+    fi
 }
 
 # --- subcommands -----------------------------------------------------------
@@ -267,6 +302,7 @@ check_downgrade() {
 do_deploy() {
     check_downgrade
     resolve_host
+    resolve_target
     log "guards: $(rl_conf_ref) (toplevel, at most $MAX_BUILDS local builds)"
     rl_guard toplevel "$MAX_BUILDS" || die_rc $? "guard failed; the Pi was not touched"
     log "nixos-rebuild $ACTION --target-host $RL_TARGET (port $RL_SSH_PORT)"
@@ -382,15 +418,16 @@ ACTION=""
 POSITIONAL=()
 RL_FLAKE="${RPI_FLAKE:-$PWD}"
 RL_ATTR="" # resolve_host
-RL_TARGET=root@neptun
-RL_SSH_PORT=2222
+RL_TARGET="" RL_SSH_PORT="" # resolve_target
+TARGET_OPT="" PORT_OPT=""     # --target, --port
+HOST_INFO=""                  # load_info
 
 # Options each subcommand accepts.
 declare -A ALLOWED=(
     [image]=" --out --flake --host --attr --max-builds "
     [flash]=" "
     [deploy]=" --target --port --flake --host --attr --max-builds --force "
-    [status]=" --target --port "
+    [status]=" --target --port --flake --host --attr "
 )
 
 parse_args() {
@@ -433,10 +470,10 @@ parse_args() {
                 echo "rpi-deploy: --attr is deprecated, use --host" >&2
                 RL_ATTR="$2"
                 ;;
-            --target) RL_TARGET="$2" ;;
+            --target) TARGET_OPT="$2" ;;
             --port | --max-builds)
                 [[ "$2" =~ ^[0-9]+$ ]] || usage_error "$opt needs a number, got '$2'"
-                if [[ "$opt" == --port ]]; then RL_SSH_PORT="$2"; else MAX_BUILDS="$2"; fi
+                if [[ "$opt" == --port ]]; then PORT_OPT="$2"; else MAX_BUILDS="$2"; fi
                 ;;
             esac
             shift 2
@@ -463,6 +500,10 @@ parse_args() {
         [[ ${#POSITIONAL[@]} -eq 0 ]] || usage_error "$SUBCOMMAND: unexpected argument: ${POSITIONAL[0]}"
         ;;
     esac
+    if [[ "${ALLOWED[$SUBCOMMAND]}" == *" --port "* && -z "$PORT_OPT" ]] &&
+        [[ -n "${RPI_PORT:-}" && ! "$RPI_PORT" =~ ^[0-9]+$ ]]; then
+        usage_error "RPI_PORT needs a number, got '$RPI_PORT'"
+    fi
 }
 
 main() {
@@ -471,7 +512,10 @@ main() {
     image) do_image ;;
     flash) do_flash "${POSITIONAL[0]}" "${POSITIONAL[1]}" ;;
     deploy) do_deploy ;;
-    status) do_status ;;
+    status)
+        resolve_target
+        do_status
+        ;;
     esac
 }
 
