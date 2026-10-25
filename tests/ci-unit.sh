@@ -440,31 +440,108 @@ MOCK_CACHE_NAME=$'evil\ntop=/nix/store/x' run_cmd c3 -- bash "$CI_DIR/cache-name
 expect_exit "c3 a name that is not a cachix name -> exit 1" 1
 expect_eq "c3 stdout empty" "" "$(cat "$OUT")"
 
+# --- T4.3 ci/publish.sh: the cache comes from rpi.pull.cache (host info).
+# Old u1-u3 became pb4/pb5 (the CLI changed from positional `CACHE TOP` to
+# --host/--top: the cache is per host now).
+publish() { bash "$CI_DIR/publish.sh" --flake "$T/b" "$@"; }
+export CACHIX_AUTH_TOKEN=tok CACHIX_SIGNING_KEY=sig
+
 reset_log
-run_cmd u1 -- bash "$CI_DIR/publish.sh" c "$TOP"
-expect_exit "u1 publish" 0
-expect_eq "u1 pushes the closure" 1 "$(log_count "^cachix push c $TOP\$")"
-expect_eq "u1 pins neptun, keeping 4 revisions" 1 \
-    "$(log_count "^cachix pin c neptun $TOP --keep-revisions 4\$")"
-expect_true "u1 push before pin" \
+run_cmd pb1 -- env -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY bash "$CI_DIR/publish.sh" --flake "$T/b" --host neptun --top "$TOP"
+expect_exit "pb1 no cache -> notice, published=false, rc 0" 0
+expect_eq "pb1 stdout is published=false" "published=false" "$(cat "$OUT")"
+expect_grepf "pb1 notice names the host" \
+    "rpi-ci: notice: no cache configured for neptun: built and tested, not published" "$ERR"
+expect_eq "pb1 no cachix call" 0 "$(log_count '^cachix')"
+expect_eq "pb1 the host info of --host" 1 \
+    "$(log_count "^nix eval --accept-flake-config --json $T/b#nixosConfigurations\.neptun --apply ")"
+reset_log
+GITHUB_ACTIONS=true run_cmd pb1g -- publish --host neptun --top "$TOP"
+expect_eq "pb1 under GitHub Actions: ::notice::" \
+    "::notice::no cache configured for neptun: built and tested, not published" "$(grep '^::' "$ERR")"
+expect_exit "pb1 under GitHub Actions: rc 0" 0
+
+for v in CACHIX_AUTH_TOKEN CACHIX_SIGNING_KEY; do
+    for how in unset empty; do
+        reset_log
+        if [[ "$how" == unset ]]; then e=(env -u "$v"); else e=(env "$v="); fi
+        MOCK_INFO="$(info_cache neptun)" GITHUB_ACTIONS=true \
+            run_cmd "pb2 $v $how" -- "${e[@]}" bash "$CI_DIR/publish.sh" --flake "$T/b" --host neptun --top "$TOP"
+        n=pb2; [[ "$v" == CACHIX_SIGNING_KEY ]] && n=pb3
+        expect_exit "$n $v $how -> rc 1" 1
+        expect_grep "$n missing $v -> error naming it ($how)" "^::error::$v is not set" "$ERR"
+        expect_eq "$n $v $how -> no cachix call" 0 "$(log_count '^cachix')"
+        expect_not_grep "$n $v $how -> no published=" "published=" "$OUT"
+    done
+done
+reset_log
+MOCK_INFO="$(info_cache neptun)" run_cmd pb3b -- env -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY \
+    bash "$CI_DIR/publish.sh" --flake "$T/b" --host neptun --top "$TOP"
+expect_exit "pb3 both secrets missing -> rc 1" 1
+expect_grepf "pb3 both missing: names CACHIX_AUTH_TOKEN" "CACHIX_AUTH_TOKEN is not set" "$ERR"
+expect_grepf "pb3 both missing: names CACHIX_SIGNING_KEY" "CACHIX_SIGNING_KEY is not set" "$ERR"
+
+reset_log
+MOCK_INFO="$(info_cache neptun)" run_cmd pb4 -- publish --host neptun --top "$TOP"
+expect_exit "pb4 cache and secrets -> published" 0
+expect_eq "pb4 stdout is exactly published=true (cachix output goes to stderr)" "published=true" "$(cat "$OUT")"
+expect_eq "pb4 pushes the closure to the host's cache" 1 "$(log_count "^cachix push neptun-x $TOP\$")"
+expect_eq "pb4 pins it as the system name, keeping 4 revisions" 1 \
+    "$(log_count "^cachix pin neptun-x neptun $TOP --keep-revisions 4\$")"
+expect_true "pb4 push before pin" \
     test "$(first_line '^cachix push')" -lt "$(first_line '^cachix pin')"
-expect_eq "u1 stdout empty (cachix output goes to stderr)" "" "$(cat "$OUT")"
+reset_log
+MOCK_INFO="$(info_cache garden-pi garden-cache)" run_cmd pb4n -- publish --host garden --top "$TOP"
+expect_eq "pb4 pin name = system.name (garden-pi), cache = its rpi.pull.cache" 1 \
+    "$(log_count "^cachix pin garden-cache garden-pi $TOP --keep-revisions 4\$")"
 
 reset_log
-MOCK_PUSH_RC=1 run_cmd u2 -- bash "$CI_DIR/publish.sh" c "$TOP"
-expect_true "u2 push failure -> non-zero" test "$RC" -ne 0
-expect_eq "u2 push failure -> no pin" 0 "$(log_count '^cachix pin')"
+MOCK_INFO="$(info_cache neptun)" MOCK_PUSH_RC=1 run_cmd pb5 -- publish --host neptun --top "$TOP"
+expect_true "pb5 push failure -> non-zero" test "$RC" -ne 0
+expect_eq "pb5 push failure -> no pin" 0 "$(log_count '^cachix pin')"
+expect_not_grep "pb5 push failure -> no published=" "published=" "$OUT"
+reset_log
+MOCK_INFO="$(info_cache neptun)" MOCK_PIN_RC=1 run_cmd pb5p -- publish --host neptun --top "$TOP"
+expect_true "pb5 pin failure -> non-zero" test "$RC" -ne 0
+expect_not_grep "pb5 pin failure -> no published=" "published=" "$OUT"
 
 reset_log
-MOCK_PIN_RC=1 run_cmd u3 -- bash "$CI_DIR/publish.sh" c "$TOP"
-expect_true "u3 pin failure -> non-zero" test "$RC" -ne 0
-
+MOCK_INFO="$(info_cache neptun 'Bad.Name')" run_cmd pb6 -- publish --host neptun --top "$TOP"
+expect_exit "pb6 cache name not a Cachix name -> 1" 1
+expect_eq "pb6 no cachix call" 0 "$(log_count '^cachix')"
 reset_log
-run_cmd u4 -- bash "$CI_DIR/publish.sh" c
-expect_exit "u4 missing TOP -> usage" 2
-expect_eq "u4 nothing pushed" 0 "$(log_count '^cachix')"
-run_cmd u4h -- bash "$CI_DIR/publish.sh" --help
-expect_exit "u4 --help" 0
+MOCK_INFO_RC=1 run_cmd pb6i -- publish --host neptun --top "$TOP"
+expect_exit "pb6 host info eval error -> 13" 13
+expect_eq "pb6 host info eval error: no cachix call" 0 "$(log_count '^cachix')"
+
+SUM="$T/pb-sum.md"
+rm -f "$SUM"
+GITHUB_STEP_SUMMARY="$SUM" MOCK_INFO="$(info_cache neptun)" run_cmd pb-sum0 -- publish --host neptun --top "$TOP"
+expect_true "pb-sum outside GitHub Actions: no summary" test ! -e "$SUM"
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" MOCK_INFO="$(info_cache neptun)" \
+    run_cmd pb-sum -- publish --host neptun --top "$TOP"
+expect_grep "pb-sum section ## <host>: publish" '^## neptun: publish$' "$SUM"
+expect_grep "pb-sum names the cache" 'neptun-x' "$SUM"
+expect_grep "pb-sum paths pushed and closure size" '3 paths.*1\.2 GiB' "$SUM"
+expect_grep "pb-sum pin" 'pinned.*neptun' "$SUM"
+expect_grep "pb-sum push log in a group" '^::group::push neptun' "$ERR"
+rm -f "$SUM"
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" run_cmd pb-sum-skip -- publish --host neptun --top "$TOP"
+expect_grep "pb-sum no cache -> skipped with the reason" \
+    '^- skipped: no cache configured \(rpi\.pull\.cache\)' "$SUM"
+expect_grep "pb-sum no cache: section" '^## neptun: publish$' "$SUM"
+
+for args in "--host neptun" "--top $TOP" "--host neptun --top" "--host neptun --top $TOP x"; do
+    reset_log
+    # shellcheck disable=SC2086 # word-split on purpose
+    run_cmd pb7 -- publish $args
+    expect_exit "pb7 usage ($args) -> 2" 2
+    expect_eq "pb7 usage ($args): nothing pushed" 0 "$(log_count '^cachix')"
+done
+run_cmd pb7h -- publish --help
+expect_exit "pb7 --help" 0
+expect_grepf "pb7 --help names --host" "--host" "$OUT"
+unset CACHIX_AUTH_TOKEN CACHIX_SIGNING_KEY
 
 # =============================================================================
 # T7.3 ci/pointer.sh
