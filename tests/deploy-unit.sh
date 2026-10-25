@@ -1236,7 +1236,7 @@ expect_grepf "sc1 creates the directory 0700 only if missing" "mkdir -p -m 700 /
 expect_grepf "sc1 applies the module's tmpfiles rule to the file" \
     "systemd-tmpfiles --create --prefix=/var/lib/rpi/wireless.env" "$MOCK_LOG"
 expect_true "sc1 order: dir, install, tmpfiles, restart" grep -qE \
-    'mkdir -p -m 700 /var/lib/rpi && install -m 600 /dev/stdin /var/lib/rpi/wireless.env && systemd-tmpfiles --create --prefix=/var/lib/rpi/wireless\.env && if systemctl cat wpa_supplicant\.service' "$MOCK_LOG"
+    'mkdir -p -m 700 /var/lib/rpi && install -m 600 /dev/stdin /var/lib/rpi/wireless.env .*systemd-tmpfiles --create --prefix=/var/lib/rpi/wireless\.env .*if systemctl cat wpa_supplicant\.service' "$MOCK_LOG"
 
 # sc12 the remote command itself, on a fake Pi (mkdir, install,
 # systemd-tmpfiles, systemctl are stubs logging to $T/pi.log;
@@ -1246,6 +1246,9 @@ for c in mkdir install systemd-tmpfiles systemctl; do
     printf '#!%s\necho "%s $*" >>"$PI_LOG"\n' "$BASH_BIN" "$c" >"$T/pi-bin/$c"
     chmod 755 "$T/pi-bin/$c"
 done
+# PI_INSTALL_RC / PI_TMPFILES_RC fail install / systemd-tmpfiles
+echo 'exit "${PI_INSTALL_RC:-0}"' >>"$T/pi-bin/install"
+echo 'exit "${PI_TMPFILES_RC:-0}"' >>"$T/pi-bin/systemd-tmpfiles"
 cat >>"$T/pi-bin/systemctl" <<'EOF'
 case "$1" in
 cat) [[ "${PI_UNIT:-0}" == 1 ]] ;;
@@ -1260,8 +1263,16 @@ for unit in 1 0; do
     expect_eq "sc12 unit=$unit: the remote command succeeds" 0 "$rc"
     expect_eq "sc12 unit=$unit: restarts it iff the unit exists" "$unit" "$(grep -c '^systemctl restart wpa_supplicant.service$' "$T/pi.log")"
 done
-rc=0; PI_UNIT=1 PI_RESTART_RC=1 pi_run || rc=$?
-expect_eq "sc12 a failing restart fails the remote command" 1 "$rc"
+# L3 (re-review): the remote command's exit code says which step failed
+# (91 write, 92 tmpfiles, 93 restart), so the message can
+: >"$T/pi.log"; rc=0; PI_UNIT=1 PI_RESTART_RC=1 pi_run || rc=$?
+expect_eq "sc12 a failing restart fails the remote command: 93" 93 "$rc"
+: >"$T/pi.log"; rc=0; PI_UNIT=1 PI_TMPFILES_RC=65 pi_run || rc=$?
+expect_eq "sc12 a failing systemd-tmpfiles: 92" 92 "$rc"
+expect_eq "sc12 a failing systemd-tmpfiles: no restart" 0 "$(grep -c '^systemctl restart' "$T/pi.log")"
+: >"$T/pi.log"; rc=0; PI_UNIT=1 PI_INSTALL_RC=1 pi_run || rc=$?
+expect_eq "sc12 a failing install: 91" 91 "$rc"
+expect_eq "sc12 a failing install: no tmpfiles, no restart" 0 "$(grep -cE '^(systemd-tmpfiles|systemctl restart)' "$T/pi.log")"
 expect_not_grep "sc1 never chmods an existing directory (install -d)" "install -d" "$MOCK_LOG"
 expect_eq "sc1 the host info is evaluated once" 1 "$(log_count "$INFO_RE")"
 leaked=$((leaked + $(leaks)))
@@ -1272,7 +1283,7 @@ reset_log
 MOCK_INFO="$(wifi_info "$NETS" true /wireless.env)" run_cmd sc13 -- rd secrets
 expect_exit "sc13 secretsFile /wireless.env succeeds" 0
 expect_grepf "sc13 mkdir gets / as its operand" \
-    "mkdir -p -m 700 / && install -m 600 /dev/stdin /wireless.env &&" "$MOCK_LOG"
+    "mkdir -p -m 700 / && install -m 600 /dev/stdin /wireless.env " "$MOCK_LOG"
 leaked=$((leaked + $(leaks)))
 
 # sc14 networking.wireless.interfaces: one unit per interface
@@ -1397,6 +1408,19 @@ reset_log
 MOCK_SSH_RC=255 run_cmd sc9 -- sec
 expect_exit "sc9 ssh failure -> RL_E_DEPLOY" 14
 expect_grepf "sc9 says writing failed" "/var/lib/rpi/wireless.env" "$ERR"
+expect_grepf "sc9 ssh failure: writing failed" "writing /var/lib/rpi/wireless.env on root@rpi failed" "$ERR"
+leaked=$((leaked + $(leaks)))
+# L3 (re-review): which step failed, from the remote exit code
+for m in "91:writing /var/lib/rpi/wireless.env on root@rpi failed" \
+    "92:/var/lib/rpi/wireless.env written on root@rpi, but applying its tmpfiles rule failed" \
+    "93:/var/lib/rpi/wireless.env written on root@rpi, but restarting wpa_supplicant failed"; do
+    reset_log
+    MOCK_SSH_RC="${m%%:*}" run_cmd sc9 -- sec
+    expect_exit "sc9 remote rc ${m%%:*} -> RL_E_DEPLOY" 14
+    expect_grepf "sc9 remote rc ${m%%:*}: says '${m#*:}'" "${m#*:}" "$ERR"
+    [[ "${m%%:*}" == 91 ]] ||
+        expect_not_grep "sc9 remote rc ${m%%:*}: not 'writing failed'" "wireless.env on root@rpi failed" "$ERR"
+done
 leaked=$((leaked + $(leaks)))
 
 reset_log

@@ -239,9 +239,11 @@ wifi_restart_cmd() {
 # user) and the next switch applies it. Then restart, not try-restart: the
 # unit is skipped while the file is missing (ConditionPathExists), and
 # try-restart would leave it stopped; only when the Pi has the unit (Wi-Fi
-# deployed), so `secrets` may run before or after the deploy.
+# deployed), so `secrets` may run before or after the deploy. The remote
+# exit code names the step that failed (re-review L3): 91 write,
+# 92 tmpfiles, 93 restart (anything else, e.g. ssh's 255: the write).
 do_secrets() {
-    local file dir content restart
+    local file dir content restart rc=0
     load_info
     file="$(wifi_secrets_file)" || exit
     restart="$(wifi_restart_cmd)" || exit
@@ -252,8 +254,16 @@ do_secrets() {
     log "writing $file (600) on $RL_TARGET (port $RL_SSH_PORT)"
     # \n: $(...) dropped the last line's newline
     printf '%s\n' "$content" |
-        rl_ssh "mkdir -p -m 700 $dir && install -m 600 /dev/stdin $file && systemd-tmpfiles --create --prefix=$file && $restart" ||
-        die_rc "$RL_E_DEPLOY" "writing $file on $RL_TARGET failed"
+        rl_ssh "mkdir -p -m 700 $dir && install -m 600 /dev/stdin $file || exit 91; systemd-tmpfiles --create --prefix=$file || exit 92; $restart || exit 93" ||
+        rc=$?
+    case "$rc" in
+    0) ;;
+    92) die_rc "$RL_E_DEPLOY" "$file written on $RL_TARGET, but applying its tmpfiles rule failed" \
+        "(systemd-tmpfiles --create --prefix=$file, see above); wpa_supplicant not restarted" ;;
+    93) die_rc "$RL_E_DEPLOY" "$file written on $RL_TARGET, but restarting wpa_supplicant failed" \
+        "(see above; on the Pi: systemctl status 'wpa_supplicant*')" ;;
+    *) die_rc "$RL_E_DEPLOY" "writing $file on $RL_TARGET failed (see above)" ;;
+    esac
     echo "secrets: $file written on $RL_TARGET; wpa_supplicant (re)started if the Pi has it"
 }
 
