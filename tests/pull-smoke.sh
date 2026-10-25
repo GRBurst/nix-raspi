@@ -14,7 +14,7 @@
 #      key (pull-smoke-1) and a foreign one (pull-smoke-evil-1). Kept in the
 #      work dir: a re-run reuses them and so the cached image.
 #   2. A scratch flake (path:) on top of this checkout adds three systems:
-#        smoke-image = rpi with the throwaway root key (the ONLY key) and
+#        smoke-image = neptun with the throwaway root key (the ONLY key) and
 #                      rpi.pull pointed at http://192.168.100.1:PORT (the
 #                      qemu host alias) with the throwaway cache key, timer
 #                      yearly (it must not fire during the test)
@@ -28,8 +28,8 @@
 #      cache key, then of smoke-evil signed with the foreign key (paths that
 #      are already there are skipped: only smoke-evil's own paths carry the
 #      foreign signature), compression none, Priority 10. The pointer is
-#      ci/pointer.sh --seq 1 -> smoke-next. busybox httpd (from the flake's
-#      pinned nixpkgs) serves both on 127.0.0.1:PORT.
+#      ci/pointer.sh --host neptun --seq 1 -> smoke-next. busybox httpd (from
+#      the flake's pinned nixpkgs) serves both on 127.0.0.1:PORT.
 #   5. Boot (tests/qemu-pi.sh), wait for sshd, log in, wait until it settled.
 #   6. Switch path: `systemctl start rpi-pull.service` in the guest -> exit 0;
 #      the guest runs smoke-next (current-system, system profile, marker,
@@ -152,10 +152,10 @@ cat >"$FLAKE/flake.nix" <<EOF
   };
   inputs.rpi.url = "git+file://$REPO";
   outputs = { self, rpi }: let
-    smoke-image = rpi.nixosConfigurations.rpi.extendModules {
+    smoke-image = rpi.nixosConfigurations.neptun.extendModules {
       modules = [ ({ lib, ... }: {
         users.users.root.openssh.authorizedKeys.keys = lib.mkForce [ "$PUB" ];
-        # configuration.nix sets the production pointer: override all of it
+        # neptun sets rpi.pull.repo (the production pointer URL follows from it): override the pointer, the cache and the timer
         rpi.pull = {
           pointerUrl = lib.mkForce "http://$HOST_IN_GUEST:$PORT/neptun.json";
           cacheUrl = lib.mkForce "http://$HOST_IN_GUEST:$PORT/cache";
@@ -192,7 +192,7 @@ fi
 
 # 3: the image of smoke-image through the real tool (cache + build guards), then the toplevels
 stage "rpi-deploy image (smoke-image)"
-"${DEPLOY[@]}" image --flake "$SF" --attr smoke-image --out "$WORK" 2>&1 | ts | tee "$WORK/deploy-image.log" |
+"${DEPLOY[@]}" image --flake "$SF" --host smoke-image --out "$WORK" 2>&1 | ts | tee "$WORK/deploy-image.log" |
   grep -E '^\[ *[0-9]+s\] (==>|image:|size:|rpi-deploy:|guard)' || true
 IMG="$(find "$WORK/result-rpi-image/sd-image/" -name '*.img.zst' 2>/dev/null | head -n1)"
 [[ -n "$IMG" ]] || fail "no image was built (see $WORK/deploy-image.log)"
@@ -224,7 +224,7 @@ stage "nix copy: closure of smoke-evil (foreign key; existing paths are skipped)
 grep -q '^Priority:' "$WWW/cache/nix-cache-info" || echo 'Priority: 10' >>"$WWW/cache/nix-cache-info"
 grep -qx 'Priority: 10' "$WWW/cache/nix-cache-info" || fail "cannot set Priority: 10 in $WWW/cache/nix-cache-info"
 # the pointer: GIT_CEILING_DIRECTORIES keeps pointer.sh from consulting this checkout's origin/main
-GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --seq 1 --rev smoke --file "$WWW/neptun.json" "$NEXT" >/dev/null ||
+GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --host neptun --seq 1 --rev smoke --file "$WWW/neptun.json" "$NEXT" >/dev/null ||
   fail "ci/pointer.sh failed for seq 1"
 jq -c . "$WWW/neptun.json"
 
@@ -310,7 +310,7 @@ stage "seq 1 applied by switch: $NEXT"
 
 # 7: the tamper path: seq 2 points at a system signed by a foreign key
 stage "pointer seq 2 -> smoke-evil (foreign key); systemctl start rpi-pull.service"
-GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --seq 2 --rev evil --file "$WWW/neptun.json" "$EVIL" >/dev/null ||
+GIT_CEILING_DIRECTORIES="$WORK" bash "$FLAKE_DIR/ci/pointer.sh" --host neptun --seq 2 --rev evil --file "$WWW/neptun.json" "$EVIL" >/dev/null ||
   fail "ci/pointer.sh failed for seq 2"
 rc=0
 gssh timeout 1800 systemctl start rpi-pull.service 2>&1 | ts | tee "$WORK/pull-2.out" || rc=${PIPESTATUS[0]}

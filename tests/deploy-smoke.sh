@@ -11,13 +11,13 @@
 #   1. ssh-keygen a throwaway ed25519 key (kept in the work dir: a re-run reuses
 #      it and so the cached image).
 #   2. A scratch flake (path:) on top of this checkout adds two systems:
-#        smoke-image = rpi with the throwaway key as root's ONLY key
+#        smoke-image = neptun with the throwaway key as root's ONLY key
 #        smoke-next  = smoke-image + /etc/rpi-smoke-marker ("next")
 #      Both share the kernel, so the cache guard and the build guard behave
 #      exactly as for the real Pi. The user's keys are not touched.
 #   3. `rpi-deploy image` builds smoke-image's SD image (guards included).
 #   4. Boot it (tests/qemu-pi.sh), wait for sshd behind the usb-net forward.
-#   5. `rpi-deploy deploy switch --attr smoke-next --target root@127.0.0.1
+#   5. `rpi-deploy deploy switch --host smoke-next --target root@127.0.0.1
 #      --port <fwd>` with the flake's pinned nixos-rebuild.
 #   6. Assert: the marker file reads "next", /run/current-system is smoke-next's
 #      toplevel, and `rpi-deploy status` says "reboot pending: no".
@@ -101,7 +101,7 @@ cat >"$FLAKE/flake.nix" <<EOF
   };
   inputs.rpi.url = "git+file://$REPO";
   outputs = { self, rpi }: let
-    smoke-image = rpi.nixosConfigurations.rpi.extendModules {
+    smoke-image = rpi.nixosConfigurations.neptun.extendModules {
       modules = [ ({ lib, ... }: {
         users.users.root.openssh.authorizedKeys.keys = lib.mkForce [ "$PUB" ];
       }) ];
@@ -127,7 +127,7 @@ fi
 
 # 3: build the image of smoke-image through the real tool (cache + build guards)
 stage "rpi-deploy image (smoke-image)"
-"${DEPLOY[@]}" image --flake "$SF" --attr smoke-image --out "$WORK" 2>&1 | ts | tee "$WORK/deploy-image.log" |
+"${DEPLOY[@]}" image --flake "$SF" --host smoke-image --out "$WORK" 2>&1 | ts | tee "$WORK/deploy-image.log" |
   grep -E '^\[ *[0-9]+s\] (==>|image:|size:|rpi-deploy:|guard)' || true
 IMG="$(find "$WORK/result-rpi-image/sd-image/" -name '*.img.zst' 2>/dev/null | head -n1)"
 [[ -n "$IMG" ]] || fail "no image was built (see $WORK/deploy-image.log)"
@@ -169,7 +169,7 @@ stage "logged in; running system: $BEFORE"
 # 5: deploy smoke-next with the flake's pinned nixos-rebuild
 stage "rpi-deploy deploy switch (smoke-next)"
 export RPI_SSH_OPTS="${SSH_OPTS[*]}"
-"${DEPLOY[@]}" deploy switch --flake "$SF" --attr smoke-next --target root@127.0.0.1 --port "$FWD" \
+"${DEPLOY[@]}" deploy switch --flake "$SF" --host smoke-next --target root@127.0.0.1 --port "$FWD" \
   2>&1 | ts | tee "$WORK/deploy-switch.log" || fail "rpi-deploy deploy switch failed (see $WORK/deploy-switch.log)"
 stage "deploy finished"
 
