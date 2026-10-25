@@ -92,6 +92,9 @@ in
 
   "SSH on port 22" = cfg.services.openssh.ports == [ 22 ];
 
+  "default network is DHCP" =
+    cfg.rpi.network.mode == "dhcp" && !(cfg.systemd.network.networks ? "10-lan-static");
+
   "kept defaults" =
     cfg.zramSwap.enable && cfg.zramSwap.memoryPercent == 50
     && gc.automatic && gc.dates == [ "weekly" ] && gc.options == "--delete-older-than 21d"
