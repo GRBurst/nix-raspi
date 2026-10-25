@@ -49,7 +49,8 @@ git -C "$T/seed" push -q "$T/origin.git" main
 clone() { rm -rf "${T:?}/$1"; git clone -q "$T/origin.git" "$T/$1"; }
 
 # --- mocks -------------------------------------------------------------------
-# nix: cache-name eval (${MOCK_CACHE_NAME-}), kernel/modules eval,
+# nix: host discovery eval (rl_hosts: ${MOCK_HOSTS-[]}, or rc MOCK_HOSTS_RC),
+# cache-name eval (${MOCK_CACHE_NAME-}), kernel/modules eval,
 # path-info per MOCK_CACHE (hit | always-miss | full-miss = miss only once
 # nixos-raspberrypi was updated in $MOCK_LOCK), flake update (appends its
 # argv to <--flake DIR>/flake.lock), build --dry-run (cat $MOCK_DRY to
@@ -57,6 +58,9 @@ clone() { rm -rf "${T:?}/$1"; git clone -q "$T/origin.git" "$T/$1"; }
 # hash convert (a fixed SRI hash).
 mock nix <<'EOF'
 case " $* " in
+*" eval "*" --apply "*)
+    if [[ -n "${MOCK_HOSTS_RC:-}" ]]; then echo "error: hosts eval failed" >&2; exit "$MOCK_HOSTS_RC"; fi
+    printf '%s\n' "${MOCK_HOSTS-[]}" ;;
 *" eval "*" --expr "*)
     echo "nix-cwd $PWD" >>"$MOCK_LOG"
     printf '%s' "${MOCK_CACHE_NAME-}" ;;
@@ -225,10 +229,7 @@ expect_eq "c2 nix eval --impure --raw --expr" 1 "$(log_count '^nix eval --impure
 expect_eq "c2 reads keys.nix of --flake DIR" 1 "$(log_count "^nix-cwd $T/b\$")"
 expect_eq "c2 the expression imports ./keys.nix" 1 "$(log_count 'import \./keys\.nix')"
 
-reset_log
-MOCK_CACHE_NAME=neptun-y run_cmd c2d -- bash "$CI_DIR/cache-name.sh"
-expect_eq "c2 DIR defaults to the flake next to ci/" 1 \
-    "$(log_count "^nix-cwd $(cd "$CI_DIR/.." && pwd)\$")"
+# (DIR defaults to the working directory since M1: r6 below.)
 
 MOCK_CACHE_NAME=$'evil\ntop=/nix/store/x' run_cmd c3 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b"
 expect_exit "c3 a name that is not a cachix name -> exit 1" 1
@@ -508,5 +509,78 @@ run_cmd g8b -- cpush g1 --message "$MSG"
 expect_exit "g8 no PATH -> usage" 2
 run_cmd g8h -- cpush g1 --help
 expect_exit "g8 --help" 0
+
+# =============================================================================
+# ci/rpi-ci.sh (dispatcher), ci/hosts.sh
+# =============================================================================
+run_cmd r1 -- bash "$CI_DIR/rpi-ci.sh" --help
+expect_exit "r1 --help" 0
+for c in hosts build publish pointer commit; do
+    expect_grep "r1 --help lists $c" "^  $c " "$OUT"
+done
+
+run_cmd r2 -- bash "$CI_DIR/rpi-ci.sh" frobnicate
+expect_exit "r2 unknown subcommand -> exit 2" 2
+expect_grepf "r2 names the unknown subcommand" "unknown command 'frobnicate'" "$ERR"
+run_cmd r2n -- bash "$CI_DIR/rpi-ci.sh"
+expect_exit "r2 no subcommand -> exit 2" 2
+expect_grepf "r2 no subcommand -> usage on stderr" "usage:" "$ERR"
+
+reset_log
+MOCK_HOSTS='["neptun"]' run_cmd r3 -- bash "$CI_DIR/rpi-ci.sh" hosts --flake "$T/b"
+expect_exit "r3 hosts -> exit 0" 0
+expect_eq "r3 hosts= is a JSON array" 'hosts=["neptun"]' "$(cat "$OUT")"
+expect_eq "r3 hosts are discovered in --flake DIR" 1 \
+    "$(log_count "^nix eval --accept-flake-config --json $T/b#nixosConfigurations --apply ")"
+MOCK_HOSTS='["b","a"]' run_cmd r3s -- bash "$CI_DIR/rpi-ci.sh" hosts --flake "$T/b"
+expect_eq "r3 several hosts, sorted" 'hosts=["a","b"]' "$(cat "$OUT")"
+MOCK_HOSTS_RC=1 run_cmd r3e -- bash "$CI_DIR/rpi-ci.sh" hosts --flake "$T/b"
+expect_true "r3 eval error -> exit != 0" test "$RC" -ne 0
+expect_not_grep "r3 eval error -> no hosts= line" "hosts=" "$OUT"
+expect_grepf "r3 eval error is passed through" "error: hosts eval failed" "$ERR"
+
+MOCK_HOSTS='[]' run_cmd r4 -- bash "$CI_DIR/rpi-ci.sh" hosts --flake "$T/b"
+expect_exit "r4 no Pi host -> exit 0" 0
+expect_eq "r4 no Pi host -> hosts=[]" 'hosts=[]' "$(cat "$OUT")"
+run_cmd r4h -- bash "$CI_DIR/hosts.sh" --help
+expect_exit "r4 hosts --help" 0
+run_cmd r4u -- bash "$CI_DIR/hosts.sh" --frob
+expect_exit "r4 hosts unknown argument -> usage" 2
+
+# r5: the dispatcher execs the script next to it with the arguments as
+# given; a copy of rpi-ci.sh next to stubs that log "<script> <arg>..."
+mkdir -p "$T/rci"
+cp "$CI_DIR/rpi-ci.sh" "$T/rci/"
+for s in hosts build publish pointer commit-push cache-name; do
+    printf 'printf "%%s" "%s.sh" >>"$MOCK_LOG"; printf " <%%s>" "$@" >>"$MOCK_LOG"; echo >>"$MOCK_LOG"; exit "${STUB_RC:-0}"\n' \
+        "$s" >"$T/rci/$s.sh"
+done
+reset_log
+run_cmd r5 -- bash "$T/rci/rpi-ci.sh" build --x
+expect_exit "r5 build -> exit 0" 0
+expect_eq "r5 build --x execs build.sh --x" "build.sh <--x>" "$(cat "$MOCK_LOG")"
+for m in hosts:hosts publish:publish pointer:pointer commit:commit-push cache-name:cache-name; do
+    reset_log
+    run_cmd "r5 ${m%%:*}" -- bash "$T/rci/rpi-ci.sh" "${m%%:*}" --message "a b" ''
+    expect_eq "r5 ${m%%:*} execs ${m#*:}.sh with its arguments" "${m#*:}.sh <--message> <a b> <>" "$(cat "$MOCK_LOG")"
+done
+STUB_RC=3 run_cmd r5rc -- bash "$T/rci/rpi-ci.sh" publish
+expect_exit "r5 the script's exit code is rpi-ci's" 3
+
+# r6: without --flake every CI script works on the working directory
+# (formerly the flake next to ci/; the tests above pass --flake or cd).
+clone r6
+reset_log
+MOCK_HOSTS='[]' run_cmd r6h -- bash -c 'cd "$1" && bash "$2/rpi-ci.sh" hosts' _ "$T/r6" "$CI_DIR"
+expect_eq "r6 hosts without --flake uses \$PWD" 1 \
+    "$(log_count "^nix eval --accept-flake-config --json $T/r6#nixosConfigurations --apply ")"
+reset_log
+MOCK_CACHE_NAME=neptun-y run_cmd r6c -- bash -c 'cd "$1" && bash "$2/cache-name.sh"' _ "$T/r6" "$CI_DIR"
+expect_eq "r6 cache-name without --flake uses \$PWD" 1 "$(log_count "^nix-cwd $T/r6\$")"
+reset_log
+MOCK_DRY="$HYB" run_cmd r6b -- bash -c 'cd "$1" && bash "$2/build.sh" --event push' _ "$T/r6" "$CI_DIR"
+expect_exit "r6 build without --flake -> exit 0" 0
+expect_eq "r6 build without --flake uses \$PWD" 1 \
+    "$(log_count "^nix build .*--print-out-paths $T/r6#nixosConfigurations\.rpi\.config\.system\.build\.toplevel\$")"
 
 summary

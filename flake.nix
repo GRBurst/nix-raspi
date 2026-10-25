@@ -236,6 +236,8 @@
             packages = forSystem [ "aarch64-linux" "x86_64-linux" ] (system: {
               rpi-deploy = rpiDeploy system;
               default = rpiDeploy system;
+              # CI entry point: `nix run .#rpi-ci -- <command>` (ci/package.nix)
+              rpi-ci = (pkgsFor system).callPackage ./ci/package.nix { };
             } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
               nixos-rebuild = (pkgsFor system).nixos-rebuild-ng;
             });

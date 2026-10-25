@@ -17,8 +17,7 @@
 # Exit: 0 | 2 usage | rl_guard's RL_E_* (10 cache, 11 forbidden, 12 too
 # many, 13 eval/build error).
 #
-# DIR defaults to the flake next to this script (the repository root);
-# RPI_LIB overrides the path of rpi-lib.sh.
+# DIR defaults to the working directory; RPI_LIB overrides the path of rpi-lib.sh.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +28,7 @@ usage: ci/build.sh [--event NAME] [--update-lock] [--flake DIR] [--max-builds N]
 
   --event NAME    GitHub event (default \$GITHUB_EVENT_NAME); schedule updates the lock
   --update-lock   update nixpkgs and nixos-raspberrypi in flake.lock first
-  --flake DIR     flake directory (default: $HERE/..)
+  --flake DIR     flake directory (default: the working directory)
   --max-builds N  build guard limit (default 500)
 
 stdout: top=<store path of the toplevel>
@@ -38,7 +37,7 @@ EOF
 
 die_usage() { echo "ci/build.sh: $1" >&2; usage >&2; exit 2; }
 
-event="${GITHUB_EVENT_NAME:-}" update_lock=0 dir="$HERE/.." max=500
+event="${GITHUB_EVENT_NAME:-}" update_lock=0 dir="$PWD" max=500
 while (($#)); do
     case "$1" in
     --event | --flake | --max-builds) (($# >= 2)) || die_usage "$1 needs a value" ;;&

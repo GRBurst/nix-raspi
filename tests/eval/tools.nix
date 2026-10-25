@@ -11,6 +11,9 @@ let
   x86 = nixpkgs.legacyPackages.x86_64-linux;
   binDir = p: builtins.unsafeDiscardStringContext "${lib.getBin p}/bin";
   install = pkgs.rpi-deploy.installPhase or "";
+  ci = pkgs.rpi-ci or { };
+  ciInstall = ci.installPhase or "";
+  ciShips = f: ci ? src && builtins.pathExists (ci.src + "/${f}");
 in
 {
   "apps.x86_64-linux.nixos-rebuild is the flake's 26.05 nixos-rebuild-ng" =
@@ -36,4 +39,16 @@ in
   "rpi-deploy wrapper PATH has jq and util-linux" =
     lib.hasInfix (binDir x86.jq) install
     && lib.hasInfix (binDir x86.util-linux) install;
+
+  # rpi-ci (`nix run .#rpi-ci -- <cmd>`, `rpi#rpi-ci` in consumers): the
+  # dispatcher and its scripts keep the repository layout under libexec, so
+  # ci/*.sh find ../rpi-lib.sh and rpi-lib.sh finds rpi-fp.sh next to it.
+  "rpi-ci package ships ci/*.sh, rpi-lib.sh and rpi-fp.sh" =
+    lib.hasInfix "libexec/rpi-ci" ciInstall
+    && lib.hasInfix "rpi-lib.sh" ciInstall
+    && lib.hasInfix "rpi-fp.sh" ciInstall
+    && lib.all ciShips [ "ci/rpi-ci.sh" "ci/hosts.sh" "ci/build.sh" "rpi-lib.sh" "rpi-fp.sh" ];
+
+  "rpi-ci wraps cachix, jq and git on PATH" =
+    lib.all (p: lib.hasInfix (binDir p) ciInstall) [ x86.cachix x86.jq x86.git ];
 }

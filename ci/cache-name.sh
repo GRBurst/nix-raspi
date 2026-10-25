@@ -7,22 +7,20 @@
 #
 # stdout: `name=<cache>` (for $GITHUB_OUTPUT); logs on stderr.
 # Exit: 0 | 1 cache not set (or not a Cachix name) | 2 usage.
-# DIR defaults to the flake next to this script (the repository root).
+# DIR defaults to the working directory.
 set -euo pipefail
-
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat <<EOF
 usage: ci/cache-name.sh [--flake DIR]
 
-  --flake DIR  directory holding keys.nix (default: $HERE/..)
+  --flake DIR  directory holding keys.nix (default: the working directory)
 
 stdout: name=<cache>
 EOF
 }
 
-dir="$HERE/.."
+dir="$PWD"
 while (($#)); do
     case "$1" in
     --flake)
