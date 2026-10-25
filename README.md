@@ -548,7 +548,8 @@ library code an update brought in:
       nvmd's cachix, no kernel/toolchain build, at most 500 local builds. A
       kernel cache miss after the lock update falls back to the committed lock
       plus a `nixpkgs`-only update, so an uncached nvmd `develop` HEAD does not
-      hold back the userspace fixes;
+      hold back the userspace fixes (an `update-library` dropped this way is a
+      warning and in the step summary);
    3. build the host's toplevel, then every `checks.aarch64-linux` of the
       flake (ours: shellcheck and the unit tests): a broken `rpi-pull.sh` or CI
       script is never published;

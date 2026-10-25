@@ -24,7 +24,8 @@
 #    A kernel cache miss right after a lock update falls back to the
 #    committed lock plus an update of the nixpkgs among them only and
 #    guards again, so an uncached nvmd kernel does not hold back that week's
-#    userspace fixes.
+#    userspace fixes. A dropped --update-library is a warning and in the
+#    summary.
 # 4. `nix build --no-link` of the host's toplevel; `df -h /`.
 # 5. `nix build` of every checks.<current system> of the flake (none: a
 #    notice), so nothing is published that fails its own tests.
@@ -85,7 +86,7 @@ source "${RPI_LIB:-$HERE/../rpi-lib.sh}"
 source "$HERE/gh.sh"
 
 lock="$dir/flake.lock" nl=$'\n'
-name="" top="" checks_line="" lock_state="as committed" revs_before=""
+name="" top="" checks_line="" lock_state="as committed" revs_before="" lib_dropped=0
 
 # lock_revs: "PATH REV" for the lock paths nixpkgs, nixos-raspberrypi and
 # rpi (root inputs) and rpi/nixpkgs, rpi/nixos-raspberrypi (rpi's inputs,
@@ -239,6 +240,12 @@ if ((rc == RL_E_CACHE && ${#updated[@]})); then
     else
         echo "ci/build.sh: kernel not cached after the update; building the committed lock" >&2
     fi
+    if [[ " ${updated[*]} " == *" rpi "* ]]; then
+        # an explicit request (the workflow's update-library input) that
+        # did not happen must not pass as a green "no change" (re-review N-d)
+        lib_dropped=1
+        gh_warning "update-library: rpi not updated: with it the kernel is not in the nixos-raspberrypi cache; built ${np[*]:+an update of ${np[*]} on }the committed lock"
+    fi
     rc=0
     guard || rc=$?
 fi
@@ -249,6 +256,7 @@ if ((update_lock || update_library)); then
         <(printf '%s\n' "$revs_before") <(lock_revs))"
     lock_state="${changes:+updated ($changes)}"
     lock_state="${lock_state:-update requested, no change}"
+    if ((lib_dropped)); then lock_state+=", update-library dropped (kernel not cached)"; fi
 fi
 ((rc == 0)) || fail "$rc" "$host: build guard failed: $(guard_reason "$rc")"
 

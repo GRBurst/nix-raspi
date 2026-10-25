@@ -446,11 +446,16 @@ for how in "--event workflow_dispatch --update-library" "--event schedule --upda
 done
 expect_grep "b-lib summary: lock diff names rpi" 'lock: updated.*rpi `lib1` → `rpi-new`' "$T/c-lib.md"
 reset_log
-MOCK_CACHE=full-miss run_cmd b-lib3 -- cbuild --event workflow_dispatch --update-library
+GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$T/c-lib3.md" MOCK_CACHE=full-miss \
+    run_cmd b-lib3 -- cbuild --event workflow_dispatch --update-library
 expect_exit "b-lib kernel miss after the rpi update -> builds the committed lock" 0
 expect_eq "b-lib fallback: lock as committed" "$CLOCK" "$(cat "$T/c/flake.lock")"
 expect_eq "b-lib fallback: no second update" 1 "$(log_count 'flake update')"
 expect_grepf "b-lib fallback: says so" "committed lock" "$ERR"
+# N-d (re-review): the dropped explicit request is a warning annotation and
+# in the summary, not only a log line
+expect_grep "b-lib fallback: ::warning:: names update-library" '^::warning::.*update-library.*not' "$ERR"
+expect_grep "b-lib fallback: summary says rpi was not updated" '^- lock: .*update-library dropped' "$T/c-lib3.md"
 git -C "$T/c" checkout -q -- flake.lock
 # this repository (no rpi input): --update-library only warns
 reset_log
@@ -530,6 +535,18 @@ reset_log
 run_cmd b-rpi-own4 -- cobuild --event schedule --update-library
 expect_exit "b-rpi-own4 builds" 0
 expect_eq "b-rpi-own4 updates root nixpkgs and rpi" 1 "$(log_count "^nix flake update --accept-flake-config --flake $T/co nixpkgs rpi\$")"
+git -C "$T/co" checkout -q -- flake.lock
+# N-d: kernel miss: the nixpkgs-only fallback drops rpi, with a warning
+reset_log
+GITHUB_ACTIONS=true MOCK_CACHE=full-miss run_cmd b-rpi-own5 -- cobuild --event schedule --update-library
+expect_exit "b-rpi-own5 builds" 0
+expect_eq "b-rpi-own5 fallback: root nixpkgs only" 1 "$(log_count "flake update .* $T/co nixpkgs\$")"
+expect_grep "b-rpi-own5 fallback: ::warning:: names update-library" '^::warning::.*update-library.*not' "$ERR"
+git -C "$T/co" checkout -q -- flake.lock
+# no warning when update-library was not asked for
+reset_log
+GITHUB_ACTIONS=true MOCK_CACHE=full-miss run_cmd b-rpi-own6 -- cobuild --event schedule
+expect_not_grep "b-rpi-own6 no update-library warning" "update-library" "$ERR"
 git -C "$T/co" checkout -q -- flake.lock
 
 # =============================================================================
