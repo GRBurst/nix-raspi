@@ -50,8 +50,13 @@ let
     && lib.elemAt r 3 == sc.User && lib.elemAt r 4 == sc.Group;
   etcFile = mk [ { rpi.wifi = { enable = true; inherit networks; secretsFile = "/etc/wifi.env"; }; } ];
   # S2: one unit per interface when networking.wireless.interfaces is set
-  wlan0 = (mk [ { rpi.wifi = { enable = true; inherit networks; };
-                  networking.wireless.interfaces = [ "wlan0" ]; } ]).config.systemd.services;
+  wlan0Sys = mk [ { rpi.wifi = { enable = true; inherit networks; };
+                    networking.wireless.interfaces = [ "wlan0" ]; } ];
+  wlan0 = wlan0Sys.config.systemd.services;
+  # N5: rpi-lib.sh's host info expression (what rpi-deploy reads), applied
+  # to a configuration as `nix eval --apply` does
+  hostInfo = import (builtins.toFile "host-info.nix" (lib.head (builtins.match
+    ".*\nRL_HOST_INFO_EXPR='([^']*)'\n.*" (builtins.readFile ../../rpi-lib.sh))));
   conditioned = u: (u.unitConfig.ConditionPathExists or null) == "/var/lib/rpi/wireless.env";
 in
 {
@@ -94,6 +99,13 @@ in
     conditioned oc.systemd.services.wpa_supplicant
     && conditioned wlan0."wpa_supplicant-wlan0"
     && !(wlan0 ? wpa_supplicant);
+
+  # N5: `rpi-deploy secrets` restarts exactly these (read-only, derived)
+  "the host info names the wpa_supplicant unit(s) secrets restarts" =
+    (hostInfo on).wifi.units == [ "wpa_supplicant" ]
+    && (hostInfo wlan0Sys).wifi.units == [ "wpa_supplicant-wlan0" ]
+    && lib.all (u: wlan0 ? ${u}) wlan0Sys.config.rpi.wifi.units
+    && rejects (mk [ { rpi.wifi.units = [ "x" ]; } ]).config.rpi.wifi.units;
 
   "/var/lib/rpi is a 0700 root dir" =
     lib.elem "d /var/lib/rpi 0700 root root -" oc.systemd.tmpfiles.rules;

@@ -50,6 +50,18 @@ in
         rule sets both.
       '';
     };
+
+    units = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = units;
+      defaultText = lib.literalExpression ''[ "wpa_supplicant" ]'';
+      readOnly = true;
+      internal = true;
+      description = ''
+        The wpa_supplicant unit names (without `.service`); `rpi-deploy
+        secrets` restarts them (read through rpi-lib.sh's host info).
+      '';
+    };
   };
 
   config = lib.mkMerge [

@@ -296,7 +296,8 @@ secretspec run -- rpi-deploy secrets                          # later, into the 
 
 `secrets` writes the file over ssh (`install -m 600`, content on stdin),
 applies that tmpfiles rule (`systemd-tmpfiles --create --prefix=<file>`) and
-(re)starts wpa_supplicant when the Pi has it. Run it before or after the
+(re)starts wpa_supplicant when the Pi has it (with
+`networking.wireless.interfaces`: each `wpa_supplicant-<if>` unit). Run it before or after the
 deploy that turns Wi-Fi on: while the file is missing, wpa_supplicant is
 skipped (`ConditionPathExists`), so the deploy does not fail, and `secrets`
 starts it. `flash --wifi-env` writes it `root 0600`

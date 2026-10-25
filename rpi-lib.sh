@@ -75,7 +75,7 @@ rl_conf_ref() { echo "$RL_FLAKE#nixosConfigurations.$RL_ATTR"; }
 # shellcheck disable=SC2016 # nix expressions, not shell strings
 RL_HOSTS_EXPR='cs: builtins.filter (n: (cs.${n}.rpiHost or false) == true) (builtins.attrNames cs)'
 # shellcheck disable=SC2016
-RL_HOST_INFO_EXPR='c: { name = c.config.system.name; target = c.config.rpi.deploy.target; port = c.config.rpi.ssh.port; cache = c.config.rpi.pull.cache; wifi = { inherit (c.config.rpi.wifi) enable networks secretsFile; }; }'
+RL_HOST_INFO_EXPR='c: { name = c.config.system.name; target = c.config.rpi.deploy.target; port = c.config.rpi.ssh.port; cache = c.config.rpi.pull.cache; wifi = { inherit (c.config.rpi.wifi) enable networks secretsFile units; }; }'
 
 # rl_hosts FLAKE: the Pi hosts of FLAKE, sorted, one per line (none: no
 # output). -> 0 | RL_E_BUILD (eval error; nix's stderr passed through)
@@ -88,7 +88,7 @@ rl_hosts() {
 }
 
 # rl_host_info FLAKE HOST: one line of JSON
-# {name, target, port, cache, wifi: {enable, networks, secretsFile}}.
+# {name, target, port, cache, wifi: {enable, networks, secretsFile, units}}.
 # HOST must be a plain attribute name (no nix call otherwise).
 # -> 0 | RL_E_USAGE ("invalid host name") | RL_E_BUILD (eval error)
 rl_host_info() {

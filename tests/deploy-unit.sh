@@ -1188,11 +1188,14 @@ mock ssh <<'EOF'
 cat >"$MOCK_ROOT/ssh.stdin"
 exit "${MOCK_SSH_RC:-0}"
 EOF
-# wifi_info NETWORKS_JSON [ENABLE [SECRETS_FILE]]: host info with Wi-Fi
+# wifi_info NETWORKS_JSON [ENABLE [SECRETS_FILE [UNITS_JSON]]]: host info
+# with Wi-Fi (no UNITS_JSON: no wifi.units, as in older host info)
 wifi_info() {
     jq -cn --argjson n "$1" --argjson e "${2:-true}" --arg f "${3-/var/lib/rpi/wireless.env}" \
+        --argjson u "${4:-null}" \
         '{name: "rpi", target: "root@rpi", port: 22, cache: null,
-          wifi: {enable: $e, networks: $n, secretsFile: $f}}'
+          wifi: ({enable: $e, networks: $n, secretsFile: $f}
+                 + if $u == null then {} else {units: $u} end)}'
 }
 NETS='{"Home Net":"RPI_WIFI_HOME","Lab":"RPI_WIFI_LAB"}'
 # values with shell/ssh metacharacters; the S3cr3t* tokens must never leak
@@ -1262,6 +1265,30 @@ MOCK_INFO="$(wifi_info "$NETS" true /wireless.env)" run_cmd sc13 -- rd secrets
 expect_exit "sc13 secretsFile /wireless.env succeeds" 0
 expect_grepf "sc13 mkdir gets / as its operand" \
     "mkdir -p -m 700 / && install -m 600 /dev/stdin /wireless.env &&" "$MOCK_LOG"
+leaked=$((leaked + $(leaks)))
+
+# sc14 networking.wireless.interfaces: one unit per interface
+# (rpi.wifi.units in the host info); each restarted if the Pi has it (N5)
+reset_log
+MOCK_INFO="$(wifi_info "$NETS" true /var/lib/rpi/wireless.env '["wpa_supplicant-wlan0","wpa_supplicant-wlan1"]')" \
+    run_cmd sc14 -- rd secrets
+expect_exit "sc14 two interfaces succeeds" 0
+expect_grepf "sc14 restarts wpa_supplicant-wlan0 then -wlan1" \
+    "if systemctl cat wpa_supplicant-wlan0.service >/dev/null 2>&1; then systemctl restart wpa_supplicant-wlan0.service; fi && if systemctl cat wpa_supplicant-wlan1.service >/dev/null 2>&1; then systemctl restart wpa_supplicant-wlan1.service; fi" "$MOCK_LOG"
+expect_not_grep "sc14 no plain wpa_supplicant.service" "wpa_supplicant.service" "$MOCK_LOG"
+remote_cmd="$(sed -nE 's/^ssh -p [0-9]+ [^ ]+ //p' "$MOCK_LOG" | tail -n 1)"
+: >"$T/pi.log"
+rc=0; PI_UNIT=1 pi_run || rc=$?
+expect_eq "sc14 on the Pi: the remote command succeeds" 0 "$rc"
+expect_eq "sc14 on the Pi: both units restarted" 2 "$(grep -cE '^systemctl restart wpa_supplicant-wlan[01]\.service$' "$T/pi.log")"
+for u in 'wpa_supplicant-x;reboot' '-x' 'a b' 'a$(id)'; do
+    reset_log
+    MOCK_INFO="$(wifi_info "$NETS" true /var/lib/rpi/wireless.env "$(jq -cn --arg u "$u" '[$u]')")" \
+        run_cmd sc14 -- rd secrets
+    expect_exit "sc14 unit '$u' -> exit 2" 2
+    expect_grepf "sc14 unit '$u' names rpi.wifi.units" "rpi.wifi.units" "$ERR"
+    expect_eq "sc14 unit '$u' -> no ssh" 0 "$(log_count '^ssh ')"
+done
 leaked=$((leaked + $(leaks)))
 
 # two SSIDs sharing a variable -> one line; line order = sort of the lines

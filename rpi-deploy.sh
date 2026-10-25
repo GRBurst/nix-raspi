@@ -202,6 +202,23 @@ wifi_env_content() {
     done
 }
 
+# wifi_restart_cmd: the remote shell command that restarts the host's
+# wpa_supplicant unit(s) (rpi.wifi.units: one per
+# networking.wireless.interfaces entry; older host info without it:
+# wpa_supplicant), each only if the Pi has it. The names go into a remote
+# command line: plain unit names only.
+wifi_restart_cmd() {
+    local units u cmd=""
+    units="$(info '.wifi.units // ["wpa_supplicant"] | .[]')" ||
+        die_rc "$RL_E_BUILD" "cannot read rpi.wifi.units of $RL_ATTR"
+    while IFS= read -r u; do
+        [[ "$u" =~ ^[A-Za-z0-9_][A-Za-z0-9_.@-]*$ ]] ||
+            die_rc "$RL_E_USAGE" "rpi.wifi.units of $RL_ATTR: not a plain unit name: '$u'"
+        cmd+="${cmd:+ && }if systemctl cat $u.service >/dev/null 2>&1; then systemctl restart $u.service; fi"
+    done <<<"$units"
+    printf '%s\n' "$cmd"
+}
+
 # secrets: the Wi-Fi secrets file onto the Pi through ssh's stdin. The
 # directory is created 0700 only when missing (install -d would chmod an
 # existing one, e.g. /etc). The file is written root 0600, then the
@@ -212,14 +229,14 @@ wifi_env_content() {
 # try-restart would leave it stopped; only when the Pi has the unit (Wi-Fi
 # deployed), so `secrets` may run before or after the deploy.
 do_secrets() {
-    local file dir content unit=wpa_supplicant.service restart
+    local file dir content restart
     load_info
     file="$(wifi_secrets_file)" || exit
+    restart="$(wifi_restart_cmd)" || exit
     content="$(wifi_env_content)" || exit
     dir="${file%/*}" # /x -> '' -> /
     dir="${dir:-/}"
     resolve_target
-    restart="if systemctl cat $unit >/dev/null 2>&1; then systemctl restart $unit; fi"
     log "writing $file (600) on $RL_TARGET (port $RL_SSH_PORT)"
     # \n: $(...) dropped the last line's newline
     printf '%s\n' "$content" |
