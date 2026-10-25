@@ -19,8 +19,7 @@
 #
 # Kernel: nvmd's linuxPackages_rpi3 (cached in nixos-raspberrypi.cachix.org).
 # Do not override boot.kernelPackages (checks.x86_64-linux.eval-kernel).
-{ pkgs, ... }:
-{
+{pkgs, ...}: {
   networking.hostName = "neptun";
   time.timeZone = "Europe/Berlin";
   # Renamed from i18n.consoleKeyMap (26.11)
@@ -50,7 +49,10 @@
   # commits the pointer (deploy/neptun.json of the repo); rpi-pull applies
   # it. On once rpi.pull.cache is set (our self-signed Cachix cache, which
   # also becomes a substituter with its key):
-  #   rpi.pull.cache = { name = "<cache>"; publicKey = "<cache>.cachix.org-1:…"; };
+  rpi.pull.cache = {
+    name = "grburst-nix-raspi";
+    publicKey = "grburst-nix-raspi.cachix.org-1:fZVFRpxdOsrA1W2BpRKM17ck1l2NH2sL2lZ0W1dIqpI=";
+  };
   # Left unset (default null, pull off) rather than `cache = null`: an
   # explicit null would conflict with a module that sets a cache (the
   # refactor invariant's I2 does that via extendModules).
@@ -82,7 +84,7 @@
   };
 
   # virtualisation.docker.enable = true;
-  users.users.pi.extraGroups = [ "docker" "video" ];
+  users.users.pi.extraGroups = ["docker" "video"];
 
   system.stateVersion = "26.05";
 }
