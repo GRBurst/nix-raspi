@@ -184,6 +184,10 @@
                   # rpi.storage.external: off by default)
                   ./modules/sd-wear.nix
                   ./modules/headless.nix
+                  # rpi.wifi / rpi.bluetooth: off by default (their disable-*
+                  # overlays, formerly set by headless)
+                  ./modules/wifi.nix
+                  ./modules/bluetooth.nix
                   ./modules/external-storage.nix
                   # rpi-pull timer/service (rpi.pull.*): the Pi pulls CI builds
                   ./modules/pull-update.nix

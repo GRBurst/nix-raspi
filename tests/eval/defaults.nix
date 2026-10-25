@@ -92,6 +92,12 @@ in
 
   "SSH on port 22" = cfg.services.openssh.ports == [ 22 ];
 
+  "Wi-Fi and Bluetooth off (disable-wifi and disable-bt overlays set)" =
+    let txt = lib.splitString "\n" cfg.hardware.raspberry-pi.config-generated; in
+    !cfg.rpi.wifi.enable && !cfg.rpi.bluetooth.enable
+    && lib.elem "dtoverlay=disable-wifi" txt && lib.elem "dtoverlay=disable-bt" txt
+    && !cfg.networking.wireless.enable && !cfg.hardware.bluetooth.enable;
+
   "default network is DHCP" =
     cfg.rpi.network.mode == "dhcp" && !(cfg.systemd.network.networks ? "10-lan-static");
 

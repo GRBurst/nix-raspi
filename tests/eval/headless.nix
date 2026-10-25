@@ -1,9 +1,17 @@
 # modules/headless.nix: headless config.txt profile (spec §3.2, s6 §4).
 # Asserted on the generated config.txt, i.e. the lines the GPU firmware
 # reads, not on the option values that produce them.
-{ lib, rpi, ... }:
+{ lib, rpi, rpiLib, fixtures, ... }:
 let
   cfg = rpi.config;
+  # Headless on (default) with both radios on (fixture host via lib.mkPi).
+  radios = (rpiLib.mkPi {
+    modules = [
+      (fixtures + "/hosts/minimal.nix")
+      { rpi.wifi.enable = true; rpi.bluetooth.enable = true; }
+    ];
+  }).config;
+  radioLines = lib.splitString "\n" radios.hardware.raspberry-pi.config-generated;
   allLines = lib.splitString "\n" cfg.hardware.raspberry-pi.config-generated;
   # Lines of the `[all]` section: what applies to the Pi 3 (the [cm4]/[cm5]
   # sections only filter for other boards). Empty if there is no [all].
@@ -21,8 +29,15 @@ in
 
   "config.txt has gpu_mem=16" = has "gpu_mem=16";
 
-  "config.txt disables wifi and bt overlays" =
-    has "dtoverlay=disable-wifi" && has "dtoverlay=disable-bt";
+  # Spec §4: headless no longer touches the radios; the disable-wifi /
+  # disable-bt overlays moved to rpi.wifi / rpi.bluetooth (eval-wifi,
+  # eval-bluetooth assert them; the old row "config.txt disables wifi and bt
+  # overlays" is replaced by this one).
+  "headless leaves disable-wifi/disable-bt to rpi.wifi/rpi.bluetooth" =
+    radios.rpi.headless.enable
+    && lib.elem "gpu_mem=16" radioLines
+    && !(lib.elem "dtoverlay=disable-wifi" radioLines)
+    && !(lib.elem "dtoverlay=disable-bt" radioLines);
 
   "config.txt has no vc4-kms-v3d overlay" = !(hasAnywhere "dtoverlay=vc4-kms-v3d");
 
