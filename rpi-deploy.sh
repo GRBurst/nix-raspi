@@ -54,7 +54,9 @@ Host: --host NAME selects the flake's nixosConfigurations.NAME; default
   several -> exit 2. --attr NAME is a deprecated alias of --host.
 Target: --target > $RPI_TARGET > the host's rpi.deploy.target; port: --port >
   $RPI_PORT > the host's rpi.ssh.port (the host is evaluated only when one of
-  the two is missing).
+  the two is missing). RPI_TARGET and RPI_PORT are only for the default host
+  ($RPI_HOST, else the only one): with --host NAME other than $RPI_HOST they
+  are ignored (said on stderr).
 Defaults: --flake $RPI_FLAKE or the current directory, --max-builds 500,
   --out the current directory.
 Environment: RPI_FLAKE (default flake dir), RPI_HOST (default host),
@@ -122,10 +124,21 @@ info() { jq -r "($1) // empty" <<<"$HOST_INFO"; }
 
 # resolve_target: RL_TARGET = --target > $RPI_TARGET > rpi.deploy.target,
 # RL_SSH_PORT = --port > $RPI_PORT > rpi.ssh.port; the host info is evaluated
-# only when one of them is still missing.
+# only when one of them is still missing. RPI_TARGET/RPI_PORT belong to the
+# default host ($RPI_HOST, else the only one): with --host NAME other than
+# $RPI_HOST they are ignored (logged), so host b never goes to Pi a.
 resolve_target() {
-    RL_TARGET="${TARGET_OPT:-${RPI_TARGET:-}}"
-    RL_SSH_PORT="${PORT_OPT:-${RPI_PORT:-}}"
+    local env_target="${RPI_TARGET:-}" env_port="${RPI_PORT:-}" ignored=()
+    if [[ -n "$HOST_OPT" && "$HOST_OPT" != "${RPI_HOST:-}" ]]; then
+        [[ -z "$env_target" || -n "$TARGET_OPT" ]] || ignored+=(RPI_TARGET)
+        [[ -z "$env_port" || -n "$PORT_OPT" ]] || ignored+=(RPI_PORT)
+        env_target="" env_port=""
+        ((${#ignored[@]} == 0)) ||
+            log "ignoring $(IFS=/ && echo "${ignored[*]}"): only for the default host" \
+                "(${RPI_HOST:+RPI_HOST=}${RPI_HOST:-RPI_HOST unset}), not --host $HOST_OPT; give --target/--port"
+    fi
+    RL_TARGET="${TARGET_OPT:-$env_target}"
+    RL_SSH_PORT="${PORT_OPT:-$env_port}"
     [[ -n "$RL_TARGET" && -n "$RL_SSH_PORT" ]] && return 0
     load_info
     if [[ -z "$RL_TARGET" ]]; then
@@ -569,6 +582,7 @@ RL_FLAKE="${RPI_FLAKE:-$PWD}"
 RL_ATTR="" # resolve_host
 RL_TARGET="" RL_SSH_PORT="" # resolve_target
 TARGET_OPT="" PORT_OPT=""     # --target, --port
+HOST_OPT=""                   # --host (--attr)
 HOST_INFO=""                  # load_info
 
 # Options each subcommand accepts.
@@ -615,10 +629,10 @@ parse_args() {
             case "$opt" in
             --out) OUT_DIR="$2" ;;
             --flake) RL_FLAKE="$2" ;;
-            --host) RL_ATTR="$2" ;;
+            --host) RL_ATTR="$2" HOST_OPT="$2" ;;
             --attr)
                 echo "rpi-deploy: --attr is deprecated, use --host" >&2
-                RL_ATTR="$2"
+                RL_ATTR="$2" HOST_OPT="$2"
                 ;;
             --target) TARGET_OPT="$2" ;;
             --port | --max-builds)

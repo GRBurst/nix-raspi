@@ -1144,6 +1144,41 @@ MOCK_HOSTS='["a","b"]' run_cmd tp8 -- rd status
 expect_exit "tp8 status, several hosts, no target -> exit 2" 2
 expect_eq "tp8 several hosts -> no ssh" 0 "$(log_count '^ssh ')"
 
+# tp9 (final review S4): RPI_TARGET/RPI_PORT belong to the default host
+# ($RPI_HOST, else the only one). With --host NAME they apply only when
+# NAME is $RPI_HOST; otherwise they are ignored (said on stderr) and NAME's
+# own rpi.deploy.target/rpi.ssh.port are used: never host b onto Pi a.
+reset_log
+MOCK_HOSTS='["a","b"]' RPI_HOST=a RPI_TARGET=root@a-ip RPI_PORT=2201 run_cmd tp9 -- dep --host b
+expect_exit "tp9 deploy --host b, RPI_HOST=a: succeeds" 0
+expect_grep "tp9 deploys b to b's rpi.deploy.target" "^nr-mock switch .*--target-host $INFO_TARGET\$" "$MOCK_LOG"
+expect_grep "tp9 with b's rpi.ssh.port" "^NIX_SSHOPTS=-p $INFO_PORT\$" "$MOCK_LOG"
+expect_eq "tp9 nothing goes to RPI_TARGET" 0 "$(log_count 'a-ip')"
+expect_grepf "tp9 says RPI_TARGET/RPI_PORT are ignored for b" "ignoring RPI_TARGET/RPI_PORT" "$ERR"
+expect_grep "tp9 b's host info" "^nix eval .*#nixosConfigurations\.b --apply " "$MOCK_LOG"
+for how in "RPI_HOST unset" "--attr b"; do
+    reset_log
+    if [[ $how == --attr* ]]; then
+        RPI_HOST=a RPI_TARGET=pi@envhost run_cmd tp9 -- rd status --attr b
+    else
+        RPI_TARGET=pi@envhost run_cmd tp9 -- rd status --host b
+    fi
+    expect_grep "tp9 ($how): status of b on b's target" "^ssh -p $INFO_PORT $INFO_TARGET " "$MOCK_LOG"
+    expect_grepf "tp9 ($how): says RPI_TARGET is ignored" "ignoring RPI_TARGET" "$ERR"
+done
+reset_log
+RPI_HOST=b RPI_TARGET=pi@envhost RPI_PORT=2201 run_cmd tp9 -- rd status --host b
+expect_grep "tp9 --host = RPI_HOST: RPI_TARGET/RPI_PORT apply" "^ssh -p 2201 pi@envhost " "$MOCK_LOG"
+expect_not_grep "tp9 --host = RPI_HOST: nothing ignored" "ignoring" "$ERR"
+reset_log
+RPI_HOST=a RPI_TARGET=pi@envhost RPI_PORT=2201 run_cmd tp9 -- rd status
+expect_grep "tp9 no --host (RPI_HOST's host): RPI_TARGET/RPI_PORT apply" "^ssh -p 2201 pi@envhost " "$MOCK_LOG"
+reset_log
+RPI_HOST=a RPI_TARGET=pi@envhost run_cmd tp9 -- rd status --host b --target pi@flag --port 2202
+expect_grep "tp9 --target/--port still win for another host" "^ssh -p 2202 pi@flag " "$MOCK_LOG"
+run_cmd tp9 -- rd --help
+expect_grepf "tp9 usage: RPI_TARGET/RPI_PORT only for the default host" "only for the default host" "$OUT"
+
 # =============================================================================
 # T3.3 secrets: the Wi-Fi PSKs named in rpi.wifi.networks, from the
 # environment, through ssh's stdin into rpi.wifi.secretsFile (P8)

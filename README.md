@@ -425,9 +425,13 @@ half-applies on the Pi (it passes a `systemd-run` flag the Pi's systemd lacks).
 The host is `--host`, else `$RPI_HOST`, else the only Pi host. The target and
 port are `--target`/`--port`, else `$RPI_TARGET`/`$RPI_PORT`, else the host's
 `rpi.deploy.target` and `rpi.ssh.port` (evaluated only when one of the two is
-missing). Put `RPI_HOST`, `RPI_TARGET` and `RPI_PORT` of your machine in
-`devenv.local.nix` (gitignored; `devenv.local.nix.example`), for example
-while a hostname does not resolve yet.
+missing). `RPI_TARGET` and `RPI_PORT` are only for the default host
+(`$RPI_HOST`, else the only one): with a `--host` other than `$RPI_HOST` (any
+`--host` while `RPI_HOST` is unset) they are ignored (said on stderr), so a
+second Pi never receives the first one's system; give `--target`/`--port`
+there. Put `RPI_HOST`, `RPI_TARGET` and `RPI_PORT` of your machine in
+`devenv.local.nix` (gitignored; `devenv.local.nix.example`), for example while
+a hostname does not resolve yet.
 
 | action             | effect                                                                                                                                |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
