@@ -107,6 +107,24 @@ in
     && lib.all (u: wlan0 ? ${u}) wlan0Sys.config.rpi.wifi.units
     && rejects (mk [ { rpi.wifi.units = [ "x" ]; } ]).config.rpi.wifi.units;
 
+  # L2 (re-review): a newer rpi-deploy/rpi-ci on a flake whose library
+  # predates rpi.wifi.units: the host info still evaluates, without units
+  # (rpi-deploy secrets then restarts wpa_supplicant)
+  "host info of a library without rpi.wifi.units omits units" =
+    let
+      old = hostInfo {
+        config.system.name = "old";
+        config.rpi = {
+          deploy.target = "root@old";
+          ssh.port = 22;
+          pull.cache = null;
+          wifi = { enable = true; networks = { }; secretsFile = "/var/lib/rpi/wireless.env"; };
+        };
+      };
+    in
+    old.wifi.enable && old.wifi.secretsFile == "/var/lib/rpi/wireless.env"
+    && !(old.wifi ? units);
+
   "/var/lib/rpi is a 0700 root dir" =
     lib.elem "d /var/lib/rpi 0700 root root -" oc.systemd.tmpfiles.rules;
 

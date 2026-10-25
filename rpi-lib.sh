@@ -71,11 +71,13 @@ rl_conf_ref() { echo "$RL_FLAKE#nixosConfigurations.$RL_ATTR"; }
 
 # Host discovery: the Pi hosts of a flake are its nixosConfigurations built
 # with lib.mkPi (marked `rpiHost = true`); the info is what rpi-deploy and
-# rpi-ci need of one host.
+# rpi-ci need of one host. wifi.units only if the flake's library has
+# rpi.wifi.units (re-review L2: older ones do not; rpi-deploy then restarts
+# wpa_supplicant).
 # shellcheck disable=SC2016 # nix expressions, not shell strings
 RL_HOSTS_EXPR='cs: builtins.filter (n: (cs.${n}.rpiHost or false) == true) (builtins.attrNames cs)'
 # shellcheck disable=SC2016
-RL_HOST_INFO_EXPR='c: { name = c.config.system.name; target = c.config.rpi.deploy.target; port = c.config.rpi.ssh.port; cache = c.config.rpi.pull.cache; wifi = { inherit (c.config.rpi.wifi) enable networks secretsFile units; }; }'
+RL_HOST_INFO_EXPR='c: { name = c.config.system.name; target = c.config.rpi.deploy.target; port = c.config.rpi.ssh.port; cache = c.config.rpi.pull.cache; wifi = { inherit (c.config.rpi.wifi) enable networks secretsFile; } // (if c.config.rpi.wifi ? units then { inherit (c.config.rpi.wifi) units; } else { }); }'
 
 # rl_hosts FLAKE: the Pi hosts of FLAKE, sorted, one per line (none: no
 # output). -> 0 | RL_E_BUILD (eval error; nix's stderr passed through)
@@ -88,7 +90,7 @@ rl_hosts() {
 }
 
 # rl_host_info FLAKE HOST: one line of JSON
-# {name, target, port, cache, wifi: {enable, networks, secretsFile, units}}.
+# {name, target, port, cache, wifi: {enable, networks, secretsFile, units?}}.
 # HOST must be a plain attribute name (no nix call otherwise).
 # -> 0 | RL_E_USAGE ("invalid host name") | RL_E_BUILD (eval error)
 rl_host_info() {
