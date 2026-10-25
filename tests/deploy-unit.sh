@@ -42,15 +42,24 @@ first_line() { grep -nE -- "$1" "$MOCK_LOG" | head -n1 | cut -d: -f1 | grep . ||
 # --- mocks -------------------------------------------------------------------
 export K_DEF=/nix/store/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk-linux_rpi-bcm2711-6.18.52
 export M_DEF=/nix/store/mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm-linux_rpi-bcm2711-6.18.52-modules
+# Host discovery (rl_hosts): the flake's Pi hosts. Default one host `rpi`, so
+# the tests that predate --host keep building .#nixosConfigurations.rpi.
+export HOSTS_DEF='["rpi"]'
+# rl_hosts' eval: `nix eval ... FLAKE#nixosConfigurations --apply <filter>`
+LIST_RE='^nix eval .*#nixosConfigurations --apply '
 
 # nix: kernel/modules eval ($MOCK_K/$MOCK_M; MOCK_EVAL_RC fails it),
 # path-info --store (hit iff the path is in $MOCK_CACHED, default both;
 # MOCK_NETERR prints a network error), build --dry-run (cat $MOCK_DRY to
 # stderr; MOCK_DRY_RC fails it), build --out-link L (creates the image under
-# L), run (the pinned nixos-rebuild; logged only).
+# L), run (the pinned nixos-rebuild; logged only); host discovery: the
+# rl_hosts eval prints $MOCK_HOSTS (default $HOSTS_DEF; MOCK_HOSTS_RC fails it).
 mock nix <<'EOF'
 k="${MOCK_K-$K_DEF}" m="${MOCK_M-$M_DEF}"
 case " $* " in
+*" eval "*"#nixosConfigurations --apply "*)
+    if [[ -n "${MOCK_HOSTS_RC:-}" ]]; then echo "error: attribute 'nixosConfigurations' missing" >&2; exit "$MOCK_HOSTS_RC"; fi
+    printf '%s\n' "${MOCK_HOSTS-$HOSTS_DEF}" ;;
 *" eval "*".kernel.modules.outPath "* | *" eval "*".kernel.outPath "*)
     if [[ -n "${MOCK_EVAL_RC:-}" ]]; then echo "error: evaluation aborted" >&2; exit "$MOCK_EVAL_RC"; fi
     case " $* " in *".kernel.modules.outPath "*) printf '%s' "$m" ;; *) printf '%s' "$k" ;; esac ;;
@@ -353,6 +362,93 @@ expect_exit "i4 image --out succeeds" 0
 expect_grep "i4 out-link in --out DIR, --flake/--attr honoured" \
     "^nix build .*--out-link $T/imgout/result-rpi-image .*/other#nixosConfigurations\.neptun\.config\.system\.build\.sdImage" "$MOCK_LOG"
 expect_grepf "i4 prints the image under --out" "$T/imgout/result-rpi-image/sd-image/neptun-rpi3.img.zst" "$OUT"
+
+# =============================================================================
+# T3.1 host selection: --host (--attr deprecated) > $RPI_HOST > the only Pi
+# host of the flake (rl_hosts); none or several -> exit 2
+# =============================================================================
+built_host() { # the nixosConfigurations attribute of the sdImage build
+    sed -nE 's|^nix build .*--out-link .*#nixosConfigurations\.([^ ]+)\.config\.system\.build\.sdImage( .*)?$|\1|p' "$MOCK_LOG"
+}
+export MOCK_DRY="$HYB"
+
+reset_log
+MOCK_HOSTS='["neptun"]' run_cmd hs1 -- image_in_w
+expect_exit "hs1 one Pi host -> image succeeds" 0
+expect_eq "hs1 the only Pi host is built" neptun "$(built_host)"
+expect_eq "hs1 hosts listed once" 1 "$(log_count "$LIST_RE")"
+expect_grep "hs1 hosts listed in the flake" '^nix eval .* /flk#nixosConfigurations --apply ' "$MOCK_LOG"
+expect_grepf "hs1 log names the host" "#nixosConfigurations.neptun" "$ERR"
+
+reset_log
+RPI_HOST=b MOCK_HOSTS='["a","b"]' run_cmd hs2 -- image_in_w
+expect_exit "hs2 RPI_HOST -> image succeeds" 0
+expect_eq "hs2 RPI_HOST selects the host" b "$(built_host)"
+expect_eq "hs2 RPI_HOST -> no host listing" 0 "$(log_count "$LIST_RE")"
+
+reset_log
+MOCK_HOSTS='["a","b"]' run_cmd hs3 -- image_in_w
+hs3_ok() { [[ $RC -eq 2 ]] && grep -qF "several Pi hosts: a b; pick one with --host or RPI_HOST" "$ERR"; }
+expect_true "hs3 several hosts -> exit 2 with the list" hs3_ok
+expect_eq "hs3 several hosts -> nothing built" 0 "$(log_count '^nix build ')"
+
+reset_log
+MOCK_HOSTS='[]' run_cmd hs4 -- image_in_w
+expect_exit "hs4 no Pi host -> exit 2" 2
+expect_grepf "hs4 says there is no Pi host in the flake" "no Pi host (lib.mkPi) in /flk" "$ERR"
+expect_eq "hs4 no Pi host -> nothing built" 0 "$(log_count '^nix build ')"
+
+reset_log
+RPI_HOST=b MOCK_HOSTS='["a","b"]' run_cmd hs5 -- image_in_w --host x
+expect_exit "hs5 --host -> image succeeds" 0
+expect_eq "hs5 --host overrides RPI_HOST" x "$(built_host)"
+expect_eq "hs5 --host -> no host listing" 0 "$(log_count "$LIST_RE")"
+
+reset_log
+MOCK_HOSTS='["a","b"]' run_cmd hs6 -- image_in_w --attr x
+expect_exit "hs6 --attr -> image succeeds" 0
+expect_eq "hs6 --attr is --host" x "$(built_host)"
+expect_eq "hs6 --attr -> no host listing" 0 "$(log_count "$LIST_RE")"
+expect_grepf "hs6 --attr is deprecated" "rpi-deploy: --attr is deprecated, use --host" "$ERR"
+reset_log
+run_cmd hs6 -- image_in_w --host x
+expect_not_grep "hs6 --host prints no deprecation" "deprecated" "$ERR"
+
+reset_log
+RPI_HOST='' MOCK_HOSTS='["neptun"]' run_cmd hs7 -- image_in_w
+expect_exit "hs7 empty RPI_HOST -> image succeeds" 0
+expect_eq "hs7 empty RPI_HOST falls back to the only Pi host" neptun "$(built_host)"
+expect_eq "hs7 empty RPI_HOST -> hosts listed" 1 "$(log_count "$LIST_RE")"
+
+for bad in 'a.b' 'a b' 'a/b' 'a"b' 'a$(x)'; do
+    reset_log
+    run_cmd hs8 -- image_in_w --host "$bad"
+    expect_exit "hs8 --host '$bad' -> exit 2" 2
+    expect_grepf "hs8 '$bad' says invalid host name" "invalid host name" "$ERR"
+    expect_eq "hs8 '$bad' -> no nix call" 0 "$(log_count '^nix ')"
+done
+reset_log
+RPI_HOST='a.b' run_cmd hs8 -- image_in_w
+expect_exit "hs8 invalid RPI_HOST -> exit 2" 2
+expect_eq "hs8 invalid RPI_HOST -> no nix call" 0 "$(log_count '^nix ')"
+reset_log
+MOCK_HOSTS='["a.b"]' run_cmd hs8 -- image_in_w
+expect_exit "hs8 listed host with an invalid name -> exit 2" 2
+expect_eq "hs8 listed invalid name -> nothing built" 0 "$(log_count '^nix build ')"
+
+reset_log
+MOCK_HOSTS_RC=1 run_cmd hs9 -- image_in_w
+expect_exit "hs9 host listing fails -> RL_E_BUILD" 13
+expect_grepf "hs9 shows nix's error" "attribute 'nixosConfigurations' missing" "$ERR"
+expect_grepf "hs9 says the hosts could not be listed" "cannot list the Pi hosts of /flk" "$ERR"
+expect_eq "hs9 -> nothing built" 0 "$(log_count '^nix build ')"
+
+# hs10 deploy selects the host the same way (the attr nixos-rebuild builds)
+reset_log
+MOCK_HOSTS='["a","b"]' run_cmd hs10 -- rd deploy --flake /flk
+expect_exit "hs10 deploy with several hosts -> exit 2" 2
+expect_eq "hs10 -> Pi untouched" 0 "$(log_count '^(ssh|nix run) ')"
+unset MOCK_DRY
 
 # =============================================================================
 # T5.6 flash (devices are regular files under $T; lsblk/findmnt/sudo/dd mocked)

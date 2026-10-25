@@ -16,9 +16,9 @@ source "$RPI_LIB"
 usage() {
     cat <<'EOF'
 Usage:
-  rpi-deploy image [--out DIR] [--flake DIR] [--attr NAME] [--max-builds N]
+  rpi-deploy image [--out DIR] [--flake DIR] [--host NAME] [--max-builds N]
   rpi-deploy flash IMAGE DEVICE
-  rpi-deploy deploy [switch|boot|test] [--target USER@HOST] [--port N] [--flake DIR] [--attr NAME] [--max-builds N] [--force]
+  rpi-deploy deploy [switch|boot|test] [--host NAME] [--target USER@HOST] [--port N] [--flake DIR] [--max-builds N] [--force]
   rpi-deploy status [--target USER@HOST] [--port N]
 
   image    build config.system.build.sdImage of the flake's Pi system (after
@@ -38,10 +38,13 @@ Usage:
            pull state: the applied pointer seq and its age, and the last
            rpi-pull run (result, exit code, time) from /var/lib/rpi-pull
 
-Defaults: --flake $RPI_FLAKE or the current directory, --attr rpi,
-  --target root@neptun, --port 2222, --max-builds 500, --out the current
-  directory.
-Environment: RPI_FLAKE (default flake dir), RPI_SSH_OPTS (extra ssh options),
+Host: --host NAME selects the flake's nixosConfigurations.NAME; default
+  $RPI_HOST, else the flake's only Pi host (built with lib.mkPi); none or
+  several -> exit 2. --attr NAME is a deprecated alias of --host.
+Defaults: --flake $RPI_FLAKE or the current directory, --target root@neptun,
+  --port 2222, --max-builds 500, --out the current directory.
+Environment: RPI_FLAKE (default flake dir), RPI_HOST (default host),
+  RPI_SSH_OPTS (extra ssh options),
   RPI_NIXOS_REBUILD (nixos-rebuild to use instead of the flake's pinned one),
   RPI_LIB (path of rpi-lib.sh); test hooks RPI_ALLOW_NONBLOCK=1, RPI_SYSFS.
 Exit codes: 2 usage, 10 kernel not cached, 11 forbidden local build,
@@ -65,9 +68,33 @@ usage_error() {
     exit "$RL_E_USAGE"
 }
 
+# --- host selection ----------------------------------------------------------
+# resolve_host: RL_ATTR = --host/--attr, else $RPI_HOST, else the flake's only
+# Pi host (rl_hosts); none or several -> exit 2 (usage), no listing when a
+# name is given. The name must be a plain attribute name.
+resolve_host() {
+    local hosts
+    local -a list=()
+    [[ -n "$RL_ATTR" ]] || RL_ATTR="${RPI_HOST:-}"
+    if [[ -z "$RL_ATTR" ]]; then
+        hosts="$(rl_hosts "$RL_FLAKE")" ||
+            die_rc "$RL_E_BUILD" "cannot list the Pi hosts of $RL_FLAKE"
+        [[ -z "$hosts" ]] || mapfile -t list <<<"$hosts"
+        case ${#list[@]} in
+        0) die_rc "$RL_E_USAGE" "no Pi host (lib.mkPi) in $RL_FLAKE" ;;
+        1) RL_ATTR="${list[0]}" ;;
+        *) die_rc "$RL_E_USAGE" "several Pi hosts: ${list[*]}; pick one with --host or RPI_HOST" ;;
+        esac
+        log "host: $RL_ATTR (the only Pi host in $RL_FLAKE)"
+    fi
+    [[ "$RL_ATTR" =~ ^[A-Za-z0-9_-]+$ ]] ||
+        die_rc "$RL_E_USAGE" "invalid host name: '$RL_ATTR'"
+}
+
 # --- subcommands -----------------------------------------------------------
 # image: guards, then build the SD image of the very system later deploys use.
 do_image() {
+    resolve_host
     mkdir -p "$OUT_DIR"
     OUT_DIR="$(cd "$OUT_DIR" && pwd)"
     log "guards: $(rl_conf_ref) (sdImage, at most $MAX_BUILDS local builds)"
@@ -239,6 +266,7 @@ check_downgrade() {
 # deploy [switch|boot|test]: downgrade check, guards, pinned nixos-rebuild.
 do_deploy() {
     check_downgrade
+    resolve_host
     log "guards: $(rl_conf_ref) (toplevel, at most $MAX_BUILDS local builds)"
     rl_guard toplevel "$MAX_BUILDS" || die_rc $? "guard failed; the Pi was not touched"
     log "nixos-rebuild $ACTION --target-host $RL_TARGET (port $RL_SSH_PORT)"
@@ -353,15 +381,15 @@ FORCE=0
 ACTION=""
 POSITIONAL=()
 RL_FLAKE="${RPI_FLAKE:-$PWD}"
-RL_ATTR=rpi
+RL_ATTR="" # resolve_host
 RL_TARGET=root@neptun
 RL_SSH_PORT=2222
 
 # Options each subcommand accepts.
 declare -A ALLOWED=(
-    [image]=" --out --flake --attr --max-builds "
+    [image]=" --out --flake --host --attr --max-builds "
     [flash]=" "
-    [deploy]=" --target --port --flake --attr --max-builds --force "
+    [deploy]=" --target --port --flake --host --attr --max-builds --force "
     [status]=" --target --port "
 )
 
@@ -400,7 +428,11 @@ parse_args() {
             case "$opt" in
             --out) OUT_DIR="$2" ;;
             --flake) RL_FLAKE="$2" ;;
-            --attr) RL_ATTR="$2" ;;
+            --host) RL_ATTR="$2" ;;
+            --attr)
+                echo "rpi-deploy: --attr is deprecated, use --host" >&2
+                RL_ATTR="$2"
+                ;;
             --target) RL_TARGET="$2" ;;
             --port | --max-builds)
                 [[ "$2" =~ ^[0-9]+$ ]] || usage_error "$opt needs a number, got '$2'"
