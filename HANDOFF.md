@@ -672,7 +672,11 @@ NIXOS_BOOT from the host). A rollback stays rolled back until the next CI build.
   for every host).
 - `cache.nixos.org` drops long transfers on this network (curl rc 56 after
   ~60 MB): retry with `--option download-attempts 10`, or mirror the NARs into
-  a local `file://` binary cache.
+  a local `file://` binary cache. In T7.4 the retries did not help (nix reports
+  `HTTP error 206` when it resumes): `curl -C -` in a loop for the NAR plus the
+  `.narinfo`, put into a directory, `nix-store --realise --option substituters
+  file://<dir> <path>` (the signature is in the narinfo) made the full
+  `nix flake check` pass (`.scratch/lib/accept/fetch-nar.sh`).
 - **Disk and nix's auto-GC**: `nix.conf` has `min-free = 10 GiB`, `max-free = 50 GiB`;
   when the store's disk dips below 10 GiB, the next build deletes every unrooted path
   down to 50 GiB free. `tests/pull-smoke.sh` builds `smoke-next` and `smoke-evil` with
