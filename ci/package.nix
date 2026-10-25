@@ -8,12 +8,16 @@
 # runner may lack cachix, or have other versions). nix is deliberately NOT
 # bundled: it must be the runner's (its config, its daemon).
 { lib, stdenvNoCC, makeWrapper, bash, git, jq, coreutils, gnugrep, gnused, findutils, util-linux, cachix }:
+let
+  fileset = lib.fileset.unions [ ./. ../rpi-lib.sh ../rpi-fp.sh ];
+in
 stdenvNoCC.mkDerivation {
   name = "rpi-ci";
-  src = lib.fileset.toSource {
-    root = ../.;
-    fileset = lib.fileset.unions [ ./. ../rpi-lib.sh ../rpi-fp.sh ];
-  };
+  src = lib.fileset.toSource { root = ../.; inherit fileset; };
+  # What the package ships, for tests/eval/tools.nix: a fileset is checkable at
+  # eval time, the store path of `src` is not (`nix flake check --no-build`
+  # does not realise it: "path ...-source is not valid").
+  passthru = { inherit fileset; };
   nativeBuildInputs = [ makeWrapper ];
   dontConfigure = true;
   dontBuild = true;

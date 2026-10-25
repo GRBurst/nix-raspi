@@ -13,7 +13,11 @@ let
   install = pkgs.rpi-deploy.installPhase or "";
   ci = pkgs.rpi-ci or { };
   ciInstall = ci.installPhase or "";
-  ciShips = f: ci ? src && builtins.pathExists (ci.src + "/${f}");
+  # the package's fileset, not the store path of its src: `nix flake check
+  # --no-build` does not realise that ("path ...-source is not valid")
+  root = ../..;
+  ciFiles = lib.fileset.toList (ci.fileset or (lib.fileset.unions [ ]));
+  ciShips = f: builtins.elem (root + "/${f}") ciFiles;
 in
 {
   "apps.x86_64-linux.nixos-rebuild is the flake's 26.05 nixos-rebuild-ng" =
