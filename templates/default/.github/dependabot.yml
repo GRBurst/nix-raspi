@@ -1,0 +1,10 @@
+# Keeps the commit-SHA pins of .github/workflows/*.yml current: weekly PRs
+# that bump the SHA and its "# tag" comment. Review each bump: the workflow
+# holds the Cachix signing key (whoever signs what the Pi pulls is root on
+# the Pi).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

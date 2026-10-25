@@ -9,7 +9,9 @@
 #   branch must never push to main).
 # - --artifacts DIR: the commit job's download of the build jobs' artifacts,
 #   one subdirectory per job, each with its flake.lock and, when published,
-#   deploy/NAME.json. Every job updates the lock itself (D14), so the locks
+#   deploy/NAME.json (download-artifact extracts a lone artifact straight
+#   into DIR: DIR/flake.lock or DIR/deploy/ → DIR is the only artifact).
+#   Every job updates the lock itself (D14), so the locks
 #   must be identical ("lock differs between hosts": exit 1, nothing
 #   copied or pushed); a pointer name may come from one artifact only. The
 #   lock and every pointer are copied into the work tree and committed with
@@ -62,7 +64,8 @@ if [[ -n "$art" ]]; then
     [[ -d "$art" ]] || die "no artifacts directory '$art'"
     lock="" lock_from="" copies=()
     declare -A ptr_from=()
-    for a in "$art"/*/; do
+    if [[ -f "$art/flake.lock" || -d "$art/deploy" ]]; then dirs=("${art%/}/"); else dirs=("$art"/*/); fi
+    for a in "${dirs[@]}"; do
         [[ -d "$a" ]] || continue
         a="${a%/}" an="${a##*/}"
         if [[ -f "$a/flake.lock" ]]; then

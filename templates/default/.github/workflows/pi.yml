@@ -1,0 +1,144 @@
+# Builds every Pi host of this flake (the nixosConfigurations made with
+# lib.mkPi, one job per host), pushes each system to the host's Cachix
+# cache (rpi.pull.cache) and pins it there, writes its pointer
+# deploy/<system.name>.json, then commits the lock and all pointers to main
+# in one commit; the Pi (rpi.pull) follows its pointer. A host without a
+# cache is built and tested, not published (a notice in the run).
+#
+# Repository secrets, needed once a host sets rpi.pull.cache:
+# CACHIX_AUTH_TOKEN (push and pin) and CACHIX_SIGNING_KEY (signs the paths).
+name: pi
+on:
+  schedule:
+    - cron: "17 0 * * 0"            # Sun 00:17 UTC: lock update + build
+  push:
+    branches: [main]
+    paths-ignore: ["deploy/**", "docs/**", "**.md"]
+  workflow_dispatch:
+    inputs:
+      update-lock:
+        description: "Update flake.lock (nixpkgs, nixos-raspberrypi or rpi) before building"
+        type: boolean
+        default: false
+# Read only; the commit job alone may write (the build jobs hold the
+# signing key and cannot push).
+permissions:
+  contents: read
+concurrency:
+  group: pi
+  cancel-in-progress: false
+jobs:
+  hosts:
+    # The run builds and pins main whatever the ref: a dispatch on another
+    # branch would only rotate the pinned revisions away from the pointed
+    # system. The build jobs need this job, so they run on main only too.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      hosts: ${{ steps.hosts.outputs.hosts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # 31.11.3
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://nixos-raspberrypi.cachix.org
+            extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+      - id: hosts
+        run: nix run --inputs-from . rpi#rpi-ci -- hosts >> "$GITHUB_OUTPUT"
+  build:
+    needs: hosts
+    if: needs.hosts.outputs.hosts != '[]'
+    name: build ${{ matrix.host }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(needs.hosts.outputs.hosts) }}
+    steps:
+      # Always build main, whatever ref triggered the run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      # install-nix-action makes the runner user a trusted Nix user
+      # (set_as_trusted_user defaults to true), so rpi-ci build can add the
+      # host's own cache with --option extra-substituters and
+      # extra-trusted-public-keys: no cachix-action, and the cache name is
+      # only known once the host is evaluated.
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # 31.11.3
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://nixos-raspberrypi.cachix.org
+            extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+      # Updates the lock when asked (or on schedule), builds the host's
+      # system and then every checks.<system> of the flake, before anything
+      # is published.
+      - id: build
+        env:
+          HOST: ${{ matrix.host }}
+          UPDATE_LOCK: ${{ inputs.update-lock }}
+        run: |
+          set -- --host "$HOST" --event "$GITHUB_EVENT_NAME"
+          if [ "$UPDATE_LOCK" = true ]; then set -- "$@" --update-lock; fi
+          nix run --inputs-from . rpi#rpi-ci -- build "$@" >> "$GITHUB_OUTPUT"
+      # Push the closure and pin it; without a cache: notice, published=false.
+      - id: publish
+        env:
+          HOST: ${{ matrix.host }}
+          TOP: ${{ steps.build.outputs.top }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_SIGNING_KEY: ${{ secrets.CACHIX_SIGNING_KEY }}
+        run: nix run --inputs-from . rpi#rpi-ci -- publish --host "$HOST" --top "$TOP" >> "$GITHUB_OUTPUT"
+      # The pointer only after push + pin: the Pi must find what it points at.
+      - id: pointer
+        if: steps.publish.outputs.published == 'true'
+        env:
+          NAME: ${{ steps.build.outputs.name }}
+          TOP: ${{ steps.build.outputs.top }}
+          SEQ: ${{ github.run_number }}
+        run: |
+          git fetch origin +refs/heads/main:refs/remotes/origin/main >&2
+          nix run --inputs-from . rpi#rpi-ci -- pointer --host "$NAME" --seq "$SEQ" --rev "$(git rev-parse HEAD)" --file "deploy/$NAME.json" "$TOP" >> "$GITHUB_OUTPUT"
+      # The lock (updated or not) and the pointer for the commit job.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pi-${{ matrix.host }}
+          path: |
+            flake.lock
+            deploy/${{ steps.build.outputs.name }}.json
+          if-no-files-found: ignore
+          retention-days: 1
+  # One commit of the lock and all pointers, only when every build job
+  # succeeded (needs); the locks of all jobs must be identical.
+  commit:
+    needs: [hosts, build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: pi-*
+          path: ${{ runner.temp }}/artifacts
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # 31.11.3
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://nixos-raspberrypi.cachix.org
+            extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
+      - id: commit
+        env:
+          ARTIFACTS: ${{ runner.temp }}/artifacts
+          SEQ: ${{ github.run_number }}
+        run: |
+          nix run --inputs-from . rpi#rpi-ci -- commit --artifacts "$ARTIFACTS" --message "pi: build $SEQ ($GITHUB_EVENT_NAME)" >> "$GITHUB_OUTPUT"

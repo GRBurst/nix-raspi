@@ -18,19 +18,19 @@ usage() {
 usage: rpi-ci <command> [ARGS...]
 
 commands:
-  hosts       the Pi hosts (lib.mkPi) of the flake    -> hosts=<JSON array>
-  build       lock update, guards, build of the system -> top=<store path>
-  publish     push and pin the closure to the cache
-  pointer     write the deploy pointer                  -> changed=true|false
-  commit      commit and push the lock and pointers     -> pushed=true|false
-  cache-name  the cache name from keys.nix              -> name=<cache>
+  hosts    the Pi hosts (lib.mkPi) of the flake     -> hosts=<JSON array>
+  build    lock update, guards, build of a host's system, the flake's checks
+                                                    -> top=<store path>, name=<system.name>
+  publish  push and pin the closure to the host's cache -> published=true|false
+  pointer  write the host's deploy pointer           -> changed=true|false
+  commit   commit and push the lock and pointers     -> pushed=true|false
 
 `rpi-ci <command> --help` shows a command's arguments.
 EOF
 }
 
 case "${1:-}" in
-hosts | build | publish | pointer | cache-name) script="$1" ;;
+hosts | build | publish | pointer) script="$1" ;;
 commit) script=commit-push ;;
 -h | --help) usage; exit 0 ;;
 "") usage >&2; exit 2 ;;

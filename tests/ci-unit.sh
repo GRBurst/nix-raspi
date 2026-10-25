@@ -47,12 +47,11 @@ info_cache() {
         '.name = $n | .cache = {name: $c, publicKey: $k}' <<<"$INFO0"
 }
 
-# A bare origin with one commit on main (flake.lock, keys.nix at the root);
+# A bare origin with one commit on main (flake.lock and a README at the root);
 # clone NAME gives a fresh work repo $T/NAME tracking it.
 git init -q --bare -b main "$T/origin.git"
 git init -q -b main "$T/seed"
 printf '%s\n' "$LOCK0" >"$T/seed/flake.lock"
-printf '{ user = "ssh-ed25519 AAAA test"; }\n' >"$T/seed/keys.nix"
 printf 'readme\n' >"$T/seed/README.md"
 git -C "$T/seed" add -A
 git -C "$T/seed" commit -q -m init
@@ -63,8 +62,8 @@ clone() { rm -rf "${T:?}/$1"; git clone -q "$T/origin.git" "$T/$1"; }
 # nix: host discovery eval (rl_hosts: ${MOCK_HOSTS-[]}, or rc MOCK_HOSTS_RC),
 # host info eval (rl_host_info: ${MOCK_INFO:-$INFO0}, or rc MOCK_INFO_RC),
 # the flake-checks eval (getFlake: system ${MOCK_SYS:-aarch64-linux}, check
-# names ${MOCK_CHECKS:-[]}, or rc MOCK_CHECKS_RC), cache-name eval
-# (${MOCK_CACHE_NAME-}), kernel/modules eval, path-info --closure-size (a
+# names ${MOCK_CHECKS:-[]}, or rc MOCK_CHECKS_RC), kernel/modules eval,
+# path-info --closure-size (a
 # fixed size) and --recursive (3 paths), path-info per MOCK_CACHE (hit |
 # always-miss | full-miss = miss only once nixos-raspberrypi or rpi was
 # updated in $MOCK_LOCK), flake update (sets the named inputs' revs in
@@ -83,9 +82,6 @@ case " $* " in
 *" eval "*" --expr "*getFlake*)
     if [[ -n "${MOCK_CHECKS_RC:-}" ]]; then echo "error: checks eval failed" >&2; exit "$MOCK_CHECKS_RC"; fi
     printf '{"checks":%s,"system":"%s"}\n' "${MOCK_CHECKS:-[]}" "${MOCK_SYS:-aarch64-linux}" ;;
-*" eval "*" --expr "*)
-    echo "nix-cwd $PWD" >>"$MOCK_LOG"
-    printf '%s' "${MOCK_CACHE_NAME-}" ;;
 *" eval "*".kernel.modules.outPath "*) printf '%s' "$M_DEF" ;;
 *" eval "*".kernel.outPath "*) printf '%s' "$K_DEF" ;;
 *" path-info "*"--closure-size "*) printf '%s\t  1.2 GiB\n' "${!#}" ;;
@@ -418,27 +414,11 @@ expect_eq "b-rpi fallback: no second update" 1 "$(log_count 'flake update')"
 expect_grepf "b-rpi fallback: says so" "committed lock" "$ERR"
 
 # =============================================================================
-# T7.2 ci/cache-name.sh, ci/publish.sh
+# ci/publish.sh
 # =============================================================================
-reset_log
-MOCK_CACHE_NAME='' run_cmd c1 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b"
-expect_exit "c1 no cache in keys.nix -> exit 1" 1
-expect_grepf "c1 says where to set it" "in keys.nix" "$ERR"
-expect_eq "c1 stdout empty" "" "$(cat "$OUT")"
-
-reset_log
-MOCK_CACHE_NAME=neptun-x run_cmd c2 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b"
-expect_exit "c2 cache name set" 0
-expect_eq "c2 stdout is name=<cache>" "name=neptun-x" "$(cat "$OUT")"
-expect_eq "c2 nix eval --impure --raw --expr" 1 "$(log_count '^nix eval --impure --raw --expr ')"
-expect_eq "c2 reads keys.nix of --flake DIR" 1 "$(log_count "^nix-cwd $T/b\$")"
-expect_eq "c2 the expression imports ./keys.nix" 1 "$(log_count 'import \./keys\.nix')"
-
-# (DIR defaults to the working directory since M1: r6 below.)
-
-MOCK_CACHE_NAME=$'evil\ntop=/nix/store/x' run_cmd c3 -- bash "$CI_DIR/cache-name.sh" --flake "$T/b"
-expect_exit "c3 a name that is not a cachix name -> exit 1" 1
-expect_eq "c3 stdout empty" "" "$(cat "$OUT")"
+# (ci/cache-name.sh and its tests c1-c3 are gone since T4.7: the cache is
+# per host in rpi.pull.cache, read through rl_host_info by build and
+# publish; its cases are covered by b-sub and pb1-pb5.)
 
 # --- T4.3 ci/publish.sh: the cache comes from rpi.pull.cache (host info).
 # Old u1-u3 became pb4/pb5 (the CLI changed from positional `CACHE TOP` to
@@ -956,6 +936,24 @@ expect_eq "k5 origin still unchanged" "$before" "$(origin_main)"
 run_cmd k6 -- cpush k5 --message "$MSG"
 expect_exit "k6 neither --artifacts nor PATH -> usage" 2
 
+# k7: one build job (one host) → one artifact, and download-artifact
+# extracts a lone artifact straight into its path, without the pi-HOST
+# subdirectory (actions/download-artifact v8: `artifacts.length === 1`).
+clone k7
+art "$T/k7-art" "$L1" k7a
+before="$(origin_main)"
+run_cmd k7 -- cpush k7 --artifacts "$T/k7-art" --message "$MSG"
+expect_exit "k7 one artifact extracted without a subdirectory" 0
+expect_eq "k7 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
+expect_eq "k7 one new commit on origin main" "$before" "$(git -C "$T/origin.git" rev-parse main^)"
+expect_eq "k7 the commit changes the pointer + the lock" \
+    "deploy/k7a.json flake.lock" "$(changed_files)"
+clone k7b
+art "$T/k7b-art" - k7b
+run_cmd k7b -- cpush k7b --artifacts "$T/k7b-art" --message "$MSG"
+expect_exit "k7b a lone artifact without a lock" 0
+expect_eq "k7b the commit changes the pointer" "deploy/k7b.json" "$(changed_files)"
+
 # =============================================================================
 # ci/gh.sh (annotations, groups, step summary; only under GitHub Actions)
 # =============================================================================
@@ -1007,10 +1005,13 @@ expect_exit "r1 --help" 0
 for c in hosts build publish pointer commit; do
     expect_grep "r1 --help lists $c" "^  $c " "$OUT"
 done
+expect_not_grep "r1 --help no longer lists cache-name" "cache-name" "$OUT"
 
 run_cmd r2 -- bash "$CI_DIR/rpi-ci.sh" frobnicate
 expect_exit "r2 unknown subcommand -> exit 2" 2
 expect_grepf "r2 names the unknown subcommand" "unknown command 'frobnicate'" "$ERR"
+run_cmd r2c -- bash "$CI_DIR/rpi-ci.sh" cache-name
+expect_exit "r2 cache-name is gone (the cache is per host: rpi.pull.cache) -> exit 2" 2
 run_cmd r2n -- bash "$CI_DIR/rpi-ci.sh"
 expect_exit "r2 no subcommand -> exit 2" 2
 expect_grepf "r2 no subcommand -> usage on stderr" "usage:" "$ERR"
@@ -1050,7 +1051,7 @@ expect_exit "r4 hosts unknown argument -> usage" 2
 # given; a copy of rpi-ci.sh next to stubs that log "<script> <arg>..."
 mkdir -p "$T/rci"
 cp "$CI_DIR/rpi-ci.sh" "$T/rci/"
-for s in hosts build publish pointer commit-push cache-name; do
+for s in hosts build publish pointer commit-push; do
     printf 'printf "%%s" "%s.sh" >>"$MOCK_LOG"; printf " <%%s>" "$@" >>"$MOCK_LOG"; echo >>"$MOCK_LOG"; exit "${STUB_RC:-0}"\n' \
         "$s" >"$T/rci/$s.sh"
 done
@@ -1058,7 +1059,7 @@ reset_log
 run_cmd r5 -- bash "$T/rci/rpi-ci.sh" build --x
 expect_exit "r5 build -> exit 0" 0
 expect_eq "r5 build --x execs build.sh --x" "build.sh <--x>" "$(cat "$MOCK_LOG")"
-for m in hosts:hosts publish:publish pointer:pointer commit:commit-push cache-name:cache-name; do
+for m in hosts:hosts publish:publish pointer:pointer commit:commit-push; do
     reset_log
     run_cmd "r5 ${m%%:*}" -- bash "$T/rci/rpi-ci.sh" "${m%%:*}" --message "a b" ''
     expect_eq "r5 ${m%%:*} execs ${m#*:}.sh with its arguments" "${m#*:}.sh <--message> <a b> <>" "$(cat "$MOCK_LOG")"
@@ -1073,9 +1074,6 @@ reset_log
 MOCK_HOSTS='[]' run_cmd r6h -- bash -c 'cd "$1" && bash "$2/rpi-ci.sh" hosts' _ "$T/r6" "$CI_DIR"
 expect_eq "r6 hosts without --flake uses \$PWD" 1 \
     "$(log_count "^nix eval --accept-flake-config --json $T/r6#nixosConfigurations --apply ")"
-reset_log
-MOCK_CACHE_NAME=neptun-y run_cmd r6c -- bash -c 'cd "$1" && bash "$2/cache-name.sh"' _ "$T/r6" "$CI_DIR"
-expect_eq "r6 cache-name without --flake uses \$PWD" 1 "$(log_count "^nix-cwd $T/r6\$")"
 reset_log
 MOCK_DRY="$HYB" run_cmd r6b -- bash -c 'cd "$1" && bash "$2/build.sh" --host neptun --event push' _ "$T/r6" "$CI_DIR"
 expect_exit "r6 build without --flake -> exit 0" 0
