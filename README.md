@@ -552,8 +552,12 @@ changed before merging one. The jobs run `rpi-ci` of the locked library
    `main` only): one commit of `flake.lock` and all pointers as
    `github-actions[bot]` (unsigned; one rebase and retry if `main` moved), so
    matrix jobs never push concurrently. The jobs' locks must be identical,
-   otherwise nothing is committed. A failing job leaves the pointers and the
-   Pi untouched. The same toplevel as the pointer's → no commit.
+   otherwise nothing is committed. All jobs build the commit the `hosts` job
+   saw; when `main`'s `flake.lock` changed since (a lock update pushed during
+   the build), nothing is committed either (`::error::`), so the update is
+   never reverted: the run that push started builds it. A failing job leaves
+   the pointers and the Pi untouched. The same toplevel as the pointer's → no
+   commit.
 
 The job names include the host, every step writes a summary section (host,
 nixpkgs/nvmd revisions and the lock diff, toplevel path, closure size, paths

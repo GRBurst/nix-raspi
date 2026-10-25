@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     outputs:
       hosts: ${{ steps.hosts.outputs.hosts }}
+      rev: ${{ steps.hosts.outputs.rev }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,7 +48,11 @@ jobs:
             extra-substituters = https://nixos-raspberrypi.cachix.org
             extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
       - id: hosts
-        run: nix run .#rpi-ci -- hosts >> "$GITHUB_OUTPUT"
+        # rev: the base commit of the whole run (S1): every build job
+        # builds it, the commit job refuses when main's lock moved away
+        run: |
+          echo "rev=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          nix run .#rpi-ci -- hosts >> "$GITHUB_OUTPUT"
   build:
     needs: hosts
     if: needs.hosts.outputs.hosts != '[]'
@@ -59,10 +64,11 @@ jobs:
       matrix:
         host: ${{ fromJSON(needs.hosts.outputs.hosts) }}
     steps:
-      # Always build main, whatever ref triggered the run.
+      # Always build main, whatever ref triggered the run: the commit the
+      # hosts job saw, the same in every build job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ needs.hosts.outputs.rev }}
           fetch-depth: 0
       # install-nix-action makes the runner user a trusted Nix user
       # (set_as_trusted_user defaults to true), so rpi-ci build can add the
@@ -114,7 +120,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
   # One commit of the lock and all pointers, only when every build job
-  # succeeded (needs); the locks of all jobs must be identical.
+  # succeeded (needs); the locks of all jobs must be identical, and main's
+  # lock must still be the one the run built (else a lock change pushed
+  # during the build would be reverted: refused).
   commit:
     needs: [hosts, build]
     if: github.ref == 'refs/heads/main'
@@ -138,7 +146,8 @@ jobs:
             extra-trusted-public-keys = nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=
       - id: commit
         env:
+          BASE: ${{ needs.hosts.outputs.rev }}
           ARTIFACTS: ${{ runner.temp }}/artifacts
           SEQ: ${{ github.run_number }}
         run: |
-          nix run .#rpi-ci -- commit --artifacts "$ARTIFACTS" --message "pi: build $SEQ ($GITHUB_EVENT_NAME)" >> "$GITHUB_OUTPUT"
+          nix run .#rpi-ci -- commit --base "$BASE" --artifacts "$ARTIFACTS" --message "pi: build $SEQ ($GITHUB_EVENT_NAME)" >> "$GITHUB_OUTPUT"

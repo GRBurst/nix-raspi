@@ -176,6 +176,11 @@ actions SHA-pinned + dependabot (as now).
      naming the secret, job fails.
 3. `commit` (one job, after the matrix): one commit of `flake.lock` and all
    `deploy/<host>.json`, so matrix jobs never push concurrently.
+   *Amended 2026-10-25 (final review S1):* `hosts` outputs the run's base
+   commit, every build job checks it out, and `rpi-ci commit --base` refuses
+   (`::error::`, no commit) when main's `flake.lock` differs from the base's,
+   also after the rebase of a rejected push: a lock change pushed during the
+   build is never reverted.
 
 Feedback in the GitHub UI:
 

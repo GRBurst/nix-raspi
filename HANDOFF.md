@@ -230,7 +230,7 @@ Evidence in `nixos/.scratch/m7/` (untracked). Still valid except where noted.
 - **D11** Pointer file, pin name and `rpi-ci pointer --host` key on `config.system.name` (the hostname), not the attribute name.
 - **D12** `rpi-ci` = `ci/rpi-ci.sh` dispatcher over the scripts; every CI script defaults `--flake` to `$PWD`; package layout `$out/libexec/rpi-ci/{ci/*.sh,rpi-lib.sh,rpi-fp.sh}`.
 - **D13** CI substitutes from the host's cache through `--option extra-substituters/extra-trusted-public-keys` in `rpi-ci build` (needs a trusted runner user: install-nix-action's default); `cachix-action` dropped. Risk R3, verified only locally.
-- **D14** Each matrix job updates the lock itself; `rpi-ci commit --artifacts DIR` requires all locks byte-identical, else `::error::` and no commit; the commit job runs only when every build succeeded.
+- **D14** Each matrix job updates the lock itself; `rpi-ci commit --artifacts DIR` requires all locks byte-identical, else `::error::` and no commit; the commit job runs only when every build succeeded. All jobs build the hosts job's `rev`; `rpi-ci commit --base REV` refuses when main's lock differs from REV's (final review S1).
 - **D15** Build jobs `permissions: contents: read`; only the commit job writes.
 - **D16** `rpi-ci build` also builds every `checks.<system>` of the flake after the toplevel (none: a notice).
 - **D17** `ci/gh.sh`: notices, warnings, errors, groups and summaries only under `GITHUB_ACTIONS=true` (plain `rpi-ci: <level>: …` on stderr otherwise); messages are escaped.

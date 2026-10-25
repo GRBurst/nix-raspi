@@ -864,6 +864,9 @@ art() {
     for n in "$@"; do put_pointer "$d/deploy/$n.json" 40 "$TOP"; done
 }
 changed_files() { git -C "$T/origin.git" diff-tree --no-commit-id --name-only -r main | sort | xargs; }
+# head_of REPO: the commit REPO's work tree is on (the build's base when
+# nothing moved main in between)
+head_of() { git -C "$T/$1" rev-parse HEAD; }
 
 clone k1
 L0="$(cat "$T/k1/flake.lock")" L1="$(cat "$T/k1/flake.lock")"$'\nupdate k1'
@@ -871,7 +874,7 @@ art "$T/k1-art/pi-a" "$L1" a
 art "$T/k1-art/pi-b" "$L1" b
 before="$(origin_main)" SUM="$T/k1-summary.md"
 GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" \
-    run_cmd k1 -- cpush k1 --artifacts "$T/k1-art" --message "$MSG"
+    run_cmd k1 -- cpush k1 --base "$(head_of k1)" --artifacts "$T/k1-art" --message "$MSG"
 expect_exit "k1 two artifacts, same updated lock" 0
 expect_eq "k1 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
 expect_eq "k1 one new commit on origin main" "$before" "$(git -C "$T/origin.git" rev-parse main^)"
@@ -887,7 +890,7 @@ expect_grepf "k1 summary names the pushed files" "deploy/a.json" "$SUM"
 clone k1b
 art "$T/k1b-art/pi-c" "$L1" c
 art "$T/k1b-art/pi-d" "$L1"
-run_cmd k1b -- cpush k1b --artifacts "$T/k1b-art" --message "$MSG"
+run_cmd k1b -- cpush k1b --base "$(head_of k1b)" --artifacts "$T/k1b-art" --message "$MSG"
 expect_exit "k1b lock as on main" 0
 expect_eq "k1b the commit changes only the pointer" "deploy/c.json" "$(changed_files)"
 
@@ -895,7 +898,7 @@ clone k2
 art "$T/k2-art/pi-a" "$L1" k2a
 art "$T/k2-art/pi-b" "$L0"$'\nupdate other' k2b
 before="$(origin_main)"
-run_cmd k2 -- cpush k2 --artifacts "$T/k2-art" --message "$MSG"
+run_cmd k2 -- cpush k2 --base "$(head_of k2)" --artifacts "$T/k2-art" --message "$MSG"
 expect_exit "k2 locks differ between hosts -> 1" 1
 expect_grepf "k2 says the lock differs between hosts" "lock differs between hosts" "$ERR"
 expect_eq "k2 stdout empty" "" "$(cat "$OUT")"
@@ -905,16 +908,16 @@ expect_eq "k2 work tree untouched" "" "$(git -C "$T/k2" status --porcelain)"
 clone k3
 mkdir -p "$T/k3-art"
 before="$(origin_main)"
-run_cmd k3 -- cpush k3 --artifacts "$T/k3-art" --message "$MSG"
+run_cmd k3 -- cpush k3 --base "$(head_of k3)" --artifacts "$T/k3-art" --message "$MSG"
 expect_exit "k3 empty artifacts dir" 0
 expect_eq "k3 stdout is pushed=false" "pushed=false" "$(cat "$OUT")"
 expect_eq "k3 origin unchanged" "$before" "$(origin_main)"
-run_cmd k3m -- cpush k3 --artifacts "$T/k3-missing" --message "$MSG"
+run_cmd k3m -- cpush k3 --base "$(head_of k3)" --artifacts "$T/k3-missing" --message "$MSG"
 expect_exit "k3 missing artifacts dir -> 1" 1
 
 clone k4
 art "$T/k4-art/pi-e" "$L0"$'\nupdate k4'
-run_cmd k4 -- cpush k4 --artifacts "$T/k4-art" --message "$MSG"
+run_cmd k4 -- cpush k4 --base "$(head_of k4)" --artifacts "$T/k4-art" --message "$MSG"
 expect_exit "k4 lock-only artifact (no cache, updated lock)" 0
 expect_eq "k4 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
 expect_eq "k4 the commit changes only the lock" "flake.lock" "$(changed_files)"
@@ -923,14 +926,14 @@ clone k5
 art "$T/k5-art/pi-a" "$L0" a
 art "$T/k5-art/pi-b" "$L0" a
 before="$(origin_main)"
-run_cmd k5 -- cpush k5 --artifacts "$T/k5-art" --message "$MSG"
+run_cmd k5 -- cpush k5 --base "$(head_of k5)" --artifacts "$T/k5-art" --message "$MSG"
 expect_exit "k5 one pointer name in two artifacts -> 1" 1
 expect_grepf "k5 names the pointer" "deploy/a.json" "$ERR"
 expect_eq "k5 origin unchanged" "$before" "$(origin_main)"
 rm -rf "$T/k5-art/pi-b"
 art "$T/k5-art/pi-b" "$L0"
 put_pointer "$T/k5-art/pi-b/deploy/a b.json" 40 "$TOP"
-run_cmd k5b -- cpush k5 --artifacts "$T/k5-art" --message "$MSG"
+run_cmd k5b -- cpush k5 --base "$(head_of k5)" --artifacts "$T/k5-art" --message "$MSG"
 expect_exit "k5 a pointer that is not deploy/NAME.json -> 1" 1
 expect_eq "k5 origin still unchanged" "$before" "$(origin_main)"
 run_cmd k6 -- cpush k5 --message "$MSG"
@@ -942,7 +945,7 @@ expect_exit "k6 neither --artifacts nor PATH -> usage" 2
 clone k7
 art "$T/k7-art" "$L1" k7a
 before="$(origin_main)"
-run_cmd k7 -- cpush k7 --artifacts "$T/k7-art" --message "$MSG"
+run_cmd k7 -- cpush k7 --base "$(head_of k7)" --artifacts "$T/k7-art" --message "$MSG"
 expect_exit "k7 one artifact extracted without a subdirectory" 0
 expect_eq "k7 stdout is pushed=true" "pushed=true" "$(cat "$OUT")"
 expect_eq "k7 one new commit on origin main" "$before" "$(git -C "$T/origin.git" rev-parse main^)"
@@ -950,9 +953,72 @@ expect_eq "k7 the commit changes the pointer + the lock" \
     "deploy/k7a.json flake.lock" "$(changed_files)"
 clone k7b
 art "$T/k7b-art" - k7b
-run_cmd k7b -- cpush k7b --artifacts "$T/k7b-art" --message "$MSG"
+run_cmd k7b -- cpush k7b --base "$(head_of k7b)" --artifacts "$T/k7b-art" --message "$MSG"
 expect_exit "k7b a lone artifact without a lock" 0
 expect_eq "k7b the commit changes the pointer" "deploy/k7b.json" "$(changed_files)"
+
+# k8 (final review S1): the build jobs built --base (lock L0); the commit
+# job checks out main later. A lock change pushed to main in between must
+# not be reverted by the artifacts' lock: refused, origin keeps it.
+clone k8b0
+base="$(head_of k8b0)" L0="$(cat "$T/k8b0/flake.lock")"
+other k8o flake.lock
+L2="$(git -C "$T/origin.git" show main:flake.lock)"
+for upd in updated unchanged; do
+    rm -rf "$T/k8-art"
+    if [[ $upd == updated ]]; then art "$T/k8-art/pi-a" "$L0"$'\nupdate k8' k8a; else art "$T/k8-art/pi-a" "$L0" k8a; fi
+    clone k8
+    before="$(origin_main)" SUM="$T/k8-summary.md"
+    GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="$SUM" \
+        run_cmd k8 -- cpush k8 --base "$base" --artifacts "$T/k8-art" --message "$MSG"
+    expect_exit "k8 ($upd lock) main's lock changed since the base -> 1" 1
+    expect_grep "k8 ($upd lock) ::error:: says the lock changed during the build" \
+        '^::error::flake.lock on main changed during the build' "$ERR"
+    expect_eq "k8 ($upd lock) origin unchanged" "$before" "$(origin_main)"
+    expect_eq "k8 ($upd lock) origin keeps its lock" "$L2" "$(git -C "$T/origin.git" show main:flake.lock)"
+    expect_eq "k8 ($upd lock) stdout empty" "" "$(cat "$OUT")"
+    expect_eq "k8 ($upd lock) work tree untouched" "" "$(git -C "$T/k8" status --porcelain)"
+done
+# main moved, but not its lock: the commit goes on top
+clone k8c
+base="$(head_of k8c)"
+other k8r README
+art "$T/k8c-art/pi-a" "$(cat "$T/k8c/flake.lock")"$'\nupdate k8c' k8c
+clone k8c
+upstream="$(origin_main)"
+run_cmd k8c -- cpush k8c --base "$base" --artifacts "$T/k8c-art" --message "$MSG"
+expect_exit "k8 main moved without a lock change -> commits" 0
+expect_eq "k8 on top of main" "$upstream" "$(git -C "$T/origin.git" rev-parse main^)"
+expect_eq "k8 the lock and the pointer" "deploy/k8c.json flake.lock" "$(changed_files)"
+# the race inside the job: the lock changes on main after the check, before
+# the push (a pre-push hook pushes it once): the push is rejected and the
+# rebase must not merge the two locks (they may not conflict textually)
+clone k8d
+base="$(head_of k8d)"
+art "$T/k8d-art/pi-a" "$(cat "$T/k8d/flake.lock")"$'\nupdate k8d' k8d
+clone k8h
+cat >"$T/k8d/.git/hooks/pre-push" <<EOF
+#!$(command -v bash)
+[[ -e "$T/k8d-raced" ]] && exit 0
+touch "$T/k8d-raced"
+sed -i '1i race' "$T/k8h/flake.lock"
+git -C "$T/k8h" commit -q -am race
+git -C "$T/k8h" push -q origin main
+EOF
+chmod 755 "$T/k8d/.git/hooks/pre-push"
+run_cmd k8d -- cpush k8d --base "$base" --artifacts "$T/k8d-art" --message "$MSG"
+expect_true "k8 race: the hook ran" test -e "$T/k8d-raced"
+expect_exit "k8 race: lock changed before the push -> 1" 1
+expect_grepf "k8 race: says the lock changed during the build" "flake.lock on main changed during the build" "$ERR"
+expect_eq "k8 race: origin has the racing lock" "$(cat "$T/k8h/flake.lock")" "$(git -C "$T/origin.git" show main:flake.lock)"
+
+clone k9
+art "$T/k9-art/pi-a" "$L0" k9a
+run_cmd k9 -- cpush k9 --artifacts "$T/k9-art" --message "$MSG"
+expect_exit "k9 --artifacts without --base -> usage" 2
+run_cmd k9b -- cpush k9 --base 0123456789abcdef0123456789abcdef01234567 --artifacts "$T/k9-art" --message "$MSG"
+expect_exit "k9 --base not a commit -> 1" 1
+expect_grepf "k9 names the base" "0123456789abcdef0123456789abcdef01234567" "$ERR"
 
 # =============================================================================
 # ci/gh.sh (annotations, groups, step summary; only under GitHub Actions)

@@ -3,7 +3,7 @@
 # ci/commit-push.sh — commit the given paths (flake.lock, the pointers) as
 # github-actions[bot] and push them to main of `origin`.
 #
-#   ci/commit-push.sh --message MSG [--artifacts DIR] [PATH...]
+#   ci/commit-push.sh --message MSG [--base REV --artifacts DIR] [PATH...]
 #
 # - Runs only for GITHUB_REF=refs/heads/main (a run dispatched from another
 #   branch must never push to main).
@@ -16,6 +16,12 @@
 #   copied or pushed); a pointer name may come from one artifact only. The
 #   lock and every pointer are copied into the work tree and committed with
 #   the PATHs.
+# - --base REV (required with --artifacts): the commit the build jobs built
+#   (the hosts job's rev). This job checks out main later; when main's
+#   flake.lock differs from REV's, a lock change landed during the build and
+#   the artifacts' lock would silently revert it: refused (exit 1, nothing
+#   copied or pushed; the run of that change builds it). Checked again
+#   after a rebase, which would merge two locks that need not conflict.
 # - Paths that do not exist are skipped; nothing changed → `pushed=false`.
 # - Commits are unsigned (an unattended job cannot sign). A rejected push
 #   (main moved on) rebases once (`git pull --rebase origin main`) and
@@ -35,18 +41,19 @@ source "$HERE/gh.sh"
 BOT_NAME='github-actions[bot]'
 BOT_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
 
-usage() { echo "usage: ci/commit-push.sh --message MSG [--artifacts DIR] [PATH...]"; }
+usage() { echo "usage: ci/commit-push.sh --message MSG [--base REV --artifacts DIR] [PATH...]"; }
 # summary LINE...: this step's summary section (GitHub Actions only)
 summary() { { echo "## commit"; echo; printf '%s\n' "$@"; echo; } | gh_summary; }
 die() { gh_error "$*"; summary "- failed: $*"; exit 1; }
 die_usage() { echo "ci/commit-push.sh: $1" >&2; usage >&2; exit 2; }
 
-msg="" art="" paths=()
+msg="" art="" base="" paths=()
 while (($#)); do
     case "$1" in
-    --message | --artifacts) (($# >= 2)) || die_usage "$1 needs a value" ;;&
+    --message | --artifacts | --base) (($# >= 2)) || die_usage "$1 needs a value" ;;&
     --message) msg="$2"; shift 2 ;;
     --artifacts) art="$2"; shift 2 ;;
+    --base) base="$2"; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     -*) die_usage "unknown option '$1'" ;;
     *) paths+=("$1"); shift ;;
@@ -54,10 +61,20 @@ while (($#)); do
 done
 [[ -n "$msg" ]] || die_usage "missing --message"
 [[ -n "$art" ]] || ((${#paths[@]})) || die_usage "neither --artifacts nor a PATH given"
+[[ -z "$art" || -n "$base" ]] || die_usage "--artifacts needs --base REV (the commit the build jobs built)"
 
 ref="${GITHUB_REF:-}"
 [[ "$ref" == refs/heads/main ]] ||
     die "refusing to push: GITHUB_REF='$ref' is not refs/heads/main"
+
+# lock_moved REF: REF's flake.lock differs from --base's (none: never)
+lock_moved() { [[ -n "$base" ]] && ! git diff --quiet "$base" "$1" -- flake.lock; }
+lock_moved_msg="flake.lock on main changed during the build (since $base): nothing committed; the run of that change builds and publishes it"
+if [[ -n "$base" ]]; then
+    git rev-parse -q --verify "$base^{commit}" >/dev/null ||
+        die "--base $base is not a commit of this checkout"
+    ! lock_moved HEAD || die "$lock_moved_msg"
+fi
 
 # The artifacts: check all of them before copying anything.
 if [[ -n "$art" ]]; then
@@ -121,6 +138,7 @@ if ! git push origin HEAD:main >&2; then
         git rebase --abort >&2 || true
         die "rebase onto origin/main failed (conflict?); nothing pushed"
     fi
+    ! lock_moved FETCH_HEAD || die "$lock_moved_msg"
     git push origin HEAD:main >&2 || die "push failed after the rebase"
 fi
 summary "- pushed \`$(git rev-parse --short HEAD)\` to main: $files"

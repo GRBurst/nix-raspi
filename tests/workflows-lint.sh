@@ -76,6 +76,22 @@ for w in "$ours" "$tpl"; do
   before "$commit" "actions/download-artifact@" "rpi-ci -- commit" ||
     fail "$w: the commit job does not commit the downloaded artifacts"
 
+  # S1 (final review): one base commit for the run. The hosts job names it,
+  # every build job checks it out, the commit job refuses when main's
+  # flake.lock moved away from it (rpi-ci commit --base).
+  # shellcheck disable=SC2016 # literal GitHub expressions
+  { printf '%s\n' "$hosts" | grep -qxF '      rev: ${{ steps.hosts.outputs.rev }}' &&
+    printf '%s\n' "$hosts" | step hosts | grep -qF 'echo "rev=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"'; } ||
+    fail "$w: the hosts job does not output the run's base commit (rev)"
+  # shellcheck disable=SC2016
+  [ "$(printf '%s\n' "$build" | grep -cE '^ +ref: ')" = 1 ] &&
+    printf '%s\n' "$build" | grep -qxF '          ref: ${{ needs.hosts.outputs.rev }}' ||
+    fail "$w: the build jobs do not check out the hosts job's rev"
+  # shellcheck disable=SC2016
+  { printf '%s\n' "$commit" | step commit | grep -qxF '          BASE: ${{ needs.hosts.outputs.rev }}' &&
+    printf '%s\n' "$commit" | step commit | grep -qF 'rpi-ci -- commit --base "$BASE" '; } ||
+    fail "$w: the commit job does not pass the build's base (--base) to rpi-ci commit"
+
   for j in hosts commit; do
     job "$w" $j | grep -qxF "$main_only" || fail "$w: job $j is not guarded to refs/heads/main"
   done
