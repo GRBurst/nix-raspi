@@ -4,8 +4,13 @@
 #        networkd runs DHCP on the wireless link (NixOS's default wireless
 #        network, networking.useDHCP). PSKs never enter the store (it goes
 #        to a public cache and is world-readable on the Pi): each network's
-#        pskRaw is `ext:<VAR>`, VAR=<psk> lines live in rpi.wifi.secretsFile
-#        (root 0600), written by `rpi-deploy secrets` / `flash --wifi-env`.
+#        pskRaw is `ext:<VAR>`, VAR=<psk> lines live in rpi.wifi.secretsFile,
+#        written by `rpi-deploy secrets` / `flash --wifi-env`. nixpkgs 26.05
+#        runs wpa_supplicant as the user wpa_supplicant without a DAC
+#        override (networking.wireless.enableHardening), so a tmpfiles `z`
+#        rule hands the file to that user, mode 0600: at every boot (a card
+#        written by `flash --wifi-env` has no such user yet), on a switch
+#        that adds the rule, and right after `secrets` writes the file.
 # The Pi 3 Wi-Fi/Bluetooth firmware (nvmd's raspberrypiWirelessFirmware,
 # cached with nvmd's kernel) is listed at priority 49 so it beats
 # rpi.sdWear's `hardware.firmware = mkForce [ ]` (50).
@@ -35,7 +40,11 @@ in
       # A string, never a Nix path (a path would be copied into the store).
       type = lib.types.strMatching "/.+";
       default = "/var/lib/rpi/wireless.env";
-      description = "Root-only (0600) file on the Pi with the `VAR=<psk>` lines.";
+      description = ''
+        File on the Pi with the `VAR=<psk>` lines, outside the store, owned
+        by the wpa_supplicant user (the daemon's), mode 0600; a tmpfiles
+        rule sets both.
+      '';
     };
   };
 
@@ -51,7 +60,13 @@ in
         networks = lib.mapAttrs (_ssid: var: { pskRaw = "ext:${var}"; }) cfg.networks;
       };
       hardware.firmware = lib.mkOverride 49 [ firmware ];
-      systemd.tmpfiles.rules = [ "d /var/lib/rpi 0700 root root -" ];
+      systemd.tmpfiles.rules = [
+        "d /var/lib/rpi 0700 root root -"
+        # the daemon reads the file as this user through a read-only bind
+        # mount (the 0700 directory is not in the way); `rpi-deploy
+        # secrets` applies the rule with systemd-tmpfiles --prefix=<file>
+        "z ${cfg.secretsFile} 0600 wpa_supplicant wpa_supplicant -"
+      ];
     })
   ];
 }

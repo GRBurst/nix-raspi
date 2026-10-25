@@ -42,7 +42,8 @@ Usage:
            pull state: the applied pointer seq and its age, and the last
            rpi-pull run (result, exit code, time) from /var/lib/rpi-pull
   secrets  write the host's Wi-Fi secrets file (rpi.wifi.secretsFile, mode
-           600) on the Pi over ssh, then restart wpa_supplicant if it runs:
+           600, handed to the wpa_supplicant user by the host's tmpfiles
+           rule) on the Pi over ssh, then restart wpa_supplicant if it runs:
            one VAR=PSK line per variable named in rpi.wifi.networks, the
            values from the environment (e.g. secretspec run -- rpi-deploy
            secrets); a value is never printed or put on a command line
@@ -189,7 +190,11 @@ wifi_env_content() {
 
 # secrets: the Wi-Fi secrets file onto the Pi through ssh's stdin. The
 # directory is created 0700 only when missing (install -d would chmod an
-# existing one, e.g. /etc); try-restart leaves a stopped unit stopped.
+# existing one, e.g. /etc). The file is written root 0600, then the
+# module's tmpfiles rule (z FILE 0600 wpa_supplicant ...) hands it to the
+# daemon's user; without Wi-Fi deployed yet there is no rule (and no such
+# user) and the next switch applies it. try-restart leaves a stopped unit
+# stopped.
 do_secrets() {
     local file content
     load_info
@@ -199,7 +204,7 @@ do_secrets() {
     log "writing $file (600) on $RL_TARGET (port $RL_SSH_PORT)"
     # \n: $(...) dropped the last line's newline
     printf '%s\n' "$content" |
-        rl_ssh "mkdir -p -m 700 ${file%/*} && install -m 600 /dev/stdin $file && systemctl try-restart wpa_supplicant.service" ||
+        rl_ssh "mkdir -p -m 700 ${file%/*} && install -m 600 /dev/stdin $file && systemd-tmpfiles --create --prefix=$file && systemctl try-restart wpa_supplicant.service" ||
         die_rc "$RL_E_DEPLOY" "writing $file on $RL_TARGET failed"
     echo "secrets: $file written on $RL_TARGET; wpa_supplicant restarted if it was running"
 }
@@ -329,7 +334,9 @@ flash_umount() {
 }
 
 # flash_wifi DEV FILE CONTENT: after the verify, write CONTENT (the Wi-Fi
-# secrets file) as FILE (root:root 600) into DEV's root partition 2
+# secrets file) as FILE (root:root 600; the card has no wpa_supplicant
+# user yet: the module's tmpfiles rule hands the file to it at the first
+# boot, before wpa_supplicant starts) into DEV's root partition 2
 # (/dev/sdb -> /dev/sdb2, /dev/mmcblk0 -> /dev/mmcblk0p2). udev re-reads
 # the partition table when dd closes the device; wait for the node. CONTENT
 # reaches install through its stdin only. The card is unmounted on failure.
@@ -358,7 +365,7 @@ flash_wifi() {
     trap - EXIT
     ((rc == 0)) || die "writing $file onto $part failed; the Wi-Fi secrets were not written"
     ((urc == 0)) || die "$file was written onto $part, but the card is still mounted"
-    echo "wifi: $file written onto $part"
+    echo "wifi: $file written onto $part (root 0600; the first boot hands it to wpa_supplicant)"
 }
 
 # flash IMAGE DEVICE [--wifi-env]

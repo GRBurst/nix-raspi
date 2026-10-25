@@ -1,7 +1,7 @@
 # rpi.wifi (spec §4, §7 "Wi-Fi on"; plan T2.4, D9, P6): off by default (the
 # disable-wifi overlay stays); on: overlay gone, wpa_supplicant with PSKs
-# from a root-only file outside the store (`ext:<VAR>`), the Pi 3 wireless
-# firmware despite rpi.sdWear. Evaluated on the fixture host through
+# from a file outside the store (`ext:<VAR>`) that only the daemon's user
+# reads (B1), the Pi 3 wireless firmware despite rpi.sdWear. Evaluated on the fixture host through
 # lib.mkPi; never forces the toplevel.
 { lib, rpiLib, fixtures, nvmd, ... }:
 let
@@ -28,6 +28,27 @@ let
   firmware = sys: lib.concatLists sys.options.hardware.firmware.definitions;
   fw = nvmd.packages.aarch64-linux.raspberrypiWirelessFirmware;
   rejects = v: !(builtins.tryEval (builtins.deepSeq v v)).success;
+
+  # B1 (final review): nixpkgs 26.05 runs wpa_supplicant as its own user
+  # (networking.wireless.enableHardening, default on) without a DAC
+  # override, and ext_password_backend=file: opens the secrets file as that
+  # user. tmpfilesFor SYS FILE: the fields of the `z FILE ...` rules.
+  tmpfilesFor = sys: f:
+    map (r: lib.filter (s: s != "") (lib.splitString " " r))
+      (lib.filter (lib.hasPrefix "z ${f} ") sys.config.systemd.tmpfiles.rules);
+  # readableOnlyBy SYS: exactly one `z` rule hands rpi.wifi.secretsFile to
+  # the user the service runs as, mode 0600 (nobody else, not even the
+  # group: users in wpa_supplicant may control the daemon, not read PSKs).
+  readableOnlyBy = sys:
+    let
+      sc = sys.config.systemd.services.wpa_supplicant.serviceConfig;
+      rules = tmpfilesFor sys sys.config.rpi.wifi.secretsFile;
+      r = lib.head rules;
+    in
+    lib.length rules == 1
+    && lib.elemAt r 2 == "0600"
+    && lib.elemAt r 3 == sc.User && lib.elemAt r 4 == sc.Group;
+  etcFile = mk [ { rpi.wifi = { enable = true; inherit networks; secretsFile = "/etc/wifi.env"; }; } ];
 in
 {
   "off: disable-wifi overlay on, no wpa_supplicant, firmware list empty" =
@@ -55,6 +76,12 @@ in
   "on: Pi 3 wireless firmware despite rpi.sdWear" =
     oc.rpi.sdWear.enable
     && map (p: p.outPath) (firmware on) == [ fw.outPath ];
+
+  "secretsFile is readable by the wpa_supplicant service user (and only by it)" =
+    oc.systemd.services.wpa_supplicant.serviceConfig.User == "wpa_supplicant"
+    && readableOnlyBy on
+    && readableOnlyBy etcFile
+    && tmpfilesFor t off.rpi.wifi.secretsFile == [ ];
 
   "/var/lib/rpi is a 0700 root dir" =
     lib.elem "d /var/lib/rpi 0700 root root -" oc.systemd.tmpfiles.rules;

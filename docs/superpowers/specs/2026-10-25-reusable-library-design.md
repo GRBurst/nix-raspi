@@ -96,7 +96,7 @@ option that users set directly (`networking.hostName` default `"rpi"`,
 | `rpi.ssh.port` | `22` | sshd port; password auth off; root `prohibit-password` (push deploy logs in as root) |
 | `rpi.network.mode` | `"dhcp"` | `"static"` uses `rpi.network.static.{address (CIDR), gateway, dns ? []}`; networkd, matches any wired `ether` |
 | `rpi.wifi.enable` | `false` | drops the `disable-wifi` overlay, wpa_supplicant via networkd (DHCP on wlan) |
-| `rpi.wifi.networks` | `{}` | SSID → PSK variable name; PSKs from `rpi.wifi.secretsFile` (default `/var/lib/rpi/wireless.env`, root 0600) |
+| `rpi.wifi.networks` | `{}` | SSID → PSK variable name; PSKs from `rpi.wifi.secretsFile` (default `/var/lib/rpi/wireless.env`, 0600, owned by the `wpa_supplicant` user: amended 2026-10-25, final review B1) |
 | `rpi.bluetooth.enable` | `false` | drops the `disable-bt` overlay, `hardware.bluetooth.enable` |
 | `rpi.headless.enable` | `true` | gpu_mem 16, no KMS, audio, camera/display detection (no longer touches Wi-Fi/Bluetooth) |
 | `rpi.profiles.terminal.enable` | `false` | home-manager + nix-terminal for `rpi.admin.user`, zsh login shell |
@@ -136,6 +136,12 @@ pre-generated host key at flash time; possible later extension).
   then `systemctl try-restart` of the wpa_supplicant unit.
 - Missing PSK variable → exit 2 naming the variable; values never printed or
   passed on a command line.
+- *Amended 2026-10-25 (final review B1):* NixOS 26.05 runs wpa_supplicant
+  as the user `wpa_supplicant` without a DAC override, so `rpi.wifi` adds a
+  tmpfiles rule `z <secretsFile> 0600 wpa_supplicant wpa_supplicant`.
+  `secrets` applies it right after `install` (`systemd-tmpfiles --create
+  --prefix=<file>`); `flash --wifi-env` still writes root 0600 (the card has
+  no such user yet) and the first boot applies the rule.
 
 devenv: `secretspec.toml` declares the PSK variables of the example host;
 `devenv.local.nix.example` shows `RPI_HOST`, `RPI_TARGET`, `RPI_PORT`;

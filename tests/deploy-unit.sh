@@ -1181,8 +1181,12 @@ expect_grep "sc1 ssh to the host's target and port" "^ssh -p $INFO_PORT $INFO_TA
 expect_grepf "sc1 installs stdin as the secrets file, mode 600" "install -m 600 /dev/stdin /var/lib/rpi/wireless.env" "$MOCK_LOG"
 expect_grepf "sc1 restarts wpa_supplicant if running" "systemctl try-restart wpa_supplicant.service" "$MOCK_LOG"
 expect_grepf "sc1 creates the directory 0700 only if missing" "mkdir -p -m 700 /var/lib/rpi &&" "$MOCK_LOG"
-expect_true "sc1 order: dir, install, restart" grep -qE \
-    'mkdir -p -m 700 /var/lib/rpi && install -m 600 /dev/stdin /var/lib/rpi/wireless.env && systemctl try-restart wpa_supplicant\.service$' "$MOCK_LOG"
+# B1: wpa_supplicant runs as its own user; the module's tmpfiles rule
+# (z FILE 0600 wpa_supplicant ...) hands the file over, applied right away
+expect_grepf "sc1 applies the module's tmpfiles rule to the file" \
+    "systemd-tmpfiles --create --prefix=/var/lib/rpi/wireless.env" "$MOCK_LOG"
+expect_true "sc1 order: dir, install, tmpfiles, restart" grep -qE \
+    'mkdir -p -m 700 /var/lib/rpi && install -m 600 /dev/stdin /var/lib/rpi/wireless.env && systemd-tmpfiles --create --prefix=/var/lib/rpi/wireless\.env && systemctl try-restart wpa_supplicant\.service$' "$MOCK_LOG"
 expect_not_grep "sc1 never chmods an existing directory (install -d)" "install -d" "$MOCK_LOG"
 expect_eq "sc1 the host info is evaluated once" 1 "$(log_count "$INFO_RE")"
 leaked=$((leaked + $(leaks)))
@@ -1338,6 +1342,9 @@ expect_true "fw1 order: verify < mount < install < umount" test \
     "$(first_line '^sudo install ')" -lt "$(first_line '^sudo umount ')"
 expect_true "fw1 the mount point is removed" test ! -e "$M"
 expect_grepf "fw1 the card can be removed" "done: the card can be removed" "$OUT"
+# B1: the card has no wpa_supplicant user yet; tmpfiles hands it over at boot
+expect_grepf "fw1 says the first boot hands the file to wpa_supplicant" \
+    "the first boot hands it to wpa_supplicant" "$OUT"
 expect_eq "fw1 the host info is evaluated once" 1 "$(log_count "$INFO_RE")"
 fwleaked=$((fwleaked + $(leaks)))
 

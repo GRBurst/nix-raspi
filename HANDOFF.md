@@ -237,7 +237,7 @@ Evidence in `nixos/.scratch/m7/` (untracked). Still valid except where noted.
 - **D18** The pointer gains `bootFp` (sha256 of the boot fingerprint); the summary says switch, reboot or unknown; `rpi-pull` ignores unknown fields.
 - **D19** Ours `.github/workflows/pi.yml` = the template's with `nix run .#rpi-ci` for `nix run --inputs-from . rpi#rpi-ci`; asserted textually (`actionlint` check).
 - **D20** Push trigger `paths-ignore: ["deploy/**", "docs/**", "**.md"]`.
-- **D21** PSKs reach `rpi-deploy` as env variables; the content goes over stdin (`ssh … install -m 600 /dev/stdin`, `sudo install … /dev/stdin`), never a temp file or argv.
+- **D21** PSKs reach `rpi-deploy` as env variables; the content goes over stdin (`ssh … install -m 600 /dev/stdin`, `sudo install … /dev/stdin`), never a temp file or argv. The module's tmpfiles rule hands the file to the `wpa_supplicant` user (final review B1).
 - **D22** Template: `hosts/rpi.nix`, `nixosConfigurations.rpi`, input named `rpi`, re-exports `apps` and `packages`, copies our `nixConfig`, minimal devenv files.
 - **D23** `personal-values` scans the library paths (`lib/ modules/ templates/ ci/ .github/ rpi-*.sh devenv.nix devenv.yaml secretspec.toml devenv.local.nix.example`) and `flake.nix` minus the lines wiring neptun in; the library URL is allowed.
 - **D24** The `actionlint` check body lives in `tests/workflows-lint.sh`.
@@ -436,7 +436,7 @@ Needs the Pi, a card ≥ 8 GiB, the LAN cable, ideally a 3.3 V USB-UART on GPIO
 - [ ] Wi-Fi: a host with `rpi.wifi.enable = true; rpi.wifi.networks = { "<ssid>" = "RPI_WIFI_HOME"; };`,
       `secretspec run -- rpi-deploy secrets` (or `flash … --wifi-env`):
       `iw dev wlan0 link` shows the association, `ip -4 addr show wlan0` an
-      address, `ls -l /var/lib/rpi/wireless.env` is `-rw------- root`; the PSK
+      address, `ls -l /var/lib/rpi/wireless.env` is `-rw------- wpa_supplicant wpa_supplicant`; the PSK
       appears nowhere under `/nix/store` (`grep -r` the toplevel closure).
       `dmesg | grep -i brcmfmac` shows the firmware loading.
 - [ ] Bluetooth: `rpi.bluetooth.enable = true;`: `bluetoothctl show` lists a

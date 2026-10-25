@@ -221,7 +221,7 @@ with a default from the library: `networking.hostName` (`"rpi"`),
 | `rpi.network.static.dns`                 | `[ ]`                             | with `mode = "static"`: DNS servers                                                                             |
 | `rpi.wifi.enable`                        | `false`                           | drops the `disable-wifi` overlay, wpa_supplicant via networkd (DHCP on wlan)                                    |
 | `rpi.wifi.networks`                      | `{ }`                             | SSID → name of the variable holding its PSK; PSKs come from `rpi.wifi.secretsFile`, never from the store        |
-| `rpi.wifi.secretsFile`                   | `"/var/lib/rpi/wireless.env"`     | root-only (0600) file on the Pi with the `VAR=PSK` lines                                                        |
+| `rpi.wifi.secretsFile`                   | `"/var/lib/rpi/wireless.env"`     | file on the Pi with the `VAR=PSK` lines, mode 0600, owned by the wpa_supplicant user                            |
 | `rpi.bluetooth.enable`                   | `false`                           | drops the `disable-bt` overlay, `hardware.bluetooth.enable`                                                     |
 | `rpi.headless.enable`                    | `true`                            | gpu_mem 16, no KMS, no audio, no camera/display detection (does not touch Wi-Fi/Bluetooth)                      |
 | `rpi.profiles.terminal.enable`           | `false`                           | home-manager + [nix-terminal](https://github.com/grburst/nix-terminal) for `rpi.admin.user`, zsh as login shell |
@@ -279,10 +279,12 @@ rpi.wifi = {
 ```
 
 The passwords never enter the Nix store (it is world-readable on the Pi and
-goes to your cache). They live in a root-only file on the Pi,
+goes to your cache). They live in a file on the Pi,
 `rpi.wifi.secretsFile` (default `/var/lib/rpi/wireless.env`, one `VAR=PSK`
-line per network, mode 0600), which wpa_supplicant reads (`pskRaw =
-"ext:VAR"`). You give the values to `rpi-deploy` through the environment of one
+line per network), which wpa_supplicant reads (`pskRaw = "ext:VAR"`). Since
+NixOS 26.05 the daemon runs as the user `wpa_supplicant`, so a tmpfiles rule
+of the library makes the file `0600 wpa_supplicant:wpa_supplicant` at every
+boot and switch. You give the values to `rpi-deploy` through the environment of one
 command; a [SecretSpec](https://secretspec.dev) provider (keyring, dotenv,
 1Password, … `secretspec config init`) is the intended source. Declare the
 variable in `secretspec.toml` (the repo has one, the template too), then:
@@ -292,8 +294,11 @@ secretspec run -- rpi-deploy flash IMAGE DEVICE --wifi-env   # into the card, at
 secretspec run -- rpi-deploy secrets                          # later, into the running Pi
 ```
 
-`secrets` writes the file over ssh (`install -m 600`, content on stdin) and
-restarts wpa_supplicant if it runs. A variable that is missing or contains a
+`secrets` writes the file over ssh (`install -m 600`, content on stdin),
+applies that tmpfiles rule (`systemd-tmpfiles --create --prefix=<file>`) and
+restarts wpa_supplicant if it runs. `flash --wifi-env` writes it `root 0600`
+(the card has no `wpa_supplicant` user yet); the first boot hands it over
+before wpa_supplicant starts. A variable that is missing or contains a
 newline fails the command with exit 2 naming the variable; nothing is written
 and a value is never printed or put on a command line. With the dotenv
 provider, quote values that contain spaces or `$` with single quotes:
