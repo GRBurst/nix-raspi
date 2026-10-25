@@ -212,16 +212,18 @@ wifi_env_content() {
 # try-restart would leave it stopped; only when the Pi has the unit (Wi-Fi
 # deployed), so `secrets` may run before or after the deploy.
 do_secrets() {
-    local file content unit=wpa_supplicant.service restart
+    local file dir content unit=wpa_supplicant.service restart
     load_info
     file="$(wifi_secrets_file)" || exit
     content="$(wifi_env_content)" || exit
+    dir="${file%/*}" # /x -> '' -> /
+    dir="${dir:-/}"
     resolve_target
     restart="if systemctl cat $unit >/dev/null 2>&1; then systemctl restart $unit; fi"
     log "writing $file (600) on $RL_TARGET (port $RL_SSH_PORT)"
     # \n: $(...) dropped the last line's newline
     printf '%s\n' "$content" |
-        rl_ssh "mkdir -p -m 700 ${file%/*} && install -m 600 /dev/stdin $file && systemd-tmpfiles --create --prefix=$file && $restart" ||
+        rl_ssh "mkdir -p -m 700 $dir && install -m 600 /dev/stdin $file && systemd-tmpfiles --create --prefix=$file && $restart" ||
         die_rc "$RL_E_DEPLOY" "writing $file on $RL_TARGET failed"
     echo "secrets: $file written on $RL_TARGET; wpa_supplicant (re)started if the Pi has it"
 }

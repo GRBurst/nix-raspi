@@ -1255,6 +1255,15 @@ expect_not_grep "sc1 never chmods an existing directory (install -d)" "install -
 expect_eq "sc1 the host info is evaluated once" 1 "$(log_count "$INFO_RE")"
 leaked=$((leaked + $(leaks)))
 
+# sc13 a file directly below / (allowed by the option type): the directory
+# operand is /, never empty (mkdir with no operand fails on the Pi; N4)
+reset_log
+MOCK_INFO="$(wifi_info "$NETS" true /wireless.env)" run_cmd sc13 -- rd secrets
+expect_exit "sc13 secretsFile /wireless.env succeeds" 0
+expect_grepf "sc13 mkdir gets / as its operand" \
+    "mkdir -p -m 700 / && install -m 600 /dev/stdin /wireless.env &&" "$MOCK_LOG"
+leaked=$((leaked + $(leaks)))
+
 # two SSIDs sharing a variable -> one line; line order = sort of the lines
 # (RPI_W1=... sorts before RPI_W=...)
 export RPI_W=S3cr3tH0me1 RPI_W1=S3cr3tH0me2
