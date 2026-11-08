@@ -1,8 +1,8 @@
 {
-  "seq": 5,
-  "storePath": "/nix/store/1xf404pr8jadkimz90zpd03vgvdd6dpr-nixos-system-neptun-26.05.20261031.fa13731",
-  "narHash": "sha256-Bm595YuvZzvX2uXwjrVsHAuxvY0sUO9Uf7Z5JblhckA=",
-  "rev": "7b2cd3957919ca7daefca7b5c4bea599b8979db3",
-  "built": "2026-11-01T06:24:04Z",
+  "seq": 6,
+  "storePath": "/nix/store/l5wysfxgmjnqczr9ivaldrb0fpwdw965-nixos-system-neptun-26.05.20261105.c56a87d",
+  "narHash": "sha256-tBLAX7sVw9ARq6+CPKESCicuGVWs9mxx+rWFMM+p8pw=",
+  "rev": "48447c559d20adbd298f45e1c73c54737d68b488",
+  "built": "2026-11-08T06:17:23Z",
   "bootFp": "8e815828a0e692d5a8bd43396470ae044fc6e06fbb44d79a81453522708a037f"
 }
