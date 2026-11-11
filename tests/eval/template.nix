@@ -93,6 +93,13 @@ in
     localExampleOk ../../devenv.local.nix.example rpiFlake
     && localExampleOk ../../templates/default/devenv.local.nix.example tpl;
 
+  # The shell pulls the nvmd kernel cache (a bare `nix build` does not
+  # accept the flake's nixConfig), and never a personal cache: those belong
+  # in the gitignored devenv.local.nix (appended by the module system).
+  "devenv.nix (root, template) pulls exactly the nvmd kernel cache" =
+    lib.all (f: (devenvModule f).cachix.pull or [ ] == [ "nixos-raspberrypi" ])
+      [ ../../devenv.nix ../../templates/default/devenv.nix ];
+
   # devenv itself cannot run in the sandbox; the module is evaluated here
   # with a fake devenv config instead.
   "devenv.nix (root, template): RPI_FLAKE is the repo root, cachix and secretspec in the shell, no package twice" =

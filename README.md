@@ -702,7 +702,11 @@ always agree.
    (nowhere in the repo), and a write token of the cache as
    **`CACHIX_AUTH_TOKEN`**. A Cachix-managed key is not enough: whoever holds the
    auth token could then sign arbitrary content. These are the only secrets CI
-   needs, and they exist only as GitHub Actions secrets.
+   needs, and they exist only as GitHub Actions secrets. The `devenv shell`
+   already pulls from the nvmd kernel cache by default (`cachix.pull` in
+   `devenv.nix`); to also pull from the CI cache (or from your own cache on a
+   template), add it to `devenv.local.nix` (see `devenv.local.nix.example`) —
+   a cache that does not exist yet breaks `devenv shell`.
 3. **Host module:** `rpi.pull.repo = "<owner>/<repo>"; rpi.pull.cache = { name =
    "<cache>"; publicKey = "<cache>.cachix.org-1:…"; };` (the public key from the
    Cachix dashboard). Commit and push to `main`.

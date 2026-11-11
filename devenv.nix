@@ -29,6 +29,15 @@
     mtools # mcopy
   ];
 
+  # Pull from the nvmd cache (the vendor kernel: never compiled locally —
+  # the flake's nixConfig only applies to builds that accept it, a bare
+  # `nix build` in this shell would not). Any other cache (this repo's CI
+  # cache, yours) is added in devenv.local.nix, which the module system
+  # appends to this list; a cache that does not exist breaks `devenv shell`
+  # setup, so only the public, permanent cache is listed here.
+  # The shell only pulls; CI publishes.
+  cachix.pull = [ "nixos-raspberrypi" ];
+
   # rpi-deploy needs no --flake (what rpi.buildHost.flakePath does on a host).
   env.RPI_FLAKE = config.devenv.root;
 

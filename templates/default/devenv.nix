@@ -12,6 +12,14 @@
     secretspec
   ];
 
+  # Pull from the nvmd cache (the vendor kernel: never compiled locally —
+  # the flake's nixConfig only applies to builds that accept it, a bare
+  # `nix build` in this shell would not). Your own cache goes into
+  # devenv.local.nix once it exists (devenv.local.nix.example shows where);
+  # the module system appends it to this list. The shell only pulls; CI
+  # publishes.
+  cachix.pull = [ "nixos-raspberrypi" ];
+
   # rpi-deploy needs no --flake: it finds this repository.
   env.RPI_FLAKE = config.devenv.root;
 

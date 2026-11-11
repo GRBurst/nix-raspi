@@ -16,4 +16,13 @@
     # RPI_TARGET = "root@192.168.1.20";
     # RPI_PORT = "22";
   };
+
+  # Your own Cachix cache, once it exists (the README setup steps): local
+  # aarch64 builds (rpi-deploy image, the qemu smokes) then fetch the closure
+  # instead of compiling it under binfmt. The module system appends this to
+  # the list in devenv.nix (the nvmd kernel cache); a cache that does not
+  # exist yet breaks `devenv shell` setup. To drop an entry instead, use
+  # lib.mkForce with the whole list. The shell only pulls; CI publishes
+  # (no cachix.watch).
+  # cachix.pull = [ "<your-cache>" ];
 }
